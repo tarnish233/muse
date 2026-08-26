@@ -171,67 +171,106 @@ struct RenderEngine {
 
     // MARK: - marker 显隐（纯计算，供协调器 diff 后写属性）
 
+    /// marker 的三种显示状态（Typora 模式）：
+    /// - `.revealed`：回显源码标记（光标所在行/块内）；
+    /// - `.hidden`：折叠隐藏（近零宽 + 透明），行内标记与引用/围栏/分隔线标记用；
+    /// - `.ghost`：保留宽度的隐形（列表/任务标记）——内容位置不变，
+    ///   图形符号（圆点/序号/复选框）由 BlockBackgroundPainter 在同一位置绘制。
+    enum MarkerState: Equatable {
+        case revealed
+        case hidden
+        case ghost
+    }
+
     struct VisibilityEntry {
         let line: Int
         /// marker 起点相对所在行起点的字节偏移（稳定身份：插入字符不改变它）。
         let markerRelOffset: Int
         let markerNS: NSRange
-        let revealed: Bool
+        let state: MarkerState
     }
 
     /// 纯函数：给定 package 与选区，计算所有 marker 的显隐状态。不触碰 storage。
     func computedVisibility(package: Package, selection: NSRange?) -> [VisibilityEntry] {
-        func makeEntries(_ token: Token, revealed: Bool) -> [VisibilityEntry] {
+        func makeEntries(_ token: Token, state: MarkerState) -> [VisibilityEntry] {
             token.allMarkerRanges.map { range in
                 VisibilityEntry(
                     line: token.line,
                     markerRelOffset: range.lowerBound - package.lineStarts[token.line],
                     markerNS: package.index.nsRange(range),
-                    revealed: revealed
+                    state: state
                 )
             }
         }
 
+        func defaultState(_ token: Token) -> MarkerState {
+            guard token.isBlockMarker else { return .hidden }
+            switch token.kind {
+            case .unorderedListItem, .orderedListItem, .taskListItem:
+                return .ghost
+            default:
+                return .hidden
+            }
+        }
+
         guard let selection else {
-            // 无选区（textView 未挂接的初始渲染窗口）：结构标记保持可见，
-            // 只有依赖光标的标记（heading #、行内语法）先按隐藏写，挂接后由 refresh 修正。
-            return package.tokens.flatMap { makeEntries($0, revealed: $0.isAlwaysVisibleMarker) }
+            // 无选区（textView 未挂接的初始渲染窗口）：块级标记先按"未回显"写，
+            // 挂接后由 refreshMarkerVisibility 按真实光标修正。
+            return package.tokens.flatMap { makeEntries($0, state: defaultState($0)) }
         }
         let caretLine = lineIndex(atUTF16: selection.location, package: package)
 
         return package.tokens.flatMap { token in
-            let revealed: Bool
-            if token.isAlwaysVisibleMarker {
-                revealed = true // 列表/任务/引用/围栏：结构性标记永远可见
-            } else if token.isBlockMarker {
-                revealed = token.line == caretLine // heading：光标行显示 #
+            let state: MarkerState
+            if token.isBlockMarker {
+                let onCaret: Bool
+                if token.kind == .codeFence {
+                    onCaret = tokenLineRange(token, package: package).contains(caretLine) // 光标在围栏块任意行
+                } else {
+                    onCaret = token.line == caretLine
+                }
+                state = onCaret ? .revealed : defaultState(token)
             } else {
                 let markerNS = package.index.nsRange(token.markerRange)
                 let contentNS = token.contentRange.map(package.index.nsRange) ?? markerNS
                 let closingNS = token.closingMarkerRange.map(package.index.nsRange)
-                revealed = touches(markerNS, selection: selection)
+                let revealed = touches(markerNS, selection: selection)
                     || (closingNS.map { touches($0, selection: selection) } ?? false)
                     || touches(contentNS, selection: selection)
+                state = revealed ? .revealed : .hidden
             }
-            return makeEntries(token, revealed: revealed)
+            return makeEntries(token, state: state)
         }
     }
 
     /// 显隐相关属性表（协调器 diff 后写入）。
     static func markerVisibilityAttributes(revealed: Bool) -> [NSAttributedString.Key: Any] {
+        markerVisibilityAttributes(state: revealed ? .revealed : .hidden)
+    }
+
+    static func markerVisibilityAttributes(state: MarkerState) -> [NSAttributedString.Key: Any] {
         let theme = Theme.standard
-        if revealed {
+        switch state {
+        case .revealed:
             return [
                 .font: theme.revealedMarkerFont(),
                 .foregroundColor: theme.markerText,
                 .backgroundColor: NSColor.clear,
             ]
+        case .hidden:
+            return [
+                .font: theme.hiddenMarkerFont(),
+                .foregroundColor: NSColor.clear,
+                .backgroundColor: NSColor.clear,
+            ]
+        case .ghost:
+            // 宽度保留（15pt mono）、颜色透明：图形符号由绘制层在同位置画出。
+            return [
+                .font: theme.revealedMarkerFont(),
+                .foregroundColor: NSColor.clear,
+                .backgroundColor: NSColor.clear,
+            ]
         }
-        return [
-            .font: theme.hiddenMarkerFont(),
-            .foregroundColor: NSColor.clear,
-            .backgroundColor: NSColor.clear,
-        ]
     }
 
     // MARK: - 样式
@@ -276,9 +315,14 @@ struct RenderEngine {
 
         case .unorderedListItem, .orderedListItem:
             storage.addAttributes([.paragraphStyle: theme.listParagraph()], range: wholeLine)
+            storage.addAttributes(
+                [.museBlock: BlockVisual.list.rawValue + (token.kind == .orderedListItem ? ":o" : ":u")],
+                range: wholeLine
+            )
 
         case .taskListItem:
             storage.addAttributes([.paragraphStyle: theme.listParagraph()], range: wholeLine)
+            storage.addAttributes([.museBlock: BlockVisual.list.rawValue + ":t"], range: wholeLine)
             // [ ] / [x] 用代码字体区分（点击切换留到 M4）。
             storage.addAttributes([.font: theme.codeFont()], range: index.nsRange(token.markerRange))
 
@@ -364,7 +408,7 @@ struct RenderEngine {
     private func applyVisibility(package: Package, selection: NSRange?, into storage: NSTextStorage, forceAll: Bool) {
         let entries = computedVisibility(package: package, selection: selection)
         for entry in entries {
-            storage.addAttributes(Self.markerVisibilityAttributes(revealed: entry.revealed), range: entry.markerNS)
+            storage.addAttributes(Self.markerVisibilityAttributes(state: entry.state), range: entry.markerNS)
         }
     }
 

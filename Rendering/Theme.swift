@@ -7,6 +7,8 @@ enum BlockVisual: String {
     case quote
     case codeFence
     case rule
+    /// 列表（含任务）：值带后缀 ":u"（无序）/":o"（有序）/":t"（任务）。
+    case list
 }
 
 extension NSAttributedString.Key {

@@ -68,20 +68,27 @@ import Testing
         #expect(font(at: 5, in: storage) == theme.revealedMarkerFont()) // 第二行 "## " 起点（utf16）
     }
 
-    @Test func structuralMarkersAlwaysVisible() {
-        // 列表/任务/引用/围栏是结构性标记：不随光标隐藏（用户反馈的"1./- 没显示"修复）
+    @Test func structuralMarkersFollowCaret() {
+        // Typora 模式：结构标记只在光标所在行/块内回显；列表/任务在光标行外为
+        // ghost（保留宽度的透明，图形符号由绘制层画）；引用/围栏折叠隐藏。
         let source = "- 甲\n1. 乙\n- [ ] 丙\n> 引\n```\n代码\n```"
         let storage = NSTextStorage(string: source)
         let package = engine.prepare(source)
-        // 光标放在围栏内的"代码"行——列表/任务/引用/围栏标记仍应可见
-        let caret = (source as NSString).range(of: "代码").location // utf16 24
+        let caret = (source as NSString).range(of: "代码").location // utf16 25
         _ = engine.render(package: package, selection: NSRange(location: caret, length: 0), into: storage)
 
-        #expect(font(at: 0, in: storage) == theme.revealedMarkerFont())   // "- "
-        #expect(font(at: 4, in: storage) == theme.revealedMarkerFont())   // "1. "
-        #expect(font(at: 9, in: storage) == theme.revealedMarkerFont())   // "- [ ] " 起点
-        #expect(font(at: 17, in: storage) == theme.revealedMarkerFont())  // "> "
-        #expect(font(at: 21, in: storage) == theme.revealedMarkerFont())  // ```
+        func colorAlpha(_ at: Int) -> CGFloat {
+            ((storage.attribute(.foregroundColor, at: at, effectiveRange: nil) as? NSColor)?.cgColor.alpha ?? 1)
+        }
+        // 围栏：光标在块内 → 开栏符回显（有色）
+        #expect(font(at: 21, in: storage) == theme.revealedMarkerFont())
+        #expect(colorAlpha(21) > 0)
+        // 列表/任务：光标不在行上 → ghost（回显字号 + 透明）
+        #expect(font(at: 0, in: storage) == theme.revealedMarkerFont())
+        #expect(colorAlpha(0) == 0)
+        #expect(colorAlpha(9) == 0) // "- [ ] " 起点
+        // 引用：折叠隐藏
+        #expect(isHidden(17, in: storage))
     }
 
     @Test func markerVisibilityFollowsSelection() {
@@ -197,7 +204,7 @@ import Testing
         func block(_ at: Int) -> String? {
             storage.attribute(.museBlock, at: at, effectiveRange: nil) as? String
         }
-        #expect(block(3) == nil)                    // 普通列表行：无块属性
+        #expect(block(3) == "list:u")                         // 列表行整行带块标记
         #expect(block(5) == BlockVisual.quote.rawValue)      // "> " 行首（utf16 5）
         #expect(block(6) == BlockVisual.quote.rawValue)      // 引用内容
         #expect(block(10) == BlockVisual.codeFence.rawValue) // 开栏行

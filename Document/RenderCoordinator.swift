@@ -21,7 +21,7 @@ final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageDelegate
     /// 自上一次属性应用以来累计的字符编辑数。
     /// 为 0 时 lastPackage 与正文一致，光标流可安全使用；>0 时包已过期，只做增量。
     private var editsSinceApply = 0
-    private var revealCache: [RevealKey: Bool] = [:]
+    private var revealCache: [RevealKey: RenderEngine.MarkerState] = [:]
     private let clock = ContinuousClock()
 
     /// 最近一次已应用渲染对应的文本 revision（测试与状态展示用）。
@@ -156,7 +156,7 @@ final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageDelegate
         forceLines: ClosedRange<Int>?
     ) {
         let entries = engine.computedVisibility(package: package, selection: selection)
-        var newCache: [RevealKey: Bool] = [:]
+        var newCache: [RevealKey: RenderEngine.MarkerState] = [:]
         var firstWrite = true
         var writeCount = 0
 
@@ -164,16 +164,16 @@ final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageDelegate
             let key = RevealKey(line: entry.line, relOffset: entry.markerRelOffset)
             let cached = revealCache[key]
             let forced = forceLines?.contains(entry.line) == true
-            if forced || cached != entry.revealed {
+            if forced || cached != entry.state {
                 if firstWrite {
                     storage.beginEditing() // 批处理：一次编辑会话内写完全部翻转
                     firstWrite = false
                 }
-                storage.addAttributes(RenderEngine.markerVisibilityAttributes(revealed: entry.revealed),
+                storage.addAttributes(RenderEngine.markerVisibilityAttributes(state: entry.state),
                                       range: entry.markerNS)
                 writeCount += 1
             }
-            newCache[key] = entry.revealed
+            newCache[key] = entry.state
         }
         if !firstWrite {
             storage.endEditing()

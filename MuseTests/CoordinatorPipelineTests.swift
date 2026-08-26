@@ -126,9 +126,10 @@ import Testing
         #expect(storage.attribute(.backgroundColor, at: codeRange.location, effectiveRange: nil) == nil)
     }
 
-    /// 结构标记的"应用路径"验证：不走 engine.render 直路，而是与 App 完全一致——
+    /// 结构标记的光标行回显（Typora 模式）：与 App 完全一致的路径——
     /// 编辑回调 → 后台解析 → applyDirty + reconcileVisibility（forceLines）。
-    @Test func structuralMarkersVisibleThroughCoordinatorPath() async {
+    /// 不在光标行的列表/任务标记为 ghost（透明保宽），围栏/引用折叠。
+    @Test func structuralMarkersFollowCaretThroughCoordinatorPath() async {
         let source = SampleMarkdown.text
         let storage = NSTextStorage(string: source)
         let coordinator = RenderCoordinator()
@@ -141,18 +142,27 @@ import Testing
         func font(_ at: Int) -> NSFont? {
             storage.attribute(.font, at: at, effectiveRange: nil) as? NSFont
         }
-        // 有序列表 "1. "（示例第 18 行附近）+ 无序 "- " + 围栏反引号：都应是常显 mono 15
+        func alpha(_ at: Int) -> CGFloat {
+            ((storage.attribute(.foregroundColor, at: at, effectiveRange: nil) as? NSColor)?.cgColor.alpha ?? 1)
+        }
+        let revealedFont = RenderEngine.markerVisibilityAttributes(revealed: true)[.font] as? NSFont
+
+        // 打开后光标在文档末尾：列表标记 ghost（回显字号 + 透明），围栏折叠
         let ordered = (source as NSString).range(of: "1. 有序列表第一项")
-        #expect(font(ordered.location) == RenderEngine.markerVisibilityAttributes(revealed: true)[.font] as? NSFont)
-        let unordered = (source as NSString).range(of: "- [x] 已完成任务")
-        #expect(font(unordered.location) == RenderEngine.markerVisibilityAttributes(revealed: true)[.font] as? NSFont)
+        #expect(font(ordered.location) == revealedFont)
+        #expect(alpha(ordered.location) == 0)
         let fence = (source as NSString).range(of: "```swift")
-        #expect(font(fence.location) == RenderEngine.markerVisibilityAttributes(revealed: true)[.font] as? NSFont)
+        #expect((font(fence.location)?.pointSize ?? 100) < 1)
         // 标题 # 不随光标（光标在末尾 → 隐藏）
         let heading = (source as NSString).range(of: "# Muse · M0 技术验证")
         let caret = NSRange(location: storage.length - 1, length: 0)
         coordinator.updateMarkerVisibility(selection: caret, into: storage)
         #expect((font(heading.location)?.pointSize ?? 100) < 1)
+
+        // 光标移到有序列表行 → 标记回显（有色）
+        coordinator.updateMarkerVisibility(selection: NSRange(location: ordered.location, length: 0), into: storage)
+        #expect(font(ordered.location) == revealedFont)
+        #expect(alpha(ordered.location) > 0)
     }
 
     /// 插入围栏闭合符：围栏结束，原"围栏到 EOF"的段落行要清掉旧代码背景（陈旧样式扫描）。
@@ -199,19 +209,18 @@ import Testing
         let string = storage.string as NSString
         let markerFont = RenderEngine.markerVisibilityAttributes(revealed: true)[.font] as? NSFont
 
-        // 新列表行：marker 常显 mono；内容恢复正文样式（不被列表样式污染）
+        // 新列表行：marker ghost（回显字号 + 透明，图形符号由绘制层画）
         let newList = string.range(of: "- 新列表项")
         #expect(newList.location != NSNotFound)
         #expect(storage.attribute(.font, at: newList.location, effectiveRange: nil) as? NSFont == markerFont)
         let listContent = string.range(of: "新列表项")
         #expect(storage.attribute(.foregroundColor, at: listContent.location, effectiveRange: nil) != nil)
 
-        // 新引用行：引用背景存在
+        // 新引用行：引用背景存在；marker 在光标行外折叠
         let quote = string.range(of: "新引用")
         #expect(quote.location != NSNotFound)
         #expect(storage.attribute(.backgroundColor, at: quote.location, effectiveRange: nil) != nil)
-        // 引用 marker 常显
-        #expect(storage.attribute(.font, at: quote.location - 2, effectiveRange: nil) as? NSFont == markerFont)
+        #expect((storage.attribute(.font, at: quote.location - 2, effectiveRange: nil) as? NSFont)?.pointSize ?? 100 < 1)
 
         // 新围栏：代码字体 + 背景覆盖围栏体
         let code = string.range(of: "let x = 1")

@@ -181,6 +181,42 @@ import Testing
         #expect(storage.string == source)
         let paragraph = storage.attribute(.paragraphStyle, at: 5, effectiveRange: nil) as? NSParagraphStyle
         #expect(paragraph?.paragraphSpacing == 10)
+        // 块标记随样式写入，绘制层据此画真实横线
+        #expect(storage.attribute(.museBlock, at: 5, effectiveRange: nil) as? String == BlockVisual.rule.rawValue)
+    }
+
+    // MARK: - 块级视觉标记（MuseLayoutFragment 的驱动属性）
+
+    /// .museBlock 属性必须覆盖到行首字符（绘制层按 line/element 起点读取）。
+    @Test func blockMarkersCoverLineStarts() {
+        let source = "- 列表\n> 引用\n```\ncode\n```\n\n---"
+        let storage = NSTextStorage(string: source)
+        let package = engine.prepare(source)
+        _ = engine.render(package: package, selection: NSRange(location: 0, length: 0), into: storage)
+
+        func block(_ at: Int) -> String? {
+            storage.attribute(.museBlock, at: at, effectiveRange: nil) as? String
+        }
+        #expect(block(3) == nil)                    // 普通列表行：无块属性
+        #expect(block(5) == BlockVisual.quote.rawValue)      // "> " 行首（utf16 5）
+        #expect(block(6) == BlockVisual.quote.rawValue)      // 引用内容
+        #expect(block(10) == BlockVisual.codeFence.rawValue) // 开栏行
+        #expect(block(14) == BlockVisual.codeFence.rawValue) // 围栏体
+        #expect(block(19) == BlockVisual.codeFence.rawValue) // 闭栏行
+        #expect(block(24) == BlockVisual.rule.rawValue)      // 分隔线（空白行之后）
+    }
+
+    /// 列表悬挂缩进：marker 在行首、换行从 24pt 缩进（Typora 视觉）。
+    @Test func listParagraphHasHangingIndent() {
+        let source = "- 长列表项内容" + String(repeating: "足够长到可以换行，", count: 20)
+        let storage = NSTextStorage(string: source)
+        let package = engine.prepare(source)
+        _ = engine.render(package: package, selection: NSRange(location: 0, length: 0), into: storage)
+
+        // 段落样式覆盖整行（含 marker）：NSTextStorage 的段落修复不会把它修回 base
+        let paragraph = storage.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle
+        #expect(paragraph?.headIndent == 24)
+        #expect(paragraph?.firstLineHeadIndent == 0)
     }
 
     /// 字形特征断言：NSFontManager.convert 产出的字体在 descriptor 里可能不报字重，

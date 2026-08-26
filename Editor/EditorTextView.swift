@@ -43,4 +43,11 @@ final class EditorTextView: NSTextView {
         textView.textContainerInset = NSSize(width: 20, height: 16)
         return textView
     }
+
+    /// 块级视觉（引用通宽背景+左竖线、代码块通宽背景、分隔线横线）：
+    /// 在字形绘制之前画出块背景（见 BlockBackgroundPainter）。
+    override func draw(_ dirtyRect: NSRect) {
+        BlockBackgroundPainter.drawBlockBackgrounds(in: dirtyRect, textView: self)
+        super.draw(dirtyRect)
+    }
 }

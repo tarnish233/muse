@@ -1,5 +1,18 @@
 import AppKit
 
+/// 块级视觉标记：渲染引擎把它作为自定义属性写入整行/整块范围，
+/// 布局层的 MuseLayoutFragment 据此决定绘制内容（引用竖线、通宽背景、分隔线横线）。
+/// 与样式状态严格一致（随属性应用写、随脏带重置清）。
+enum BlockVisual: String {
+    case quote
+    case codeFence
+    case rule
+}
+
+extension NSAttributedString.Key {
+    static let museBlock = NSAttributedString.Key("museBlock")
+}
+
 /// 主题：字体与配色。亮/暗跟随系统外观（动态 NSColor）。
 struct Theme {
     let text: NSColor
@@ -95,6 +108,10 @@ struct Theme {
     func listParagraph() -> NSMutableParagraphStyle {
         let p = baseParagraph()
         p.paragraphSpacing = 3
+        // 悬挂缩进（Typora 视觉）：marker 在行首，换行对齐内容列。
+        // 首行从 0 开始（"- " 占据行首），后续行从 24pt 缩进。
+        p.firstLineHeadIndent = 0
+        p.headIndent = 24
         return p
     }
 

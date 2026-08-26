@@ -179,6 +179,48 @@ import Testing
         #expect(storage.attribute(.backgroundColor, at: newPRange.location, effectiveRange: nil) == nil)
     }
 
+    /// 用户报告场景：在文档末尾（截图之后）输入新的列表/引用/围栏，走完整编辑管线。
+    /// 增量应用必须覆盖新输入的块语法行——结构与样式不能被"只重置脏带"漏掉。
+    @Test func typedNewBlocksAtEndRenderThroughPipeline() async {
+        let source = "正文第一段\n\n末段"
+        let storage = NSTextStorage(string: source)
+        let coordinator = RenderCoordinator()
+        coordinator.attach(storage: storage)
+        coordinator.onTextEdited = {}
+
+        storage.replaceCharacters(in: NSRange(location: 0, length: storage.length), with: source) // 初始渲染
+        #expect(await waitForApplied(coordinator, atLeast: 1))
+
+        // 用户输入：在文档末尾追加列表/引用/围栏
+        let typed = "\n- 新列表项\n> 新引用\n```\nlet x = 1\n```"
+        storage.replaceCharacters(in: NSRange(location: storage.length, length: 0), with: typed)
+        #expect(await waitForApplied(coordinator, atLeast: 2))
+
+        let string = storage.string as NSString
+        let markerFont = RenderEngine.markerVisibilityAttributes(revealed: true)[.font] as? NSFont
+
+        // 新列表行：marker 常显 mono；内容恢复正文样式（不被列表样式污染）
+        let newList = string.range(of: "- 新列表项")
+        #expect(newList.location != NSNotFound)
+        #expect(storage.attribute(.font, at: newList.location, effectiveRange: nil) as? NSFont == markerFont)
+        let listContent = string.range(of: "新列表项")
+        #expect(storage.attribute(.foregroundColor, at: listContent.location, effectiveRange: nil) != nil)
+
+        // 新引用行：引用背景存在
+        let quote = string.range(of: "新引用")
+        #expect(quote.location != NSNotFound)
+        #expect(storage.attribute(.backgroundColor, at: quote.location, effectiveRange: nil) != nil)
+        // 引用 marker 常显
+        #expect(storage.attribute(.font, at: quote.location - 2, effectiveRange: nil) as? NSFont == markerFont)
+
+        // 新围栏：代码字体 + 背景覆盖围栏体
+        let code = string.range(of: "let x = 1")
+        #expect(code.location != NSNotFound)
+        #expect(storage.attribute(.backgroundColor, at: code.location, effectiveRange: nil) != nil)
+        // 字符不受渲染影响
+        #expect(storage.string == source + typed)
+    }
+
     /// P1-4：插入字符不破坏 marker diff 的稳定身份。
     /// 在 200KB 文档开头插入一个字符后，只有受影响行的 marker 被重写。
     @Test func markerDiffStableUnderFrontInsertion() async {

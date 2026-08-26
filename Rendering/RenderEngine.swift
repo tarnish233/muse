@@ -249,25 +249,36 @@ struct RenderEngine {
 
         // 无内容 token（分隔线）在 content guard 之前处理。
         if token.kind == .rule {
-            // 分隔线：标记隐藏 + 上下留白；真正的横线绘制需要自定义 layout fragment（M6+）
-            storage.addAttributes([.paragraphStyle: theme.ruleParagraph()], range: index.nsRange(token.markerRange))
+            // 分隔线：标记隐藏 + 上下留白；真实横线由 BlockBackgroundPainter 绘制。
+            storage.addAttributes([
+                .paragraphStyle: theme.ruleParagraph(),
+                .museBlock: BlockVisual.rule.rawValue,
+            ], range: index.nsRange(token.markerRange))
             return
         }
 
         guard let content = token.contentRange.map(index.nsRange) else { return }
+
+        // 段落级样式必须覆盖整行（含 marker 字符）：NSTextStorage 的段落样式修复
+        // （fixParagraphStyleAttribute）会把"同段内不一致的段落样式"统一——若 marker
+        // 字符仍带 base 样式，整段会被修回 base，悬挂缩进/引用/标题间距全部失效。
+        let wholeLine = { () -> NSRange in
+            let end = token.contentRange?.upperBound ?? token.markerRange.upperBound
+            return index.nsRange(token.markerRange.lowerBound..<end)
+        }()
 
         switch token.kind {
         case .heading(let level):
             storage.addAttributes([
                 .font: theme.titleFont(level: level),
                 .paragraphStyle: theme.headingParagraph(level: level),
-            ], range: content)
+            ], range: wholeLine)
 
         case .unorderedListItem, .orderedListItem:
-            storage.addAttributes([.paragraphStyle: theme.listParagraph()], range: content)
+            storage.addAttributes([.paragraphStyle: theme.listParagraph()], range: wholeLine)
 
         case .taskListItem:
-            storage.addAttributes([.paragraphStyle: theme.listParagraph()], range: content)
+            storage.addAttributes([.paragraphStyle: theme.listParagraph()], range: wholeLine)
             // [ ] / [x] 用代码字体区分（点击切换留到 M4）。
             storage.addAttributes([.font: theme.codeFont()], range: index.nsRange(token.markerRange))
 
@@ -276,7 +287,13 @@ struct RenderEngine {
                 .foregroundColor: theme.quoteText,
                 .paragraphStyle: theme.quoteParagraph(),
                 .backgroundColor: theme.quoteBackground,
-            ], range: content)
+            ], range: wholeLine)
+            // 块标记覆盖整行（含 "> " marker 字符）：绘制层在行首即可读到。
+            let lineEnd = token.contentRange?.upperBound ?? token.markerRange.upperBound
+            storage.addAttributes(
+                [.museBlock: BlockVisual.quote.rawValue],
+                range: index.nsRange(token.markerRange.lowerBound..<lineEnd)
+            )
 
         case .codeFence:
             // 闭栏行也纳入整块样式（开栏行用弱化色 + 背景作为语法提示，不隐藏）。
@@ -293,6 +310,7 @@ struct RenderEngine {
                 .font: theme.codeFont(),
                 .foregroundColor: theme.codeText,
                 .backgroundColor: theme.codeBackground,
+                .museBlock: BlockVisual.codeFence.rawValue,
             ], range: index.nsRange(fullRange))
             storage.addAttributes([
                 .font: theme.codeFont(),

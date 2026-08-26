@@ -246,6 +246,14 @@ struct RenderEngine {
 
     private func applyStyle(_ token: Token, package: Package, into storage: NSTextStorage) {
         let index = package.index
+
+        // 无内容 token（分隔线）在 content guard 之前处理。
+        if token.kind == .rule {
+            // 分隔线：标记隐藏 + 上下留白；真正的横线绘制需要自定义 layout fragment（M6+）
+            storage.addAttributes([.paragraphStyle: theme.ruleParagraph()], range: index.nsRange(token.markerRange))
+            return
+        }
+
         guard let content = token.contentRange.map(index.nsRange) else { return }
 
         switch token.kind {
@@ -328,6 +336,9 @@ struct RenderEngine {
                     storage.addAttributes([.link: url], range: content)
                 }
             }
+
+        case .rule:
+            break // 已在 content guard 之前处理（分隔线无内容区间）
         }
     }
 

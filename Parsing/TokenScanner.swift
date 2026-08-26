@@ -136,6 +136,32 @@ nonisolated struct TokenScanner {
 
         let b = bytes[i]
 
+        // 分隔线：--- / *** / ___ 起 ≥3 个同字符（允许中间夹空格，如 - - -），其后仅空白
+        if b == 0x2D || b == 0x2A || b == 0x5F {
+            var j = i
+            var count = 0
+            while j < line.end {
+                if bytes[j] == b {
+                    count += 1
+                    j += 1
+                } else if bytes[j] == 0x20 || bytes[j] == 0x09 {
+                    j += 1
+                } else {
+                    break
+                }
+            }
+            if count >= 3, j == line.end {
+                tokens.append(Token(
+                    kind: .rule,
+                    markerRange: i..<j,
+                    closingMarkerRange: nil,
+                    contentRange: nil,
+                    line: line.index
+                ))
+                return
+            }
+        }
+
         // ATX 标题：# 1..6 个 + 空格或行尾
         if b == 0x23 { // #
             var j = i

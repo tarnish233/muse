@@ -241,4 +241,15 @@ import Testing
         #expect(tokens.contains { $0.kind == .inlineCode })
         #expect(tokens.contains { $0.kind == .strong })
     }
+
+    @Test func thematicBreak() {
+        #expect(scanner.scan("---").first?.kind == .rule)
+        #expect(scanner.scan("- - -").first?.kind == .rule)
+        #expect(scanner.scan("***").first?.kind == .rule)
+        #expect(scanner.scan("___").first?.kind == .rule)
+        // 不足三个 / 是列表 / 后有文字 → 不是分隔线
+        #expect(scanner.scan("--").isEmpty)
+        #expect(scanner.scan("- 项").first?.kind == .unorderedListItem)
+        #expect(!scanner.scan("--- 后文").contains { $0.kind == .rule })
+    }
 }

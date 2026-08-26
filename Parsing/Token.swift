@@ -16,6 +16,7 @@ nonisolated struct Token: Equatable, Sendable {
         case inlineCode
         case strikethrough
         case link
+        case rule
     }
 
     let kind: Kind
@@ -42,7 +43,7 @@ nonisolated struct Token: Equatable, Sendable {
         switch kind {
         case .heading, .unorderedListItem, .orderedListItem, .taskListItem, .blockquote, .codeFence:
             return true
-        case .strong, .emphasis, .inlineCode, .strikethrough, .link:
+        case .strong, .emphasis, .inlineCode, .strikethrough, .link, .rule:
             return false
         }
     }
@@ -53,7 +54,7 @@ nonisolated struct Token: Equatable, Sendable {
         switch kind {
         case .unorderedListItem, .orderedListItem, .taskListItem, .blockquote, .codeFence:
             return true
-        case .heading, .strong, .emphasis, .inlineCode, .strikethrough, .link:
+        case .heading, .strong, .emphasis, .inlineCode, .strikethrough, .link, .rule:
             return false
         }
     }

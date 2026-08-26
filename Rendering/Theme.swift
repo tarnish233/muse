@@ -98,6 +98,13 @@ struct Theme {
         return p
     }
 
+    func ruleParagraph() -> NSMutableParagraphStyle {
+        let p = baseParagraph()
+        p.paragraphSpacingBefore = 10
+        p.paragraphSpacing = 10
+        return p
+    }
+
     // MARK: - 工具
 
     private static func adaptive(light: NSColor, dark: NSColor) -> NSColor {

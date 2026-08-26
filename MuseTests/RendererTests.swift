@@ -171,6 +171,18 @@ import Testing
         #expect(storage.string == source)
     }
 
+    @Test func ruleHiddenWithSpacing() {
+        let source = "上一段\n\n---\n\n下一段"
+        let storage = NSTextStorage(string: source)
+        let package = engine.prepare(source)
+        _ = engine.render(package: package, selection: NSRange(location: 0, length: 0), into: storage)
+
+        #expect(isHidden(5, in: storage)) // "---" 起始（utf16：上一段 3 + \n\n 2）
+        #expect(storage.string == source)
+        let paragraph = storage.attribute(.paragraphStyle, at: 5, effectiveRange: nil) as? NSParagraphStyle
+        #expect(paragraph?.paragraphSpacing == 10)
+    }
+
     /// 字形特征断言：NSFontManager.convert 产出的字体在 descriptor 里可能不报字重，
     /// 但 traits(of:) 能给出真实特征（Bold+Italic=3）。
     private func hasTrait(_ font: NSFont?, _ trait: NSFontTraitMask) -> Bool {

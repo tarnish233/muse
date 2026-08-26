@@ -193,7 +193,9 @@ struct RenderEngine {
         }
 
         guard let selection else {
-            return package.tokens.flatMap { makeEntries($0, revealed: false) }
+            // 无选区（textView 未挂接的初始渲染窗口）：结构标记保持可见，
+            // 只有依赖光标的标记（heading #、行内语法）先按隐藏写，挂接后由 refresh 修正。
+            return package.tokens.flatMap { makeEntries($0, revealed: $0.isAlwaysVisibleMarker) }
         }
         let caretLine = lineIndex(atUTF16: selection.location, package: package)
 
@@ -269,8 +271,15 @@ struct RenderEngine {
             ], range: content)
 
         case .codeFence:
-            // M0 简化：整块套代码样式；围栏行用弱化色 + 背景（不隐藏，作语法提示）。
-            let upper = token.contentRange?.upperBound ?? token.markerRange.upperBound
+            // 闭栏行也纳入整块样式（开栏行用弱化色 + 背景作为语法提示，不隐藏）。
+            var upper = token.contentRange?.upperBound ?? token.markerRange.upperBound
+            if let contentEnd = token.contentRange?.upperBound, contentEnd < package.index.utf8Length {
+                // 闭合行（content 终止处所在行）整行并入样式
+                let closeLine = lineIndex(atUTF8: contentEnd, package: package)
+                if closeLine + 1 < package.lineStarts.count {
+                    upper = max(upper, package.lineStarts[closeLine + 1])
+                }
+            }
             let fullRange = token.markerRange.lowerBound..<upper
             storage.addAttributes([
                 .font: theme.codeFont(),

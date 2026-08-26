@@ -126,6 +126,35 @@ import Testing
         #expect(storage.attribute(.backgroundColor, at: codeRange.location, effectiveRange: nil) == nil)
     }
 
+    /// 结构标记的"应用路径"验证：不走 engine.render 直路，而是与 App 完全一致——
+    /// 编辑回调 → 后台解析 → applyDirty + reconcileVisibility（forceLines）。
+    @Test func structuralMarkersVisibleThroughCoordinatorPath() async {
+        let source = SampleMarkdown.text
+        let storage = NSTextStorage(string: source)
+        let coordinator = RenderCoordinator()
+        coordinator.attach(storage: storage)
+        coordinator.onTextEdited = {}
+
+        storage.replaceCharacters(in: NSRange(location: 0, length: storage.length), with: source)
+        #expect(await waitForApplied(coordinator, atLeast: 1, timeoutMs: 30_000))
+
+        func font(_ at: Int) -> NSFont? {
+            storage.attribute(.font, at: at, effectiveRange: nil) as? NSFont
+        }
+        // 有序列表 "1. "（示例第 18 行附近）+ 无序 "- " + 围栏反引号：都应是常显 mono 15
+        let ordered = (source as NSString).range(of: "1. 有序列表第一项")
+        #expect(font(ordered.location) == RenderEngine.markerVisibilityAttributes(revealed: true)[.font] as? NSFont)
+        let unordered = (source as NSString).range(of: "- [x] 已完成任务")
+        #expect(font(unordered.location) == RenderEngine.markerVisibilityAttributes(revealed: true)[.font] as? NSFont)
+        let fence = (source as NSString).range(of: "```swift")
+        #expect(font(fence.location) == RenderEngine.markerVisibilityAttributes(revealed: true)[.font] as? NSFont)
+        // 标题 # 不随光标（光标在末尾 → 隐藏）
+        let heading = (source as NSString).range(of: "# Muse · M0 技术验证")
+        let caret = NSRange(location: storage.length - 1, length: 0)
+        coordinator.updateMarkerVisibility(selection: caret, into: storage)
+        #expect((font(heading.location)?.pointSize ?? 100) < 1)
+    }
+
     /// 插入围栏闭合符：围栏结束，原"围栏到 EOF"的段落行要清掉旧代码背景（陈旧样式扫描）。
     @Test func dirtyClearsStaleCodeBackgroundAfterCloserInserted() {
         // 旧文档的围栏未闭合（一直到 EOF），paragraph 在旧渲染里是代码背景

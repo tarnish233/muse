@@ -86,6 +86,7 @@ import Testing
     }
 
     @Test func chinesePositionsInRenderedStorage() {
+        // CJK 按标点类参与 flanking（有意偏离 CommonMark 词内限制），紧贴汉字可加粗
         let source = "你好**世界**"
         let storage = NSTextStorage(string: source)
         let package = engine.prepare(source)
@@ -131,6 +132,27 @@ import Testing
 
         #expect(font(at: 9, in: storage) == theme.codeFont()) // 第二行（utf16）
         #expect(storage.attribute(.backgroundColor, at: 9, effectiveRange: nil) != nil)
+    }
+
+    @Test func linkLabelStyledWithURL() {
+        let source = "[打开](https://apple.com)"
+        let storage = NSTextStorage(string: source)
+        let package = engine.prepare(source)
+        // 光标在文档末尾（utf16 总长 23）→ 链接标记隐藏
+        _ = engine.render(package: package, selection: NSRange(location: 23, length: 0), into: storage)
+
+        let url = storage.attribute(.link, at: 1, effectiveRange: nil) as? URL
+        #expect(url?.absoluteString == "https://apple.com")
+        #expect(storage.attribute(.underlineStyle, at: 1, effectiveRange: nil) != nil)
+        #expect(isHidden(0, in: storage))  // [
+        #expect(isHidden(3, in: storage))  // ] 起点（tail）
+
+        // 光标进入标签 → 语法回显
+        let coordinator = RenderCoordinator()
+        coordinator.adoptPackage(package)
+        coordinator.updateMarkerVisibility(selection: NSRange(location: 2, length: 0), into: storage)
+        #expect(font(at: 0, in: storage) == theme.revealedMarkerFont())
+        #expect(storage.string == source)
     }
 
     /// 字形特征断言：NSFontManager.convert 产出的字体在 descriptor 里可能不报字重，

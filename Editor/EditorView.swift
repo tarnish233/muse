@@ -54,5 +54,12 @@ struct EditorView: NSViewRepresentable {
                 into: document.buffer.textStorage
             )
         }
+
+        /// 点击链接：用系统浏览器打开（M2：行内链接）。
+        func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
+            guard let url = link as? URL else { return false }
+            NSWorkspace.shared.open(url)
+            return true
+        }
     }
 }

@@ -40,9 +40,13 @@ import Testing
 
         // 编辑 1：文档开头插入粗体
         storage.replaceCharacters(in: NSRange(location: 0, length: 0), with: "**X**")
-        // 编辑 2（立即）：文档中部插入粗体——第一次解析尚未应用即被取消
-        let mid = NSRange(location: storage.length / 2, length: 0)
-        storage.replaceCharacters(in: mid, with: "**Y**")
+        // 编辑 2（立即）：中部某行行首插入粗体——第一次解析尚未应用即被取消。
+        // 注意插在行首（紧随换行）：词内星号（英文单词中间）按 CommonMark 是字面量。
+        let half = storage.length / 2
+        let beforeNewline = (storage.string as NSString)
+            .range(of: "\n", options: .backwards, range: NSRange(location: 0, length: half))
+        let yPos = beforeNewline.location + 1
+        storage.replaceCharacters(in: NSRange(location: yPos, length: 0), with: "**Y**")
 
         #expect(await waitForApplied(coordinator, atLeast: 3))
 

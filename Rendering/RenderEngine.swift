@@ -32,11 +32,43 @@ struct RenderEngine {
     // MARK: - 输入（后台）
 
     nonisolated func prepare(_ source: String) -> Package {
-        Package(
-            tokens: scanner.scan(source),
-            index: SourceIndex(source),
-            lineStarts: scanner.lines(source).map(\.start)
-        )
+        // AST 先于扫描器：链接语法给出行内扫描的保护区间（URL 区域不做强调配对），
+        // 同时提供链接锚点（嵌套括号标签、平衡括号目的地的精确边界）。
+        // 守卫：文档不含 `[` 时跳过语义层（swift-markdown 全文档解析 200KB 约 90ms，
+        // 那是无链接文档的纯浪费；输入热路径的语义解析已在后台）。
+        let semantics = source.contains("[" ) ? MarkdownSemantics(source) : nil
+        let lineStarts = scanner.lines(source).map(\.start)
+        var tokens = scanner.scan(source, excludingRanges: semantics?.links.flatMap(\.inertRanges) ?? [])
+
+        if let semantics {
+            for link in semantics.links {
+                tokens.append(Token(
+                    kind: .link,
+                    markerRange: link.openBracket,
+                    closingMarkerRange: link.tail,
+                    contentRange: link.label,
+                    linkDestination: link.destination,
+                    line: lineIndex(ofByte: link.label.lowerBound, lineStarts: lineStarts)
+                ))
+            }
+            tokens.sort { $0.markerRange.lowerBound < $1.markerRange.lowerBound }
+        }
+
+        return Package(tokens: tokens, index: SourceIndex(source), lineStarts: lineStarts)
+    }
+
+    private nonisolated func lineIndex(ofByte offset: Int, lineStarts: [Int]) -> Int {
+        var lo = 0
+        var hi = lineStarts.count - 1
+        while lo < hi {
+            let mid = (lo + hi + 1) / 2
+            if lineStarts[mid] <= offset {
+                lo = mid
+            } else {
+                hi = mid - 1
+            }
+        }
+        return lo
     }
 
     // MARK: - 全量渲染（首次装载/基准）
@@ -270,6 +302,21 @@ struct RenderEngine {
                 .foregroundColor: theme.codeText,
                 .backgroundColor: theme.codeBackground,
             ], range: content)
+
+        case .link:
+            storage.addAttributes([
+                .foregroundColor: theme.linkColor,
+                .underlineStyle: NSUnderlineStyle.single.rawValue,
+                .underlineColor: theme.linkColor,
+            ], range: content)
+            if let destRange = token.linkDestination {
+                let destNS = index.nsRange(destRange)
+                guard destNS.location >= 0, destNS.location + destNS.length <= storage.length else { return }
+                let destString = storage.attributedSubstring(from: destNS).string
+                if let url = URL(string: destString) {
+                    storage.addAttributes([.link: url], range: content)
+                }
+            }
         }
     }
 

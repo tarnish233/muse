@@ -34,6 +34,12 @@ final class EditorTextView: NSTextView {
         // 富文本必须保留（属性渲染依赖），但不接受图片/附件（v0.2：图片 Phase 2）。
         textView.importsGraphics = false
 
+        // 链接的绘制样式与主题一致（.link 属性默认按 linkTextAttributes 绘制）。
+        textView.linkTextAttributes = [
+            .foregroundColor: Theme.standard.linkColor,
+            .underlineStyle: NSUnderlineStyle.single.rawValue,
+        ]
+
         textView.textContainerInset = NSSize(width: 20, height: 16)
         return textView
     }

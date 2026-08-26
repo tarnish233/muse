@@ -139,9 +139,11 @@ import Testing
 
     @Test func emojiInLineDoesNotShiftMarkers() {
         // 字节偏移不会因 emoji 偏移：😀 前有 "图"（3 字节）
+        // CJK/符号按"标点类"参与 flanking（有意偏离 CommonMark 词内限制，见 TokenScanner 注释）
         let tokens = scanner.scan("图😀**粗**")
         let strong = tokens.first { $0.kind == .strong }
         #expect(strong?.markerRange == 7..<9) // 3 + 4 = 7
+        #expect(strong?.contentRange == 9..<12)
     }
 
     // MARK: - 块级内容中的行内语法（审查 P1）
@@ -194,11 +196,49 @@ import Testing
         #expect(strong?.closingMarkerRange == 6..<8)
     }
 
-    @Test func singleStarEmphasisDoesNotSeeThroughStrong() {
-        // 已知限制（M2 前，见 TokenScanner 注释）：单星号强调的闭合查找不区分内部 ** run，
-        // *a **b** c* 解析为三段单星强调，而非"斜体包粗体"。
+    @Test func strongInsideEmphasisParses() {
+        // M2 起（分隔符 run 算法）：*a **b** c* 应解析为"斜体包粗体"
         let tokens = scanner.scan("*a **b** c*")
-        #expect(tokens.allSatisfy { $0.kind == .emphasis })
-        #expect(tokens.count == 3)
+        let emphasis = tokens.first { $0.kind == .emphasis }
+        let strong = tokens.first { $0.kind == .strong }
+        #expect(emphasis != nil)
+        #expect(strong != nil)
+        #expect(emphasis?.markerRange == 0..<1)
+        #expect(emphasis?.contentRange == 1..<10)
+        #expect(emphasis?.closingMarkerRange == 10..<11)
+        #expect(strong?.markerRange == 3..<5)
+        #expect(strong?.contentRange == 5..<6)
+        #expect(strong?.closingMarkerRange == 6..<8)
+    }
+
+    @Test func tripleStarParsesAsEmphasisAroundStrong() {
+        // ***foo*** → <em><strong>foo</strong></em>，开符从 run 尾消耗、闭符从 run 头消耗
+        let tokens = scanner.scan("***foo***")
+        let strong = tokens.first { $0.kind == .strong }
+        let emphasis = tokens.first { $0.kind == .emphasis }
+        #expect(strong != nil)
+        #expect(emphasis != nil)
+        #expect(strong?.markerRange == 1..<3)
+        #expect(strong?.closingMarkerRange == 6..<8)
+        #expect(emphasis?.markerRange == 0..<1)
+        #expect(emphasis?.contentRange == 1..<8)
+        #expect(emphasis?.closingMarkerRange == 8..<9)
+    }
+
+    @Test func singleStarThenDoubleClose() {
+        // *foo** → <em>foo</em>*（CommonMark：闭 run 长度不同时按 1 消耗，剩余字面量）
+        let tokens = scanner.scan("*foo**")
+        #expect(tokens.count == 1)
+        #expect(tokens[0].kind == .emphasis)
+        #expect(tokens[0].contentRange == 1..<4)
+        #expect(tokens[0].closingMarkerRange == 4..<5)
+    }
+
+    @Test func strongInsideCodeSpanIsLiteral() {
+        // 代码保护区间内的星号不做强调
+        let tokens = scanner.scan("`a*b` 与 **粗**")
+        #expect(tokens.allSatisfy { $0.kind != .emphasis })
+        #expect(tokens.contains { $0.kind == .inlineCode })
+        #expect(tokens.contains { $0.kind == .strong })
     }
 }

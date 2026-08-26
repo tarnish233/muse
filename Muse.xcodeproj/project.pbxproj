@@ -6,6 +6,11 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		B0000000000000000000001 /* Markdown in Frameworks */ = {isa = PBXBuildFile; productRef = AA0000000000000000000002 /* Markdown */; };
+		B0000000000000000000002 /* Markdown in Frameworks */ = {isa = PBXBuildFile; productRef = AA0000000000000000000003 /* Markdown */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		BB0000000000000000000002 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -83,6 +88,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B0000000000000000000001 /* Markdown in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -90,6 +96,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B0000000000000000000002 /* Markdown in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -142,6 +149,7 @@
 			);
 			name = Muse;
 			packageProductDependencies = (
+				AA0000000000000000000002 /* Markdown */,
 			);
 			productName = Muse;
 			productReference = AF0000000000000000000001 /* Muse.app */;
@@ -169,6 +177,7 @@
 			);
 			name = MuseTests;
 			packageProductDependencies = (
+				AA0000000000000000000003 /* Markdown */,
 			);
 			productName = MuseTests;
 			productReference = AF0000000000000000000002 /* MuseTests.xctest */;
@@ -201,6 +210,9 @@
 			);
 			mainGroup = AD0000000000000000000001;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				AA0000000000000000000001 /* XCRemoteSwiftPackageReference "swift-markdown" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = AD0000000000000000000002 /* Products */;
 			projectDirPath = "";
@@ -485,6 +497,30 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		AA0000000000000000000001 /* XCRemoteSwiftPackageReference "swift-markdown" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/swiftlang/swift-markdown";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 0.6.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		AA0000000000000000000002 /* Markdown */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AA0000000000000000000001 /* XCRemoteSwiftPackageReference "swift-markdown" */;
+			productName = Markdown;
+		};
+		AA0000000000000000000003 /* Markdown */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AA0000000000000000000001 /* XCRemoteSwiftPackageReference "swift-markdown" */;
+			productName = Markdown;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = AB0000000000000000000001 /* Project object */;
 }

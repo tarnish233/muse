@@ -15,15 +15,19 @@ nonisolated struct Token: Equatable, Sendable {
         case emphasis
         case inlineCode
         case strikethrough
+        case link
     }
 
     let kind: Kind
     /// 起始标记字符的字节区间（`**`、`# `、`- ` …）。
     let markerRange: Range<Int>
     /// 闭合标记区间，仅行内 token（`**`、`*`、`` ` ``、`~~` 的收尾分隔符）有值。
+    /// 链接的闭合标记为 `](` 到 `)` 的整段（隐藏目的地）。
     let closingMarkerRange: Range<Int>?
     /// 内容区间。块级 token 为整行内容；行内 token 为两个分隔符之间。空 token 为 nil。
     let contentRange: Range<Int>?
+    /// 链接目的地字节区间（仅 .link）。
+    var linkDestination: Range<Int>? = nil
     /// 所属行（0-based，按 \n 分隔）。
     let line: Int
 
@@ -38,7 +42,7 @@ nonisolated struct Token: Equatable, Sendable {
         switch kind {
         case .heading, .unorderedListItem, .orderedListItem, .taskListItem, .blockquote, .codeFence:
             return true
-        case .strong, .emphasis, .inlineCode, .strikethrough:
+        case .strong, .emphasis, .inlineCode, .strikethrough, .link:
             return false
         }
     }

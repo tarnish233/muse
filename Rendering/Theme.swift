@@ -6,6 +6,7 @@ struct Theme {
     let mutedText: NSColor
     let codeText: NSColor
     let codeBackground: NSColor
+    let linkColor: NSColor
     let quoteText: NSColor
     let quoteBackground: NSColor
     let markerText: NSColor
@@ -22,6 +23,8 @@ struct Theme {
                            dark: NSColor(calibratedRed: 0.95, green: 0.58, blue: 0.47, alpha: 1)),
         codeBackground: adaptive(light: NSColor(calibratedWhite: 0.955, alpha: 1),
                                  dark: NSColor(calibratedWhite: 0.16, alpha: 1)),
+        linkColor: adaptive(light: NSColor(calibratedRed: 0.17, green: 0.40, blue: 0.72, alpha: 1),
+                            dark: NSColor(calibratedRed: 0.50, green: 0.68, blue: 0.95, alpha: 1)),
         quoteText: adaptive(light: NSColor(calibratedWhite: 0.38, alpha: 1),
                             dark: NSColor(calibratedWhite: 0.66, alpha: 1)),
         quoteBackground: adaptive(light: NSColor(calibratedRed: 0.96, green: 0.97, blue: 0.98, alpha: 1),

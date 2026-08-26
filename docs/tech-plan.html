@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Muse 技术方案 v0.2</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --paper: #f5f7f8;
+    --surface: #fff;
+    --ink: #17222b;
+    --muted: #5a6b77;
+    --line: #dfe5e8;
+    --accent: #3568b8;
+    --accent-soft: #e8eff9;
+    --warn: #a95508;
+    --danger: #b23b3b;
+    --mono: "SF Mono", ui-monospace, Menlo, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #12181d;
+      --surface: #1a2228;
+      --ink: #e4e9ec;
+      --muted: #91a1ac;
+      --line: #2b363e;
+      --accent: #84aae5;
+      --accent-soft: #1e2b3c;
+      --warn: #e2a04b;
+      --danger: #ef8888;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    color: var(--ink);
+    background: var(--paper);
+    font-family: var(--sans);
+    font-size: 15.5px;
+    line-height: 1.75;
+  }
+  main { max-width: 800px; margin: 0 auto; padding: 56px 30px 96px; }
+  header { margin-bottom: 50px; }
+  .eyebrow, .meta, .num, code, pre, th, .priority { font-family: var(--mono); }
+  .eyebrow {
+    margin: 0 0 16px;
+    color: var(--muted);
+    font-size: 11.5px;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+  }
+  h1 { margin: 0 0 12px; font-size: 35px; line-height: 1.2; letter-spacing: -.02em; }
+  h1 span { color: var(--accent); font-family: var(--mono); }
+  .lede { max-width: 38em; margin: 0 0 20px; color: var(--muted); font-size: 17px; }
+  .meta { display: flex; flex-wrap: wrap; gap: 8px; color: var(--muted); font-size: 11.5px; }
+  .meta span { padding: 3px 11px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); }
+  section { margin: 0 0 54px; }
+  h2 { margin: 0 0 18px; padding-top: 14px; border-top: 1px solid var(--line); font-size: 22px; line-height: 1.35; }
+  h2 .num { display: block; margin-bottom: 5px; color: var(--accent); font-size: 11px; font-weight: 500; letter-spacing: .1em; }
+  h3 { margin: 28px 0 9px; font-size: 16px; }
+  p { margin: 0 0 14px; }
+  ul, ol { margin: 0 0 15px; padding-left: 1.4em; }
+  li { margin: 5px 0; }
+  code { padding: 1px 5px; border-radius: 4px; color: var(--accent); background: var(--accent-soft); font-size: .87em; }
+  a { color: var(--accent); }
+  a:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+  .callout { margin: 20px 0; padding: 17px 20px; border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 8px; background: var(--surface); }
+  .callout strong { display: block; margin-bottom: 5px; color: var(--accent); font-family: var(--mono); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; margin: 0 0 12px; border-collapse: collapse; font-size: 14px; }
+  th { padding: 7px 13px 7px 0; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 11px; font-weight: 500; letter-spacing: .06em; text-align: left; white-space: nowrap; }
+  td { padding: 10px 13px 10px 0; border-bottom: 1px solid var(--line); line-height: 1.55; vertical-align: top; }
+  td:first-child { font-weight: 600; }
+  pre { margin: 16px 0; padding: 17px 20px; overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); font-size: 12px; line-height: 1.65; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  .panel { padding: 15px 18px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+  .panel h3 { margin: 0 0 9px; color: var(--accent); font-family: var(--mono); font-size: 12px; letter-spacing: .06em; }
+  .panel.phase h3 { color: var(--warn); }
+  .panel ul { margin: 0; }
+  .priority { white-space: nowrap; font-size: 11.5px; font-weight: 700; }
+  .p0 { color: var(--danger); }
+  .p1 { color: var(--warn); }
+  .p2 { color: var(--muted); }
+  .small { color: var(--muted); font-size: 14px; }
+  footer { padding-top: 20px; border-top: 1px solid var(--line); color: var(--muted); }
+  footer strong { color: var(--ink); }
+  @media (max-width: 640px) {
+    main { padding: 36px 20px 72px; }
+    h1 { font-size: 30px; }
+    .grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <p class="eyebrow">技术提案 · v0.2 · 2026-08-26</p>
+    <h1><span>#</span> Muse 技术方案</h1>
+    <p class="lede">一款极简即时渲染 Markdown 编辑器（对标 Typora），纯 macOS 原生实现。v0.2 将编辑数据所有权、源码区间、异步渲染和验证门槛落实为可执行架构。</p>
+    <div class="meta">
+      <span>macOS 14+</span><span>Swift 6</span><span>AppKit · TextKit 2</span><span>SwiftUI</span><span>swift-markdown</span>
+    </div>
+  </header>
+
+  <section>
+    <h2><span class="num">01</span>结论</h2>
+    <p><strong>技术路线保持不变：使用 AppKit 的 <code>NSTextView</code>（TextKit 2）作为编辑核心，SwiftUI 作为应用外壳，swift-markdown 负责 Markdown 语义解析。</strong></p>
+    <div class="callout">
+      <strong>实现边界</strong>
+      <ol>
+        <li><code>NSTextStorage</code> 是编辑期唯一可变文本；<code>NSDocument</code> 不维护第二份可变正文。</li>
+        <li>保存内容永远是完整 Markdown 源码；AST、token、渲染属性、图片与主题都是派生状态。</li>
+        <li>swift-markdown 负责语义 AST，<code>MarkdownTokenScanner</code> 负责精确源码 token。</li>
+        <li><code>SourceIndex</code> 显式转换 UTF-8 源码位置与 UTF-16 <code>NSRange</code>。</li>
+        <li>marker 零宽布局必须先通过 M0 的选区、换行、IME 与辅助功能验证。</li>
+        <li>undo/redo 只记录源码修改；文本撤销后重新生成渲染。</li>
+        <li>MVP 可整篇解析，但解析运行在不可变快照上，并用 revision 淘汰过期结果。</li>
+      </ol>
+    </div>
+    <p><strong>工作量：</strong>可演示 MVP 约 6～8 周全职；达到可长期日用的稳定程度约 8～12 周。M0 是开工 gate，而不是里程碑末尾的补测。</p>
+  </section>
+
+  <section>
+    <h2><span class="num">02</span>方案对比</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>方案</th><th>手感 / 输入法</th><th>开发量</th><th>结论</th></tr></thead>
+        <tbody>
+          <tr><td>A · NSTextView + TextKit 2</td><td>原生编辑、IME、滚动和辅助功能基础最好</td><td>编辑语义、token 与布局行为需要自研</td><td>✓ 推荐</td></tr>
+          <tr><td>B · WKWebView + CodeMirror / Milkdown</td><td>输入、字体和系统服务隔着 WebKit</td><td>数周可形成可用原型</td><td>⚠ M0 失败时备选</td></tr>
+          <tr><td>C · SwiftUI TextEditor</td><td>只满足纯文本编辑</td><td>无法承担目标布局</td><td>✕ 排除</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <ul>
+      <li>使用 <code>NSTextView(usingTextLayoutManager: true)</code>，禁止访问 TextKit 1 的 <code>layoutManager</code>。</li>
+      <li>SwiftUI 只承载窗口内容、侧栏、工具栏、设置和状态，不在 <code>updateNSView</code> 中回写整篇正文。</li>
+      <li>采用 AppKit <code>NSDocument</code> 生命周期；窗口通过 <code>NSWindowController</code> 与 <code>NSHostingController</code>/<code>NSHostingView</code> 组合。</li>
+      <li>SPM 暂时只依赖 swift-markdown，不依赖其未公开或不存在的增量解析 API。</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2><span class="num">03</span>总体架构</h2>
+    <pre aria-label="Muse 总体架构">┌──────────────────────────────────────────────────────┐
+│ AppKit 文档生命周期                                  │
+│ MuseDocument → EditorBuffer → NSTextStorage          │
+│                    唯一可变文本                       │
+├──────────────────────────────────────────────────────┤
+│ SwiftUI 外壳：窗口 · 侧栏 · 工具栏 · 设置 · 状态     │
+├──────────────────────────────────────────────────────┤
+│ EditorTextView（NSTextView + TextKit 2）              │
+│ 原生输入 · 选区 · 滚动 · 查找 · 拼写检查 · undo       │
+├──────────────────────────────────────────────────────┤
+│ String Snapshot + revision                           │
+│   ├─ SourceIndex：UTF-8 → UTF-16                     │
+│   ├─ swift-markdown：语义 AST                         │
+│   └─ MarkdownTokenScanner：精确 token                 │
+│                    ↓                                 │
+│ RenderSnapshot(revision, spans, markers, blocks)     │
+│                    ↓ 仅接受最新 revision             │
+│ 主线程批量应用派生属性                                │
+└──────────────────────────────────────────────────────┘</pre>
+
+    <h3>数据所有权</h3>
+    <ul>
+      <li><code>EditorBuffer.textStorage</code>：所有键入、粘贴和行为命令的唯一正文。</li>
+      <li><code>MuseDocument</code>：拥有 EditorBuffer，从 <code>textStorage.string</code> 生成保存快照。</li>
+      <li><code>RenderSnapshot</code>：纯值派生数据，不负责保存，也不进入 undo。</li>
+      <li>SwiftUI：只保存文件名、主题、侧栏可见性等 UI 状态。</li>
+    </ul>
+
+    <h3>编辑流</h3>
+    <pre>textDidChange → revision + 1 → String 快照
+→ 后台解析 AST、token、SourceIndex
+→ RenderSnapshot → MainActor 检查 revision
+→ 批量应用最新结果</pre>
+    <p>旧 revision 直接丢弃，编辑线程不等待解析。光标变化只查询现有 RenderSnapshot 并更新相交 marker，不重新解析；marked text 区间不做会干扰输入的布局更新。</p>
+
+    <h3>目录结构</h3>
+    <pre>muse/
+├─ App/          AppDelegate · AppShellView
+├─ Document/     MuseDocument · EditorBuffer
+├─ Editor/       EditorTextView · EditorView · Coordinator
+├─ Parsing/      MarkdownParser · TokenScanner · SourceIndex
+├─ Rendering/    RenderPipeline · RenderSnapshot · Engine · Theme
+├─ Behaviors/    TypingBehaviors
+└─ Tests/        SourceIndex · TokenScanner · Renderer · Behavior
+                 IMEIntegration · Performance</pre>
+  </section>
+
+  <section>
+    <h2><span class="num">04</span>核心难点与对策</h2>
+
+    <h3>4.1 源码区间：UTF-8、UTF-16 与 token</h3>
+    <p>swift-markdown 的 <code>SourceLocation</code> 使用 1-based 行号和 UTF-8 字节列；AppKit 使用 UTF-16。<code>SourceIndex</code> 为每行缓存两套起点并执行边界检查。AST 只回答“内容是什么”，TokenScanner 负责 emphasis、代码、标题、列表、链接、转义和未闭合语法的精确 marker。RenderEngine 最终只接收 UTF-16 <code>NSRange</code>。</p>
+
+    <h3>4.2 marker 隐藏与光标回显</h3>
+    <p>marker 字符始终保留，只改变视觉属性。方案按三级降级：先验证零宽或近零宽；不可靠则改为弱化色与较小字号；只有明确需要完全无缝排版时，才在 Phase 2 评估自定义 <code>NSTextLayoutFragment</code>。M0 必测中文、emoji、组合字符、嵌套强调、跨行选区、换行、鼠标、方向键和 VoiceOver。</p>
+
+    <h3>4.3 块级编辑行为</h3>
+    <p>列表续行/退出、标题断开、保守自动配对和块识别全部通过标准文本替换接口进入文档 undo manager。自动配对必须尊重选区、转义、已有闭合符号与 marked text；优先使用 NSTextView 的命令和替换入口，不直接吞掉所有 <code>keyDown</code>。</p>
+
+    <h3>4.4 中文输入法</h3>
+    <p><code>hasMarkedText</code> 为真时，不对 marked range 应用可能影响输入与布局的属性；上屏后再建立 revision。后台解析不能抢占主线程。人工矩阵覆盖拼音、双拼、五笔和系统英文输入，以及强调、链接、列表、代码围栏内的 Enter/Escape/方向键。</p>
+
+    <h3>4.5 撤销 / 重做</h3>
+    <p>undo 只包含源码变化；普通键入使用 NSTextView 原生 undo，自动配对和列表续行组成单个 undo group。主题、着色、marker 显隐与图片加载不注册 undo。撤销后重新生成 RenderSnapshot，不使用整篇字符串快照作为正式撤销模型。</p>
+
+    <h3>4.6 并发与性能</h3>
+    <p>主线程只负责输入、selection 与最新属性应用；后台任务解析不可变快照。旧任务可以取消，但正确性依赖 revision 校验。属性更新优先限制在变化块和可见区域，不把“下一 runloop”当作性能保证。</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>文档规模</th><th>输入主线程预算</th><th>目标</th></tr></thead>
+        <tbody>
+          <tr><td>20KB</td><td>&lt; 8ms P95</td><td>无可感知延迟</td></tr>
+          <tr><td>200KB</td><td>&lt; 16ms P95</td><td>连续输入不丢帧、不跳光标</td></tr>
+          <tr><td>1MB</td><td>不阻塞输入</td><td>允许渲染滞后，源码编辑仍可用</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>200KB 不达标时，自建 block index，只重扫受影响块，并低频使用全量 AST 校准；不依赖 swift-markdown 的公开增量解析能力。</p>
+
+    <h3>4.7 图片</h3>
+    <p>常规 <code>NSTextAttachment</code> 与“源码字符不变”存在冲突。MVP 只提供图片语法样式、路径解析和悬浮/侧边预览；真正行内图片进入 Phase 2，再选择自定义 layout fragment、额外预览行/overlay，或明确引入显示文本与源码映射。</p>
+  </section>
+
+  <section>
+    <h2><span class="num">05</span>MVP 范围</h2>
+    <div class="grid">
+      <div class="panel">
+        <h3>做 · MVP</h3>
+        <ul>
+          <li>标题、粗体、斜体、删除线、行内代码</li>
+          <li>链接样式、点击打开、光标回显</li>
+          <li>图片语法与悬浮/侧边预览</li>
+          <li>无序、有序和任务列表</li>
+          <li>代码围栏、引用、分隔线</li>
+          <li>亮暗主题</li>
+          <li>打开、保存、autosave、undo、源码模式</li>
+          <li>查找替换与拼写检查</li>
+          <li>基础 VoiceOver、Reduce Motion、高对比度</li>
+        </ul>
+      </div>
+      <div class="panel phase">
+        <h3>不做 · Phase 2</h3>
+        <ul>
+          <li>真正的零占位行内图片</li>
+          <li>表格可视化编辑</li>
+          <li>数学公式</li>
+          <li>代码块语法高亮</li>
+          <li>大纲 / TOC</li>
+          <li>导出 PDF / HTML</li>
+          <li>block 级增量解析与超大文件优化</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="num">06</span>里程碑与验收门槛</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>阶段</th><th>工期</th><th>内容与退出条件</th></tr></thead>
+        <tbody>
+          <tr><td>M0 技术验证</td><td>3～5 天</td><td>TextKit 2 启用；Unicode 区间正确；marker、选区、换行、IME、undo、VoiceOver 可接受；20KB/200KB 有基准数据</td></tr>
+          <tr><td>M1 骨架</td><td>1 周</td><td>单一 text storage 所有权；open/save/autosave；SwiftUI 外壳</td></tr>
+          <tr><td>M2 解析与渲染</td><td>1.5～2 周</td><td>SourceIndex、TokenScanner、revision 管线；Unicode 与未闭合语法测试</td></tr>
+          <tr><td>M3 光标交互</td><td>1.5～2 周</td><td>marker 回显、方向键、鼠标、跨行选区、源码模式；无 TextKit 1 fallback</td></tr>
+          <tr><td>M4 块行为</td><td>1 周</td><td>列表、标题、任务、自动配对；复合操作一次撤销</td></tr>
+          <tr><td>M5 收尾功能</td><td>1 周</td><td>代码围栏、引用、分隔线、图片预览、查找替换</td></tr>
+          <tr><td>M6 稳定与发布准备</td><td>1～2 周</td><td>IME、autosave/reopen、恢复、性能、VoiceOver、主题与回归测试</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="small">M0 是 go/no-go gate。若只能做到 marker 弱化而无法可靠零宽，应在 M0 结束时接受降级设计并固定交互规范。</p>
+  </section>
+
+  <section>
+    <h2><span class="num">07</span>风险</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>风险</th><th>等级</th><th>对策</th></tr></thead>
+        <tbody>
+          <tr><td>UTF-8 与 UTF-16 range 错位</td><td class="priority p0">P0</td><td>独立 SourceIndex；中文、emoji、组合字符、多行测试</td></tr>
+          <tr><td>AST 缺少精确 marker token</td><td class="priority p0">P0</td><td>AST + TokenScanner；覆盖转义、嵌套和未闭合语法</td></tr>
+          <tr><td>零宽 marker 破坏布局或辅助功能</td><td class="priority p0">P0</td><td>M0 验证，失败时降级为弱化显示</td></tr>
+          <tr><td>IME 与异步渲染互相干扰</td><td class="priority p0">P0</td><td>跳过 marked range；快照 + revision；中文输入矩阵</td></tr>
+          <tr><td>文档与 text view 双重真相</td><td class="priority p0">P0</td><td>EditorBuffer.textStorage 是唯一正文</td></tr>
+          <tr><td>派生属性污染 undo</td><td class="priority p1">P1</td><td>undo 只记录源码；撤销后重算渲染</td></tr>
+          <tr><td>200KB 输入卡顿</td><td class="priority p1">P1</td><td>基准、后台解析、revision、变化块更新、block index</td></tr>
+          <tr><td>TextKit 2 意外降级</td><td class="priority p1">P1</td><td>显式创建；禁止 layoutManager；监听 fallback</td></tr>
+          <tr><td>行内图片破坏源码 1:1</td><td class="priority p1">P1</td><td>MVP 使用悬浮/侧边预览</td></tr>
+          <tr><td>表格、公式、高亮拖慢首版</td><td class="priority p2">P2</td><td>留在 Phase 2</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="num">08</span>验证清单</h2>
+    <div class="grid">
+      <div>
+        <h3>正确性与交互</h3>
+        <ul>
+          <li>ASCII、中文、emoji、ZWJ、组合附加符</li>
+          <li>嵌套、相邻、转义、未闭合 marker</li>
+          <li>CRLF、LF、空文档、超长单行</li>
+          <li>undo 后正文、selection、渲染一致</li>
+          <li>IME 候选、上屏、取消、Enter</li>
+          <li>鼠标、方向键、跨 marker 选区</li>
+          <li>VoiceOver、Reduce Motion、高对比度</li>
+        </ul>
+      </div>
+      <div>
+        <h3>性能与文档生命周期</h3>
+        <ul>
+          <li>20KB、200KB、1MB 固定语料</li>
+          <li>旧 revision 不覆盖新内容</li>
+          <li>打开、保存、Save As、autosave、reopen</li>
+          <li>外部文件变化与崩溃恢复</li>
+          <li>多窗口/多文档 text storage 隔离</li>
+          <li>undo manager 和主题状态隔离</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="num">REF</span>参考资料</h2>
+    <ul>
+      <li><a href="https://developer.apple.com/videos/play/wwdc2022/10090/">Apple：What's new in TextKit and text views</a></li>
+      <li><a href="https://developer.apple.com/documentation/appkit/textkit">Apple：TextKit</a></li>
+      <li><a href="https://developer.apple.com/documentation/appkit/nstextattachment">Apple：NSTextAttachment</a></li>
+      <li><a href="https://github.com/swiftlang/swift-markdown">swift-markdown</a></li>
+      <li><a href="https://github.com/swiftlang/swift-markdown/blob/main/Sources/Markdown/Infrastructure/SourceLocation.swift">swift-markdown SourceLocation</a></li>
+    </ul>
+  </section>
+
+  <footer>
+    <strong>下一步：</strong>先实现 M0 技术验证工程，不直接铺开完整 UI。产出包括最小编辑器、range/token 测试、IME/选择行为记录和 20KB/200KB 性能报告；通过 gate 后再进入 M1。
+  </footer>
+</main>
+</body>
+</html>

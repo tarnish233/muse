@@ -46,4 +46,15 @@ nonisolated struct Token: Equatable, Sendable {
             return false
         }
     }
+
+    /// 结构性标记：永远可见（列表符号/序号、任务框、引用线、围栏符）。
+    /// 只有 heading 的 `#` 与行内语法标记跟随光标显隐（Typora 行为）。
+    var isAlwaysVisibleMarker: Bool {
+        switch kind {
+        case .unorderedListItem, .orderedListItem, .taskListItem, .blockquote, .codeFence:
+            return true
+        case .heading, .strong, .emphasis, .inlineCode, .strikethrough, .link:
+            return false
+        }
+    }
 }

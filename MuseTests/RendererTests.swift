@@ -57,15 +57,31 @@ import Testing
         #expect(weight(font(at: 2, in: storage)) > 0.1)
     }
 
-    @Test func blockMarkerRevealedOnCaretLineOnly() {
-        let source = "- 第一项\n- 第二项"
+    @Test func headingMarkerRevealedOnCaretLineOnly() {
+        // heading 的 # 跟随光标显隐（Typora 行为）：光标在第二行时第一行 # 隐藏
+        let source = "## 甲\n## 乙"
         let storage = NSTextStorage(string: source)
         let package = engine.prepare(source)
-        // 光标在第 2 行 → 第二行 marker 显示，第一行隐藏
         _ = engine.render(package: package, selection: NSRange(location: 6, length: 0), into: storage)
 
         #expect(isHidden(0, in: storage))
-        #expect(font(at: 6, in: storage) == theme.revealedMarkerFont()) // 第二行 "- " 起点（utf16）
+        #expect(font(at: 5, in: storage) == theme.revealedMarkerFont()) // 第二行 "## " 起点（utf16）
+    }
+
+    @Test func structuralMarkersAlwaysVisible() {
+        // 列表/任务/引用/围栏是结构性标记：不随光标隐藏（用户反馈的"1./- 没显示"修复）
+        let source = "- 甲\n1. 乙\n- [ ] 丙\n> 引\n```\n代码\n```"
+        let storage = NSTextStorage(string: source)
+        let package = engine.prepare(source)
+        // 光标放在围栏内的"代码"行——列表/任务/引用/围栏标记仍应可见
+        let caret = (source as NSString).range(of: "代码").location // utf16 24
+        _ = engine.render(package: package, selection: NSRange(location: caret, length: 0), into: storage)
+
+        #expect(font(at: 0, in: storage) == theme.revealedMarkerFont())   // "- "
+        #expect(font(at: 4, in: storage) == theme.revealedMarkerFont())   // "1. "
+        #expect(font(at: 9, in: storage) == theme.revealedMarkerFont())   // "- [ ] " 起点
+        #expect(font(at: 17, in: storage) == theme.revealedMarkerFont())  // "> "
+        #expect(font(at: 21, in: storage) == theme.revealedMarkerFont())  // ```
     }
 
     @Test func markerVisibilityFollowsSelection() {

@@ -199,8 +199,10 @@ struct RenderEngine {
 
         return package.tokens.flatMap { token in
             let revealed: Bool
-            if token.isBlockMarker {
-                revealed = token.line == caretLine
+            if token.isAlwaysVisibleMarker {
+                revealed = true // 列表/任务/引用/围栏：结构性标记永远可见
+            } else if token.isBlockMarker {
+                revealed = token.line == caretLine // heading：光标行显示 #
             } else {
                 let markerNS = package.index.nsRange(token.markerRange)
                 let contentNS = token.contentRange.map(package.index.nsRange) ?? markerNS

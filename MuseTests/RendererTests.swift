@@ -233,6 +233,34 @@ import Testing
         #expect(after > 0)
     }
 
+    @Test func blockVisualsRenderForEachBlockKind() {
+        let source = "- 无序\n1. 有序\n- [ ] 待办\n- [x] 完成\n> 引用\n```swift\nlet value = 1\n```\n---"
+        let storage = NSTextStorage(string: source)
+        let textView = EditorTextView.make(textStorage: storage)
+        textView.frame = NSRect(x: 0, y: 0, width: 640, height: 480)
+        textView.textContainer?.containerSize = NSSize(width: 640, height: CGFloat.greatestFiniteMagnitude)
+
+        let package = engine.prepare(source)
+        _ = engine.render(package: package, selection: NSRange(location: storage.length, length: 0), into: storage)
+        let fragments = customFragments(in: textView)
+
+        let listFragments = fragments.filter {
+            $0.blockKind?.hasPrefix(BlockVisual.list.rawValue + ":") == true
+        }
+        #expect(listFragments.contains { $0.blockKind == BlockVisual.list.rawValue + ":u" })
+        #expect(listFragments.contains { $0.blockKind == BlockVisual.list.rawValue + ":o" })
+        #expect(listFragments.filter { $0.blockKind == BlockVisual.list.rawValue + ":t" }.count >= 2)
+        #expect(listFragments.allSatisfy { blockPixelCount(of: $0) > 0 })
+
+        for kind in [BlockVisual.quote.rawValue, BlockVisual.codeFence.rawValue, BlockVisual.rule.rawValue] {
+            guard let fragment = fragments.first(where: { $0.blockKind == kind }) else {
+                #expect(Bool(false), "missing fragment for \(kind)")
+                continue
+            }
+            #expect(blockPixelCount(of: fragment) > 0)
+        }
+    }
+
     @Test func linkLabelStyledWithURL() {
         let source = "[打开](https://apple.com)"
         let storage = NSTextStorage(string: source)
@@ -335,6 +363,70 @@ import Testing
         ) { fragment in
             if fragment is MuseLayoutFragment { count += 1 }
             return true
+        }
+        return count
+    }
+
+    /// 从框架实际枚举结果中收集自定义 fragment；不构造替代 fragment 参与断言。
+    private func customFragments(in textView: EditorTextView) -> [MuseLayoutFragment] {
+        guard let layoutManager = textView.textLayoutManager else { return [] }
+        var fragments: [MuseLayoutFragment] = []
+        layoutManager.enumerateTextLayoutFragments(
+            from: layoutManager.documentRange.location,
+            options: [.ensuresLayout]
+        ) { fragment in
+            if let museFragment = fragment as? MuseLayoutFragment {
+                fragments.append(museFragment)
+            }
+            return true
+        }
+        return fragments
+    }
+
+    /// 只对已经由 TextKit 2 枚举得到的 fragment 调用其块视觉入口，避免字形像素掩盖结果。
+    private func blockPixelCount(of fragment: MuseLayoutFragment) -> Int {
+        let width = 640
+        let height = 160
+        guard let bitmap = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: width,
+            pixelsHigh: height,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bitmapFormat: [],
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ), let context = NSGraphicsContext(bitmapImageRep: bitmap) else {
+            return 0
+        }
+
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = context
+        NSColor.white.setFill()
+        NSRect(x: 0, y: 0, width: width, height: height).fill()
+        let frame = fragment.layoutFragmentFrame
+        fragment.drawBlockVisuals(
+            at: CGPoint(x: frame.origin.x, y: 20),
+            in: context.cgContext
+        )
+        context.flushGraphics()
+        NSGraphicsContext.restoreGraphicsState()
+
+        guard let data = bitmap.bitmapData else { return 0 }
+        let bytesPerPixel = max(1, bitmap.bitsPerPixel / 8)
+        var count = 0
+        for row in 0..<bitmap.pixelsHigh {
+            let rowStart = row * bitmap.bytesPerRow
+            for column in 0..<bitmap.pixelsWide {
+                let pixelStart = rowStart + column * bytesPerPixel
+                let pixel = UnsafeBufferPointer(start: data + pixelStart, count: bytesPerPixel)
+                if pixel.contains(where: { $0 != 0xFF }) {
+                    count += 1
+                }
+            }
         }
         return count
     }

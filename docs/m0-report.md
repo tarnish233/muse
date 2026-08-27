@@ -19,7 +19,7 @@
 | 性能基准 | `MuseTests/PerformanceTests.swift` | ✅ 4 项 |
 | 文档往返（NSDocument 序列化） | `MuseTests/DocumentTests.swift` | ✅ 4 项 |
 
-总计 **50 项测试全绿**（Swift Testing）。
+M0 初始回归为 **50 项测试全绿**（Swift Testing）。这是历史基线；截至 2026-08-27 本轮修复后的最新 Debug 全量回归为 **109 项 / 7 套件**，其中 `RendererTests` 为 **33 项**。
 
 ## 2. 性能基准（Debug 构建，Apple Silicon）
 
@@ -65,7 +65,7 @@
 - **P2 嵌套强调 traits**：`NSFontManager` 归一化后一次性加特征（直接链式 convert 会静默丢特征，descriptor 合成会把 semibold 掉回 regular）；反向嵌套（`*a **b** c*`）受限于 scanner 的运行分析简化，记入 M2。
 - **P2 首屏显隐**：textView 挂接后补一次 `refreshMarkerVisibility`。
 - **P2 转义闭合符**：`findScalar/findSequence/findRun` 跳过 `\x` 转义对。
-- **P3 测试统计**：本节同步为 50 项。
+- **P3 测试统计**：本节保留 M0 初始快照的 50 项历史统计；后续回归数见本报告 §9.6。
 
 ### 5.1 第二轮复审（2026-08-26）：异步增量管线收口
 
@@ -102,7 +102,7 @@ open build/Build/Products/Debug/Muse.app
 1. 人工验收清单（§6，第 1/2/7/9 项为 gate 关键项）。
 2. M1 骨架已完成，见《M1 评价报告》。
 3. M2 解析与渲染已完成（通过），见《M2 评价报告》。
-4. M3 光标交互：marker 回显手感打磨、方向键与鼠标命中、源码模式切换；之后 M4 块行为（列表续行/退出、标题行为、自动配对）。
+4. M3 光标交互：marker 回显手感打磨、方向键与鼠标命中、源码模式切换；之后 M4 块行为（列表续行/退出、标题行为、任务 checkbox 点击切换 `[ ]`/`[x]`、自动配对，并保证一次撤销）。
 
 ## 8. Gate 复盘（2026-08-27 追加）
 
@@ -151,7 +151,7 @@ M0 的代码部分已完成。剩下的是**验收动作**，分两类：可自�
 2. **禁止访问 TextKit 1 的 `layoutManager`。** 只用 `textLayoutManager`。
 3. **渲染测试必须走框架真实产出的对象。** 不允许「自己造 `NSGraphicsContext` + 直接调绘制函数」然后断言像素——这正是 M2 那个假绿缺陷的成因（见《M2 评价报告》§4）。块视觉的断言必须经由 `layoutManager.enumerateTextLayoutFragments` 拿到的 fragment。
 4. **属性写入不得进入撤销栈。** 保持包在 `disableUndoRegistration` 内。
-5. 每个任务完成后跑全量测试：`xcodebuild test -project Muse.xcodeproj -scheme Muse -destination 'platform=macOS,arch=arm64' -derivedDataPath build`。开工基线为 **78 项 / 7 套件全绿**，最终回归为 103 项 / 7 套件全绿，不允许变红。
+5. 每个任务完成后跑全量测试：`xcodebuild test -project Muse.xcodeproj -scheme Muse -destination 'platform=macOS,arch=arm64' -derivedDataPath build`。开工基线为 **78 项 / 7 套件全绿**；此前 M2 收口为 103 项，本轮最新回归为 **109 项 / 7 套件全绿**，不允许变红。
 
 ### 9.2 任务 M0-1：块级视觉的自动化回归（Codex，✅ 已完成）
 
@@ -168,8 +168,8 @@ M0 的代码部分已完成。剩下的是**验收动作**，分两类：可自�
 
 **完成记录（2026-08-27）**：已完成。`blockVisualsRenderForEachBlockKind` 通过真实
 `textLayoutManager.enumerateTextLayoutFragments` 获取 `MuseLayoutFragment`，分别验证列表、
-引用、代码围栏和分隔线落墨；与既有 `blockVisualsComeFromLayoutFragments` 一并纳入最终
-103 项全量回归。
+引用、代码围栏和分隔线落墨；与既有 `blockVisualsComeFromLayoutFragments` 一并纳入此前
+103 项全量回归。本轮最新全量回归为 109 项 / 7 套件。
 
 ### 9.3 任务 M0-2：暗色模式块视觉自动化断言（Codex，✅ 已完成）
 
@@ -226,3 +226,11 @@ Codex 可以做的准备工作：把 §6 表格加一列「实测结果」并留
 - 若人工项 1/2/7/9 全部通过 → M0 结论改为「**通过**」，删除「有条件」表述；
 - 若第 1 项（零宽留白）或第 2 项（IME）有明显问题 → 按 v0.3 §4.2 的降级路径执行（marker 改弱化色 + 小字号，保留可预测宽度），并在本报告记录降级决定与交互规范；
 - 第 11 项失败 → 属于 M2 回归，回到《M2 评价报告》§3 排查，不要改 M0 结论。
+
+### 9.6 后续渲染回归（2026-08-27）
+
+本轮对照截图复查发现并修复了四项列表视觉缺陷：软换行时一个 paragraph fragment 覆盖多条 `NSTextLineFragment`，旧 marker 按整个 paragraph fragment 高度居中而落在段落中部；现改为锚定首个 `textLineFragments.first`。二级 marker 虽选择了 `◦`，字体 fallback 仍可能把它画成实心点；现由 AST 写入的 `.museListDepth` 驱动 glyph 判定，并在 fragment 绘制层使用矢量实心圆/空心圆/方块，确保二级中心留空，不从源码缩进重新推导 depth。首行 marker 也不再居中于含 leading 的 `typographicBounds`：有序序号按 `glyphOrigin.y` 与正文共享 baseline，无序矢量符号按正文 font 的 x-height 视觉中心定位。有序 marker 的水平位置不再按自身 advance width 从正文列向左回推，而是与同层无序 marker 共用固定槽位，并按 Core Text glyph path bounds 补偿可见墨迹左边界；多位序号在槽内适配，不改变正文列。
+
+任务 checkbox 的 checked marker 现使用系统 accent 色，unchecked marker 使用外观感知的 `secondaryLabelColor`，浅色/深色均由共享调色板解析。本轮只完成颜色与绘制；checkbox 点击切换 `[ ]`/`[x]`、标准文本编辑路径和一次撤销明确留到 M4，不能据此宣称 M0/M2 或当前已有点击交互。
+
+本轮新增 6 项测试：`listMarkersAlignWithFirstVisualLineMetrics`、`unorderedMarkerGlyphsUseSemanticDepth`、`unorderedMarkerPixelsDistinguishFilledAndHollow`、`taskMarkersUseAccentAndContrastingColors`、`orderedMarkersUseStableLaneAndFitLargeNumbers`、`orderedAndUnorderedMarkersShareDepthLaneWithoutMovingContent`。它们经真实 TextKit 2 fragment/位图路径验证首行锚定、垂直对齐、层级符号、checkbox 颜色，以及同层有序/无序固定槽位、`1.`/`2.` 可见左边界和多位序号不侵入正文；最新 Debug 全量证据为 **109 项 / 7 套件**，其中 `RendererTests` 为 **33 项**。独立 bundle Debug App 的视觉人工复查已通过：长列表 marker 位于第一视觉行、同层有序/无序 marker 左边界一致且正文列不动、二级 marker 为空心、checked checkbox 为蓝色强调且 unchecked checkbox 为灰色轮廓。M0-3 表中的人工 IME、VoiceOver、零宽 marker 和完整外观热切换清单仍需逐项执行，本节不替代该验收。

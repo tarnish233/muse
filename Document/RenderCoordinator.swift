@@ -12,6 +12,18 @@ import Combine
 @MainActor
 public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageDelegate {
     @Published public private(set) var statusText = "尚未渲染"
+    /// 文档大纲（heading 层级），供侧边栏导航使用；随每次渲染应用刷新。
+    @Published public private(set) var outline: [OutlineHeading] = []
+
+    /// 文档目录条目。UTF-16 范围可以直接交给 AppKit 选区/滚动 API。
+    public struct OutlineHeading: Sendable, Identifiable, Equatable {
+        public let id: Int
+        public let level: Int
+        public let title: String
+        public let line: Int
+        /// 标题行的 UTF-16 范围（marker + 内容），供滚动到位使用。
+        public let lineRange: NSRange
+    }
 
     public override init() {
         super.init()
@@ -121,10 +133,46 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
         lastPackage = package
         editsSinceApply = 0
         appliedRevision = revision
+        outline = Self.makeOutline(from: package, storageString: storage.string)
 
         let elapsed = start.duration(to: clock.now)
         let ms = Double(elapsed.components.seconds) * 1000 + Double(elapsed.components.attoseconds) / 1e15
         statusText = "tokens: \(package.tokens.count) · 增量渲染: \(String(format: "%.1f", ms)) ms"
+    }
+
+    /// 从 tokens 抽取 heading 大纲（供 SwiftUI 侧边栏）。UTF-8 → UTF-16 的转换只做一次。
+    private static func makeOutline(from package: RenderEngine.Package, storageString: String) -> [OutlineHeading] {
+        let nsSource = storageString as NSString
+        var result: [OutlineHeading] = []
+        result.reserveCapacity(package.tokens.count / 8)
+
+        for (index, token) in package.tokens.enumerated() {
+            guard case .heading(let level) = token.kind else { continue }
+            guard let content = token.contentRange else { continue }
+            let contentNS = package.index.nsRange(content)
+            guard contentNS.location != NSNotFound,
+                  contentNS.location + contentNS.length <= nsSource.length else { continue }
+            let title = nsSource.substring(with: contentNS)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let lineStartByte = package.lineStarts[token.line]
+            let lineEndByte: Int
+            if token.line + 1 < package.lineStarts.count {
+                lineEndByte = package.lineStarts[token.line + 1]
+            } else {
+                lineEndByte = package.index.utf8Length
+            }
+            let lineRange = package.index.nsRange(lineStartByte..<lineEndByte)
+            result.append(
+                OutlineHeading(
+                    id: index,
+                    level: level,
+                    title: title.isEmpty ? "(untitled)" : title,
+                    line: token.line,
+                    lineRange: lineRange
+                )
+            )
+        }
+        return result
     }
 
     // MARK: - 光标流（marker 显隐 diff）
@@ -154,6 +202,17 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
     /// 供测试直接注入已解析的 package（正常路径由编辑流自动写入）。
     public func adoptPackage(_ package: RenderEngine.Package) {
         lastPackage = package
+    }
+
+    /// 侧边栏点击 heading 时调用：把选区放到标题行首并滚动可见。
+    public func reveal(heading: OutlineHeading) {
+        guard let textView, let storage = textStorage else { return }
+        let length = storage.length
+        guard heading.lineRange.location + heading.lineRange.length <= length else { return }
+        let caret = NSRange(location: heading.lineRange.location, length: 0)
+        textView.setSelectedRange(caret)
+        textView.scrollRangeToVisible(heading.lineRange)
+        textView.window?.makeFirstResponder(textView)
     }
 
     // MARK: - 内部

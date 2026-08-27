@@ -73,7 +73,7 @@ M1-1 已用临时目录和 AppKit autosave 完成回调覆盖「编辑 → autos
 - `updateChangeCount` 的调用时机正确（启动示例文档调了 `.changeCleared`，编辑时由 `RenderCoordinator.onTextEdited` 调 `.changeDone`，但渲染属性写入被包在 undo 抑制里，需确认不会误标脏）；
 - 渲染属性不会误标脏，字符编辑会标脏。
 
-4 项测试均通过；本轮没有发现渲染误标脏缺陷。崩溃恢复的系统级人工验证仍属于 M0-3 清单范围，不由这组单元测试替代。截止本次收口，累计回归为 103 项 / 7 套件。
+4 项测试均通过；本轮没有发现渲染误标脏缺陷。崩溃恢复的系统级人工验证仍属于 M0-3 清单范围，不由这组单元测试替代。M1 收口时累计回归为 103 项 / 7 套件；截至 2026-08-27 最新 Debug 回归为 109 项 / 7 套件。
 
 ### 5.2 测试目标不 import 产品模块，Release 下构建失败（P1，已由 M1-2 解决）
 
@@ -129,7 +129,8 @@ M1 补齐了原先遗漏的 autosave/reopen 验收，并用共享框架恢复了
 **注意**：AppKit 的 autosave 是异步的。测试里不要靠 `sleep` 等待，用 `autosave(withImplicitCancellability:completionHandler:)` 的回调，或直接调 `save(to:ofType:for:completionHandler:)` 走确定性路径。
 
 **验收**：4 项测试存在且通过。本任务提交时总测试数由 85 增至 **89**；随后 M2 收口
-新增测试，最终回归为 **103 项 / 7 套件**；本任务未发现渲染误标脏缺陷。
+新增测试，M1/M2 历史回归为 **103 项 / 7 套件**；本轮再新增 4 项渲染测试，最新
+Debug 回归为 **109 项 / 7 套件**；本任务未发现渲染误标脏缺陷。
 
 ### 7.2 任务 M1-2：测试目标框架化，修复 Release 构建（✅ 已完成）
 
@@ -162,7 +163,7 @@ M2-1/M2-4 完成 AST 语义层收口后，200KB 全量 AST 解析仍低于样式
 
 **验收**（三项均满足）：
 
-1. Debug 下最终 **103 项**测试全绿；
+1. M1 任务收口时 Debug 下 **103 项**测试全绿；本轮最新 Debug 回归为 **109 项 / 7 套件**；
 2. **Release 下测试构建成功且全绿**——这是本任务的核心目标；
 3. 已在 Release 下重跑 `PerformanceTests`，并将 200KB `RenderEngine.prepare`、`applyDirty`、协调器端到端耗时填入 §8；最终全量 AST 解析为 36.665ms，低于 150ms，已在《M2 评价报告》记录「全量 AST 方案确认可行，块级增量不必做」。
 
@@ -175,7 +176,7 @@ xcodebuild test -project Muse.xcodeproj -scheme Muse -configuration Release \
   -destination 'platform=macOS,arch=arm64' -derivedDataPath build-release
 ```
 
-最终 Release 构建通过，测试结果为 **103 项 / 7 套件全绿**。以下为最终全量运行输出，
+历史 Release 验收构建通过，测试结果为 **103 项 / 7 套件全绿**（本轮新增测试未重跑 Release）。以下为该次全量运行输出，
 `RenderEngine.prepare` 已代表 AST + SourceIndex 管线。
 
 | 场景 | Release 实测 |
@@ -190,3 +191,11 @@ xcodebuild test -project Muse.xcodeproj -scheme Muse -configuration Release \
 的 150ms 样式落地判据，块级增量解析暂不需要。
 
 第 3 项不是可选的。这个任务存在的唯一理由就是拿到那个数字。
+
+## 9. 后续渲染回归记录（2026-08-27）
+
+本轮没有改变 M1 的正文所有权结论；在共享 `NSTextStorage` 的 TextKit 2 路径上补做了列表视觉复查。截图复查发现并修复：软换行 marker 旧按整个 paragraph fragment 高度居中，现锚定首个 `NSTextLineFragment`；二级 marker 的 `◦` 可能受字体 fallback 画成实心点，现由 AST `.museListDepth` 驱动并以矢量实心圆/空心圆/方块绘制；首行 marker 不再居中于含 leading 的行框，有序序号按 `glyphOrigin.y` 与正文共享 baseline，无序圆点按正文 x-height 视觉中心定位；同层有序/无序 marker 共用段落缩进推导的固定槽位，有序文本按 Core Text glyph path bounds 对齐可见左边界，多位序号在槽内适配且正文列不动。任务 checkbox 的 checked/unchecked marker 分别使用系统 accent / 外观感知的 `secondaryLabelColor`；本轮只完成颜色，不实现点击切换。
+
+本轮新增 6 项真实 TextKit 2/位图回归测试，最新 Debug 全量证据为 **109 项 / 7 套件**，其中 `RendererTests` 为 **33 项**。新增的水平几何用例覆盖 `1.`/`2.` 可见左边界、`98.`/`99.`/`100.` 槽内适配、同层有序/无序共槽以及正文列不移动。checkbox 点击将源码 `[ ]`/`[x]` 通过标准文本编辑替换并作为一次撤销，明确列入 M4；当前 M0/M1/M2 状态不宣称已有 checkbox 点击交互。
+
+独立 bundle Debug App 的视觉人工复查已通过长列表 marker 首行锚定、无序 marker 的正文 x-height 对齐、有序序号的正文 baseline 对齐、二级 marker 空心形态，以及 checked 蓝色强调 / unchecked 灰色轮廓；这只记录本轮列表/checkbox 外观，不替代 M0-3 的 IME、VoiceOver、零宽 marker 与完整外观热切换验收。

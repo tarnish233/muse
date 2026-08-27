@@ -3,7 +3,7 @@
 - 日期：2026-08-27
 - 范围：v0.3 方案 §06 中 M2「解析与渲染」的退出条件
 - 结论：**通过（PASS）**
-  - M2-1～M2-9 的功能与定性验收全部完成，最终 103 项测试 / 7 套件全绿。
+  - M2-1～M2-9 的功能与定性验收全部完成；历史收口为 103 项测试 / 7 套件，本轮追加回归后最新为 **109 项 / 7 套件**。
   - 期间存在一个 P0 缺陷（块级视觉完全不可见）与一个 P0 测试缺陷（假绿），**已于 2026-08-27 修复**。
   - AST 唯一语义来源已收口；`TokenScanner.swift` 从 595 行缩至 76 行，`a*b*c` 语义分叉已消除。
 
@@ -25,7 +25,7 @@ M2 的退出条件（v0.3 修订后）：`SourceIndex`、AST 语义层、后台 
 | 渲染协调器 | `Document/RenderCoordinator.swift` | 246 | 8 项 |
 | 性能基准 | `MuseTests/PerformanceTests.swift` | 137 | 5 项 |
 
-**103 项测试 / 7 套件全绿**（Swift Testing）。产品代码 2497 行。
+历史 M2 收口为 103 项测试 / 7 套件全绿（Swift Testing）。本轮新增 6 项渲染回归后，最新 Debug 全量为 **109 项 / 7 套件**，其中 `RendererTests` 为 **33 项**。产品代码 2497 行为历史收口统计。
 
 ## 2. 达成的部分
 
@@ -49,7 +49,7 @@ M2 的退出条件（v0.3 修订后）：`SourceIndex`、AST 语义层、后台 
 
 ### 性能（Release 构建，Apple Silicon）
 
-最终命令在 Release 配置下成功构建并通过 **103 项 / 7 套件**：
+历史 Release 验收命令成功构建并通过 **103 项 / 7 套件**（本轮新增测试未重跑 Release）：
 
 | 项目 | Release 实测 |
 |---|---:|
@@ -95,7 +95,20 @@ layer-backed 的 TextKit 2 `NSTextView` 把字形渲染进各 fragment 自己的
 3. 块归属直接读 `NSTextParagraph.attributedString` 首字符的 `.museBlock`——原实现那套「元素偏移回查 storage + 手写缓存（`museBlockCache` / `museBlockSignature` / `ObjectIdentifier` 追踪 / `hasBlockMarkup` 全文档扫描）」整块删掉了，净减 100+ 行。
 4. `draw(at:in:)` 的 `point` 实测恒为 `(0,0)`；容器左边缘 = `point.x - layoutFragmentFrame.minX`；绘制文本需要 `flipped: true` 的 `NSGraphicsContext`。
 
-修复后真机确认：序号 `1.` `2.`、圆点 `•`、复选框 `☑` `☐`、引用通宽背景 + 左竖线、代码块通宽背景（含开闭栏行）、分隔线横线全部正常。最终 103 项测试全绿。
+初次 fragment 修复后的截图曾确认序号 `1.` `2.`、圆点 `•`、复选框 `☑` `☐`、引用通宽背景 + 左竖线、代码块通宽背景（含开闭栏行）、分隔线横线可见；2026-08-27 后续截图复查发现列表 marker 的首行锚定、二级空心形态、垂直基线与水平槽位仍有缺陷，详见 §3.1，故“全部正常”的初次结论已被本轮复查取代。此前 103 项测试的历史结果仍保留；最新回归为 109 项 / 7 套件。
+
+### 3.1 2026-08-27 列表与任务 marker 视觉复查（已修复）
+
+截图复查发现四项列表视觉缺陷：
+
+1. 软换行列表项的一个 paragraph fragment 覆盖多条 `NSTextLineFragment`。旧实现按整个 paragraph fragment 高度居中 marker，marker 因而落在段落中部；现在用首个 `textLineFragments.first` 锚定 marker。
+2. 二级无序 marker 虽由 AST depth 选择 `◦`，某些字体 fallback 会把 U+25E6 视觉画成实心点。现在 marker glyph 判定直接读取 AST 写入的 `.museListDepth`，并由 fragment 绘制层使用矢量实心圆、空心圆和方块，保证二级中心留空，不从源码缩进重新推导 depth。
+3. 把较小字号 marker 居中到含 leading 的首行 `typographicBounds` 会使圆点和序号整体高于正文。现在读取首行 `glyphOrigin.y`：有序序号与 checkbox 按 marker font ascender 对齐正文 baseline，无序矢量符号按正文 font 的 x-height 视觉中心定位。
+4. 有序 marker 旧实现按自身 advance width 从正文列向左回推，实际形成右对齐；不同数字的 side bearing 又会造成 `1.` 比 `2.` 略向右。同层有序/无序 marker 现在使用段落 `headIndent - firstLineHeadIndent` 推导的固定槽位，有序文本通过 Core Text glyph path bounds 补偿可见墨迹左边界；`98.`/`99.`/`100.` 等多位序号按实际 glyph advance 二分求取槽内最大字号，正文列保持不动。
+
+任务 checkbox 的 checked marker 使用系统 accent 色，unchecked marker 使用外观感知的 `secondaryLabelColor`，浅色/深色都通过共享调色板解析。本轮只完成颜色与绘制，不实现点击切换；checkbox 点击切换 `[ ]`/`[x]`、标准文本编辑路径和一次撤销明确留到 M4。
+
+本轮新增 6 项测试：`listMarkersAlignWithFirstVisualLineMetrics`、`unorderedMarkerGlyphsUseSemanticDepth`、`unorderedMarkerPixelsDistinguishFilledAndHollow`、`taskMarkersUseAccentAndContrastingColors`、`orderedMarkersUseStableLaneAndFitLargeNumbers`、`orderedAndUnorderedMarkersShareDepthLaneWithoutMovingContent`。它们经真实 TextKit 2 fragment/位图路径验证首行锚定、垂直对齐、层级符号、checkbox 颜色，以及同层有序/无序固定槽位、`1.`/`2.` 可见左边界和多位序号不侵入正文；最新 Debug 全量证据为 **109 项 / 7 套件**，其中 `RendererTests` 为 **33 项**。独立 bundle Debug App 的视觉人工复查已通过：长列表 marker 位于第一视觉行、同层有序/无序 marker 左边界一致且正文列不动、二级 marker 明确为空心、checked checkbox 为蓝色强调且 unchecked checkbox 为灰色轮廓。M2/M0 的 IME、VoiceOver、零宽 marker 与完整外观热切换清单仍需按验收清单逐项执行；本节不把自动化或人工外观证据写成已完成的 checkbox 点击交互。
 
 ## 4. P0 测试缺陷：假绿（已修复）
 
@@ -264,7 +277,7 @@ M1-2 抽取 framework 后，首次直接打开 Debug App 暴露出两个宿主�
 M2-4 初版按每个代码块从文档起点反查围栏行，导致 1MB 全管线达到
 `4010.175459 ms`、200KB 协调器路径达到 `199.801625 ms`，超过既有粗防线。该问题在
 完成验收前已改为使用 AST `CodeBlock` 的 source range 做有界查找，不改变 AST 的语义
-决策；修复后 Debug 全量 103 项通过，1MB 为 `1405.897541 ms`，协调器为
+决策；修复后当时 Debug 全量 103 项通过，1MB 为 `1405.897541 ms`，协调器为
 `92.379542 ms`。未降低任何性能断言。
 
 ## 7. 替代方案调研（2026-08-27）
@@ -465,15 +478,16 @@ line=4  firstIndent=0.0  headIndent=24.0  |      - 第三层        ← 同一�
 
 1. `RendererTests.listParagraphIndentScalesWithDepth`：三层嵌套断言三行的 `firstLineHeadIndent` / `headIndent` 严格递增
 2. `nestedListMarkersAlignWithIndent`：经真实 fragment 断言各层符号的绘制 x 坐标随 depth 递增
-3. **真机截图核对**：打开示例文档，确认嵌套列表呈阶梯缩进、符号与文字对齐、三层符号分别为 `•` `◦` `▪`。截图存到 `docs/assets/m2-nested-list.png` 并在本报告 §6 引用
+3. **初次验收标准（已由 §3.1 的后续复查取代）**：打开示例文档，核对嵌套列表呈阶梯缩进、符号与文字对齐、三层符号分别为 `•` `◦` `▪`。截图存到 `docs/assets/m2-nested-list.png` 并在本报告 §6 引用
 4. 现有 `listParagraphHasHangingIndent` 测试会失败（它断言 `headIndent == 24`），改为断言 depth 1 的值
 
-**完成记录（2026-08-27）**：已完成。列表段落样式按 AST 携带的 depth 使用 24pt
-阶梯缩进，列表 fragment 的 marker 带随实际段落缩进定位，并按 depth 绘制
+**初次完成记录（2026-08-27）**：列表段落样式按 AST 携带的 depth 使用 24pt
+阶梯缩进，列表 fragment 的 marker 带随实际段落缩进定位，并按 depth 选择
 `•`/`◦`/`▪`。新增 `listParagraphIndentScalesWithDepth` 与
-`nestedListMarkersAlignWithIndent`；Debug 全量 **101 项 / 7 套件**测试通过。
-真机截图已保存为 [m2-nested-list.png](assets/m2-nested-list.png)，确认三层列表呈阶梯
-缩进且符号与内容列对齐。
+`nestedListMarkersAlignWithIndent`；当时 Debug 全量 **101 项 / 7 套件**测试通过。
+初次截图确认三层列表呈阶梯缩进且符号与内容列对齐；本轮后续截图复查发现软换行
+marker 的首行锚定与二级 `◦` 的字体 fallback 仍有视觉缺陷，初次“确认”不再作为
+最终证据，修复与最新真实 fragment/位图测试见 §3.1。
 
 ### 9.4 任务 M2-4：收缩 TokenScanner 到只处理未闭合语法（✅ 已完成）
 
@@ -511,7 +525,7 @@ line=4  firstIndent=0.0  headIndent=24.0  |      - 第三层        ← 同一�
 候选条件短路；`TokenScanner.swift` 只保留行边界兼容入口，最终 76 行。原
 `flanking`/`mod3`/`StarRun`/`punctuationSet` 等实现均已删除，`a*b*c` 回归测试改为
 断言 AST 产出的 emphasis。TokenScanner 28 项、MarkdownSemantics 18 项专项测试与
-全量 **103 项 / 7 套件** Debug 测试通过；性能套件中的 200KB 协调器路径实测
+当时全量 **103 项 / 7 套件** Debug 测试通过；性能套件中的 200KB 协调器路径实测
 `92.379542 ms`，未放宽任何断言。
 真机截图已保存为 [m2-inline-and-fence.jpg](assets/m2-inline-and-fence.jpg)，确认粗体、斜体、删除线、行内代码、嵌套强调、三层星号与代码围栏均正常显示，围栏 info string 与闭栏标记在块外隐藏。
 
@@ -543,7 +557,9 @@ line=4  firstIndent=0.0  headIndent=24.0  |      - 第三层        ← 同一�
 裁切。新增 `taskAndBulletMarkersAlignToSameContentColumn`，经真实 TextKit 2 line
 fragment 断言两种 marker 的内容起始列一致；Debug 全量 **102 项 / 7 套件**测试通过。
 真机截图已保存为 [m2-task-list.png](assets/m2-task-list.png)，确认圆点/复选框与文字
-间距一致且无 ghost 宽度造成的大空白。
+间距一致且无 ghost 宽度造成的大空白。后续复查另将 checked checkbox 改为系统
+accent 色、unchecked 改为外观感知的 `secondaryLabelColor`；本轮没有实现 checkbox
+点击切换，源码 `[ ]`/`[x]` 标准替换与一次撤销列入 M4。
 
 ### 9.6 任务 M2-6：代码围栏闭栏行在文档末尾时不并入块样式（✅ 已完成）
 
@@ -675,16 +691,17 @@ NSAppearance.current = nil       → [0.96, 0.97, 0.98, 1.0]
 1. M2-1 到 M2-8 全部验收通过（M2-9 允许结论为「非缺陷」）
 2. `Parsing/TokenScanner.swift` < 150 行，且不含 CommonMark 匹配逻辑
 3. `RenderEngine.prepare` 中 `needsMarkdownSemantics` 短路已删除
-4. 列表嵌套在真机上呈阶梯缩进，三层符号有区分
+4. 列表嵌套在真机上呈阶梯缩进，三层符号有区分；软换行 marker 锚定首个视觉行，序号与正文 baseline 对齐、圆点与正文 x-height 居中，二级 marker 实际为空心
 5. 暗色模式与外观热切换下块视觉配色正确
 6. 全量测试全绿，且测试数不低于当前 78 项
 7. 本报告 §5「未做的架构收口」改写为「已收口」，附收口前后的行数与语义分叉对比
 
-**最终自查（2026-08-27）**：以上七条均已满足。M2-1～M2-8 的验收通过，M2-9
-定性为非缺陷；`TokenScanner.swift` 为 76 行且不含旧 CommonMark 匹配逻辑，
-`RenderEngine.prepare` 无 `needsMarkdownSemantics` 短路；真机确认嵌套列表阶梯缩进、浅深色
-外观热切换和块视觉；Debug/Release 均为 103 项 / 7 套件全绿。因此本报告结论由
-「有条件通过」更新为 **「通过」**。
+**历史最终自查（2026-08-27）**：M2-1～M2-8 的验收通过，M2-9 定性为非缺陷；
+`TokenScanner.swift` 为 76 行且不含旧 CommonMark 匹配逻辑，`RenderEngine.prepare` 无
+`needsMarkdownSemantics` 短路；初次真机截图确认嵌套列表阶梯缩进、浅深色外观热切换和块视觉，
+Debug/Release 当时均为 103 项 / 7 套件全绿。后续截图复查发现并修复了 §3.1 的四个列表
+marker 缺陷，并补充了任务 checkbox 颜色；最新 Debug 全量为 **109 项 / 7 套件**，其中
+`RendererTests` 为 **33 项**。checkbox 点击切换仍未实现，明确留到 M4。
 
 ### 9.11 交付要求
 

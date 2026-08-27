@@ -6,12 +6,23 @@ import MuseKit
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillFinishLaunching(_ notification: Notification) {
+        AppPreferences.applyAppearance()
         MuseDocument.windowControllerFactory = { document in
             let hosting = NSHostingController(rootView: EditorShellView(document: document))
-            let window = NSWindow(contentViewController: hosting)
-            window.setContentSize(NSSize(width: 960, height: 660))
-            window.minSize = NSSize(width: 480, height: 320)
+            let window = NSWindow(
+                contentRect: .zero,
+                styleMask: [.titled, .closable, .resizable, .miniaturizable, .fullSizeContentView],
+                backing: .buffered,
+                defer: false
+            )
+            window.contentViewController = hosting
+            window.setContentSize(NSSize(width: 1040, height: 700))
+            window.minSize = NSSize(width: 720, height: 420)
             window.title = document.displayName
+            window.titleVisibility = .hidden
+            window.titlebarAppearsTransparent = true
+            window.isMovableByWindowBackground = true
+            window.toolbarStyle = .unified
             window.isReleasedWhenClosed = false
             let controller = NSWindowController(window: window)
             window.makeKeyAndOrderFront(nil)
@@ -26,6 +37,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
+    func applicationShouldOpenUntitledFile(_ sender: NSApplication) -> Bool {
+        UserDefaults.standard.object(forKey: AppPreferences.openUntitledDocumentKey) as? Bool ?? true
+    }
+
     func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool { true }
 
     private func buildMainMenu() -> NSMenu {
@@ -35,6 +50,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mainMenu.addItem(appMenuItem)
         let appMenu = NSMenu()
         appMenu.addItem(withTitle: "关于 Muse", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        appMenu.addItem(.separator())
+        let settingsItem = NSMenuItem(title: "设置…", action: #selector(showSettings(_:)), keyEquivalent: ",")
+        settingsItem.target = self
+        appMenu.addItem(settingsItem)
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "隐藏 Muse", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         appMenu.addItem(.separator())
@@ -67,5 +86,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         editMenuItem.submenu = editMenu
 
         return mainMenu
+    }
+
+    @objc private func showSettings(_ sender: Any?) {
+        SettingsWindowController.show()
     }
 }

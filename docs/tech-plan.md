@@ -16,6 +16,21 @@
 
 ---
 
+## 00 本轮视觉复查（2026-08-27）
+
+本轮对照截图复查发现并修复了四项列表视觉缺陷：
+
+1. 软换行列表项的一个 paragraph fragment 覆盖多条 `NSTextLineFragment`。旧实现按整个 paragraph fragment 的高度居中 marker，导致 marker 落在段落中部；现改为锚定首个 `textLineFragments.first`。
+2. 二级无序 marker 虽然由 AST depth 选择 `◦`，字体 fallback 仍可能把 U+25E6 画成实心点。现在由 `.museListDepth` 驱动 glyph 判定，并在 fragment 绘制层用矢量实心圆、空心圆和方块，确保二级中心留空；绘制层不从源码缩进重新推导 depth。
+3. 首行行框包含 glyph 上下方的 leading；把较小字号 marker 居中到 `typographicBounds` 会使圆点和序号整体高于正文。现在读取首个 line fragment 的 `glyphOrigin.y`：有序序号与 checkbox 按 marker font ascender 对齐正文 baseline，无序矢量符号对齐正文 font 的 x-height 视觉中心，不使用固定像素补偿。
+4. 有序 marker 旧按自身宽度从正文列向左回推，等同于右对齐；数字 `1` 与 `2` 的可见左边界因字形 side bearing 不同而出现细微错位，也无法与无序 marker 共用稳定左边界。现在 marker 使用段落 `headIndent - firstLineHeadIndent` 推导出的固定槽位，文本 marker 以 Core Text 的实际 glyph path bounds 补偿可见墨迹左边界；多位序号按实际 glyph advance 二分求取槽内最大字号，保留正文列并避免侵入正文。
+
+任务 checkbox 的 checked marker 使用系统 accent 色，unchecked marker 使用 `secondaryLabelColor`，两者都按浅色/深色外观解析。本轮只完成颜色与绘制，不实现点击切换；checkbox 点击将留到 M4，并通过标准文本编辑把 `[ ]`/`[x]` 替换为一次可撤销的源码操作。
+
+本轮新增 6 项真实 TextKit 2/位图回归测试；最新 Debug 全量证据为 **109 tests / 7 suites**，其中 `RendererTests` 为 **33 项**。这组证据验证了首行锚定、无序 marker 的 x-height 对齐、有序 marker 的 baseline 与固定槽位、`1.`/`2.` 的可见墨迹左边界、`98.`/`99.`/`100.` 不侵入正文、一级实心与二级空心的实际 fragment 像素，以及任务 checkbox 的外观颜色。
+
+根任务以独立 bundle 启动 Debug App 做了视觉人工复查，已确认长列表 marker 位于第一视觉行、无序 marker 与正文 x-height 居中、有序序号与正文基线一致、二级 marker 明确为空心、checked checkbox 使用蓝色强调而 unchecked checkbox 使用灰色轮廓。本结果只覆盖本轮列表/checkbox 外观，不等同于 M0-3 的 IME、VoiceOver、零宽 marker、完整外观热切换等清单已全部完成。
+
 ## 01 结论
 
 **技术路线保持不变：使用 AppKit 的 `NSTextView`（TextKit 2）作为编辑核心，SwiftUI 作为应用外壳，swift-markdown 负责 Markdown 解析。**
@@ -261,6 +276,7 @@ M0 已验证近零宽方案在中文、emoji、组合字符、跨行选择、自
 - 标题行首 Enter 断开标题；
 - `**`、`*`、反引号的保守自动配对；
 - 行首 `- `、`1. `、`- [ ]` 的块识别；
+- 任务 checkbox 点击切换属于 M4：命中图形后通过标准文本编辑将源码 `[ ]`/`[x]` 替换，并作为一次 undo 操作；当前只绘制 checkbox，尚未提供点击切换；
 - undo/redo 后触发新的 revision 和派生渲染。
 
 自动配对必须尊重选区、转义字符、已有闭合符号和 marked text；不要直接在 `keyDown` 中吞掉所有按键，优先使用 `NSTextViewDelegate` 的命令与替换入口。
@@ -318,7 +334,7 @@ M0 已验证近零宽方案在中文、emoji、组合字符、跨行选择、自
 | 20KB | 9.350 ms | 3.565 ms |
 | 200KB | 97.765 ms | 36.665 ms |
 
-M1-2 已恢复 Release 测量链路；最终 Release 全量测试为 103 项 / 7 套件全绿。作为历史对比，v0.2 的手写字节扫描器在 200KB 上是 8.0 ms，但当前全量 AST 仍落在后台与 150ms 样式落地目标内，因此不需要维护第二套 CommonMark 实现。
+M1-2 已恢复 Release 测量链路；历史 Release 全量测试为 103 项 / 7 套件全绿。作为历史对比，v0.2 的手写字节扫描器在 200KB 上是 8.0 ms，但当前全量 AST 仍落在后台与 150ms 样式落地目标内，因此不需要维护第二套 CommonMark 实现。最新 Debug 回归（含本轮 6 项渲染测试）为 109 项 / 7 套件全绿。
 
 因此顺序是：**先用全量 AST 解析，把架构简化下来**；只有当样式落地延迟实测不达标时，才引入块级脏区重解析——即定位变化所在的顶层块，只对该块调用 `Document(parsing:)`，而不是维护第二套 CommonMark 实现。swift-markdown 与 cmark-gfm 都不提供增量解析 API。
 
@@ -348,6 +364,8 @@ M1-2 已恢复 Release 测量链路；最终 Release 全量测试为 103 项 / 7
 3. **块归属来源**：自定义属性 `.museBlock` 由属性层随样式写入整行/整块，fragment 直接读 `NSTextParagraph.attributedString` 的首字符属性——不需要回查 storage 偏移，也不需要自建缓存。
 4. **坐标**：`draw(at:in:)` 的 `point` 是 fragment 局部原点（实测恒为 `(0,0)`）；容器左边缘 = `point.x - layoutFragmentFrame.minX`。绘制文本需要一个 `flipped: true` 的 `NSGraphicsContext`。
 5. **隔离**：基类接口是 nonisolated，主题需相应声明 nonisolated（AppKit 只在主线程调用这些接口）。
+6. **列表 marker**：软换行时以 `textLineFragments.first` 的真实 line geometry 锚定 marker，而不是用整个 paragraph fragment 的高度居中；无序 marker 的 depth 直接读取 AST 写入的 `.museListDepth`，并用矢量实心圆/空心圆/方块保证二级视觉留空；同层有序/无序 marker 使用段落缩进推导的固定槽位，有序文本按 Core Text glyph path bounds 补偿可见左边界，多位序号在槽内适配且不移动正文列。
+7. **任务 checkbox**：checked 使用系统 accent 色，unchecked 使用外观感知的 `secondaryLabelColor`；本轮只完成绘制颜色，图形命中与源码 `[ ]`/`[x]` 标准替换及一次撤销列入 M4。
 
 **已知的 TextKit 2 缺陷（来自 STTextView 维护者提交给 Apple 的公开清单，见 §2.1 与参考资料）。** 与本节直接相关的几条，在实现和排错时应当预期：
 
@@ -360,7 +378,7 @@ M1-2 已恢复 Release 测量链路；最终 Release 全量测试为 103 项 / 7
 
 另有一条**私有 API 依赖**值得知道：STTextView 的 fragment 在 `state < .layoutAvailable` 时会通过混淆的 selector 调用私有的 `layout` 方法，作者注明「没有公开 API 提供这个能力」。Muse 目前靠 `enumerateTextLayoutFragments(options: .ensuresLayout)` 规避，但这说明「绘制时 fragment 尚未排版」是 TextKit 2 的真实缺口，若后续遇到首帧块视觉缺失，根因可能在此。
 
-**实现风险：动态色跨外观失效（已验证机制，待在真机确认）。**
+**实现风险：动态色跨外观失效（机制已修复；本轮列表/checkbox 外观已人工通过）。**
 
 `NSColor.cgColor` 对动态色（`NSColor(name:dynamicProvider:)`）按 `NSAppearance.current` 解析。实测：
 
@@ -375,7 +393,7 @@ NSAppearance.current = nil       → [0.96, 0.97, 0.98, 1.0]   ← 静默回落�
 1. 绘制时 `NSAppearance.current` 未指向视图外观 → 暗色模式下块视觉画成亮色；
 2. 即使绘制时外观正确，TextKit 会按 text element 缓存并复用 fragment，外观切换后未必重绘全部 fragment → 残留旧外观的颜色。
 
-对策：不在 fragment 内解析动态色，改为持有一份**共享的、已解析的 `CGColor` 调色板**，在外观变化时整体替换（同一实例换内容，而不是每个 fragment 各持一份副本——副本会比它被解析时的外观活得更久）。这一项列入 M3 待办，验收方式是暗色模式下逐项检查块视觉配色。
+对策：不在 fragment 内解析动态色，改为持有一份**共享的、已解析的 `CGColor` 调色板**，在外观变化时整体替换（同一实例换内容，而不是每个 fragment 各持一份副本——副本会比它被解析时的外观活得更久）。块视觉调色板与任务 checkbox 的 checked accent / unchecked secondary label 已接入；独立 Debug App 窗口已人工通过本轮列表/checkbox 外观复查，但这不替代 M0-3 的 IME、VoiceOver、零宽 marker 与完整外观热切换清单。
 
 **测试必须走真实 fragment 路径。** 直接调用绘制函数往位图里画会绕过 TextKit 图层路径，产生「真机全白、测试全绿」的假绿——v0.2 期间实际发生过（见《M2 评价报告》§4）。断言应落在「`layoutManager` 确实生产自定义 fragment」加「该 fragment 的绘制确实落墨」上。
 
@@ -387,7 +405,7 @@ NSAppearance.current = nil       → [0.96, 0.97, 0.98, 1.0]   ← 静默回落�
 - 粗体、斜体、删除线、行内代码；
 - 行内链接样式、点击打开、光标处回显源码；
 - 图片语法样式与悬浮/侧边预览，不替换源码；
-- 无序、有序和任务列表，**含嵌套层级缩进与分级符号**；
+- 无序、有序和任务列表的渲染，**含嵌套层级缩进与分级符号**；任务 checkbox 点击切换留到 M4；
 - 代码围栏，无语法高亮；
 - 引用块通宽背景 + 左竖线；
 - 分隔线；
@@ -418,7 +436,7 @@ NSAppearance.current = nil       → [0.96, 0.97, 0.98, 1.0]   ← 静默回落�
 | M1 骨架 | 1 周 | Xcode 工程；`NSDocument → EditorBuffer → NSTextStorage` 单一所有权；open/save/autosave；SwiftUI 外壳 | ✅ 通过 |
 | M2 解析与渲染 | 1.5～2 周 | `SourceIndex`、AST 语义层、后台 revision 管线；标题、强调、代码、链接；**块级视觉绘制地基（自定义 fragment）**；单元测试覆盖 Unicode 与未闭合语法 | ✅ 通过（M2-1～M2-9 已收口，见 M2 报告 §9.10） |
 | M3 光标交互 | 1.5～2 周 | marker 回显、方向键、鼠标命中、跨行选区、源码模式；无 TextKit 1 fallback | 未开始 |
-| M4 块行为 | 1 周 | 列表续行/退出、标题行为、任务列表、自动配对；复合操作一次撤销 | 未开始 |
+| M4 块行为 | 1 周 | 列表续行/退出、标题行为、任务 checkbox 点击将源码 `[ ]`/`[x]` 标准替换、自动配对；复合操作一次撤销 | 未开始 |
 | M5 收尾功能 | 1 周 | 图片预览、查找替换、源码模式打磨、（候选）表格渲染 | 未开始 |
 | M6 稳定与发布准备 | 1～2 周 | IME 矩阵、autosave/reopen、崩溃恢复、性能、VoiceOver、主题和回归测试 | 未开始 |
 
@@ -465,6 +483,7 @@ M0 仍是 go/no-go gate。
 - 块级视觉在**真机窗口**中可见：列表圆点/序号/复选框、引用通宽背景 + 左竖线、代码块通宽背景（含开闭栏行）、分隔线横线；
 - 渲染测试经由 `layoutManager` 真实生产的 fragment，而非直接调用绘制函数；
 - 嵌套列表各层级缩进与符号有区分；
+- 任务 checkbox checked 使用系统 accent 色、unchecked 使用外观感知的 secondary label 色；点击切换 `[ ]`/`[x]` 与一次 undo 属于 M4，当前不宣称已实现；
 - 光标进入块内时源码 marker 回显、图形符号让位；
 - **暗色模式下逐项检查块视觉配色**（动态色在 fragment 内解析会静默回落亮色，见 §4.8）；
 - 系统外观切换后已排版区域的块视觉立即跟随（验证 fragment 缓存不残留旧配色）；
@@ -487,7 +506,7 @@ M0 仍是 go/no-go gate。
 
 ---
 
-**下一步：**进入 M3 光标交互：在已收口的 AST/fragment 管线上继续打磨 marker 回显、方向键、鼠标命中与跨行选区。M2 的最终验收证据见《M2 评价报告》§9.10。
+**下一步：**进入 M3 光标交互：在已收口的 AST/fragment 管线上继续打磨 marker 回显、方向键、鼠标命中与跨行选区；随后在 M4 实现 checkbox 图形命中、源码 `[ ]`/`[x]` 标准文本替换和一次撤销。M2 的历史验收与本轮复查证据见《M2 评价报告》§9.10。
 
 ## 参考资料
 

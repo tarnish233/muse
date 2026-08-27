@@ -311,6 +311,40 @@ import Testing
         #expect(light.codeBackground.components != dark.codeBackground.components)
         #expect(light.marker.components != dark.marker.components)
         #expect(light.border.components != dark.border.components)
+        // The system accent may intentionally remain the same in both
+        // appearances; the palette still resolves it through NSColor so
+        // custom/system accent changes are reflected in the marker.
+        #expect(light.checkboxUnchecked.components != dark.checkboxUnchecked.components)
+    }
+
+    @Test func taskMarkersUseAccentAndContrastingColors() throws {
+        let source = "- [ ] 待办\n- [x] 完成"
+        let storage = NSTextStorage(string: source)
+        let textView = EditorTextView.make(textStorage: storage)
+        textView.frame = NSRect(x: 0, y: 0, width: 640, height: 180)
+        textView.textContainer?.containerSize = NSSize(width: 640, height: CGFloat.greatestFiniteMagnitude)
+
+        let package = engine.prepare(source)
+        _ = engine.render(package: package, selection: nil, into: storage)
+        let taskFragments = customFragments(in: textView).filter {
+            $0.blockKind == BlockVisual.list.rawValue + ":t"
+        }
+        #expect(taskFragments.count == 2)
+        guard taskFragments.count == 2 else { return }
+
+        let unchecked = try #require(taskFragments.first {
+            if case .task(checked: false) = $0.listMarkerGlyph { return true }
+            return false
+        })
+        let checked = try #require(taskFragments.first {
+            if case .task(checked: true) = $0.listMarkerGlyph { return true }
+            return false
+        })
+        let palette = BlockVisualPalette.shared.snapshot()
+        #expect(unchecked.listMarkerColor?.components == palette.checkboxUnchecked.components)
+        #expect(checked.listMarkerColor?.components == palette.checkboxChecked.components)
+        #expect(unchecked.listMarkerColor?.components != palette.marker.components)
+        #expect(checked.listMarkerColor?.components != palette.marker.components)
     }
 
     @Test func blockVisualsFollowAppearance() {
@@ -415,6 +449,155 @@ import Testing
         // allow antialiasing and glyph-width differences at the edge.
         #expect(x[1] - x[0] >= 20)
         #expect(x[2] - x[1] >= 20)
+    }
+
+    @Test func unorderedMarkerGlyphsUseSemanticDepth() {
+        #expect(ListMarkerGlyph.unordered(depth: 1).text == "•")
+        #expect(ListMarkerGlyph.unordered(depth: 2).text == "◦")
+        #expect(ListMarkerGlyph.unordered(depth: 3).text == "▪")
+        // Depth is clamped for a deeper AST list; it is never inferred from
+        // source indentation by the drawing layer.
+        #expect(ListMarkerGlyph.unordered(depth: 99).text == "▪")
+    }
+
+    /// The marker pixels come from the real TextKit 2 fragments.  This catches
+    /// a font fallback that paints U+25E6 as a filled dot even though the glyph
+    /// string itself is correct.
+    @Test func unorderedMarkerPixelsDistinguishFilledAndHollow() throws {
+        let source = "- 一级\n  - 二级"
+        let storage = NSTextStorage(string: source)
+        let textView = EditorTextView.make(textStorage: storage)
+        textView.frame = NSRect(x: 0, y: 0, width: 320, height: 180)
+        textView.textContainer?.containerSize = NSSize(width: 320, height: CGFloat.greatestFiniteMagnitude)
+
+        let package = engine.prepare(source)
+        _ = engine.render(package: package, selection: nil, into: storage)
+        let fragments = customFragments(in: textView).filter {
+            $0.blockKind == BlockVisual.list.rawValue + ":u"
+        }
+        #expect(fragments.count == 2)
+        guard fragments.count == 2 else { return }
+
+        let glyphs = fragments.compactMap { $0.listMarkerGlyph?.text }
+        #expect(glyphs == ["•", "◦"])
+
+        let filledLuma = try #require(markerCenterLuma(of: fragments[0]))
+        let hollowLuma = try #require(markerCenterLuma(of: fragments[1]))
+        // The bitmap is white, so a filled center is dark while a hollow
+        // center remains the background (allowing a small antialiasing margin).
+        #expect(filledLuma < 2.8)
+        #expect(hollowLuma > 2.95)
+    }
+
+    @Test func listMarkersAlignWithFirstVisualLineMetrics() throws {
+        let source = "- " + String(repeating: "可换行的列表内容 ", count: 24) + "\n1. 有序列表"
+        let storage = NSTextStorage(string: source)
+        let textView = EditorTextView.make(textStorage: storage)
+        textView.frame = NSRect(x: 0, y: 0, width: 240, height: 640)
+        textView.textContainer?.containerSize = NSSize(width: 240, height: CGFloat.greatestFiniteMagnitude)
+
+        let package = engine.prepare(source)
+        _ = engine.render(package: package, selection: nil, into: storage)
+        let fragments = customFragments(in: textView)
+        let fragment = try #require(fragments.first {
+            $0.blockKind == BlockVisual.list.rawValue + ":u"
+        })
+        let firstLine = try #require(fragment.textLineFragments.first)
+        #expect(fragment.textLineFragments.count > 1)
+
+        let drawPoint = CGPoint(x: fragment.layoutFragmentFrame.origin.x + 24, y: 20)
+        let markerFrame = try #require(fragment.listMarkerFrame(at: drawPoint))
+        let bodyFont = try #require(font(at: 2, in: storage))
+        let bodyXHeightCenterY = drawPoint.y + firstLine.glyphOrigin.y - bodyFont.xHeight / 2
+        #expect(abs(markerFrame.midY - bodyXHeightCenterY) < 0.5)
+        // A paragraph fragment can be much taller than its first line; the
+        // marker must stay near the first line instead of paragraph-center.
+        #expect(abs(markerFrame.midY - (drawPoint.y + fragment.layoutFragmentFrame.height / 2)) > 20)
+
+        let ordered = try #require(fragments.first {
+            $0.blockKind == BlockVisual.list.rawValue + ":o"
+        })
+        let orderedLine = try #require(ordered.textLineFragments.first)
+        let orderedPoint = CGPoint(x: ordered.layoutFragmentFrame.origin.x + 24, y: 20)
+        let orderedFrame = try #require(ordered.listMarkerFrame(at: orderedPoint))
+        let orderedFont = NSFont.systemFont(ofSize: try #require(ordered.listMarkerGlyph).fontSize)
+        let markerBaselineY = orderedFrame.minY + orderedFont.ascender
+        let contentBaselineY = orderedPoint.y + orderedLine.glyphOrigin.y
+        #expect(abs(markerBaselineY - contentBaselineY) < 0.5)
+    }
+
+    @Test func orderedMarkersUseStableLaneAndFitLargeNumbers() throws {
+        let source = "1. one\n2. two\n\nseparator\n\n98. ninety-eight\n99. ninety-nine\n100. hundred"
+        let storage = NSTextStorage(string: source)
+        let textView = EditorTextView.make(textStorage: storage)
+        textView.frame = NSRect(x: 0, y: 0, width: 320, height: 260)
+        textView.textContainer?.containerSize = NSSize(width: 320, height: CGFloat.greatestFiniteMagnitude)
+
+        let package = engine.prepare(source)
+        _ = engine.render(package: package, selection: nil, into: storage)
+        let fragments = customFragments(in: textView).filter {
+            $0.blockKind == BlockVisual.list.rawValue + ":o"
+        }
+        #expect(fragments.count == 5)
+        guard fragments.count == 5 else { return }
+        #expect(fragments.compactMap { $0.listMarkerGlyph?.text } == ["1.", "2.", "98.", "99.", "100."])
+
+        let points = fragments.map(markerDrawPoint(for:))
+        let frames = try fragments.enumerated().map { index, fragment in
+            try #require(fragment.listMarkerFrame(at: points[index]))
+        }
+        // The fixed lane left edge is stable for 1. and 2.; compare visible
+        // bitmap ink as well as the lane geometry returned by real fragments.
+        let lanes = try fragments.enumerated().map { index, fragment in
+            try #require(fragment.listMarkerLaneFrame(at: points[index]))
+        }
+        #expect(abs(lanes[0].minX - lanes[1].minX) < 0.01)
+        let inkBounds = try fragments.enumerated().map { index, fragment in
+            try #require(markerInkBounds(of: fragment, at: points[index]))
+        }
+        #expect(abs(inkBounds[0].minX - inkBounds[1].minX) < 1)
+
+        // 98., 99., and 100. stay inside the same lane instead of pushing the body
+        // column. The draw point is the content-column anchor in fragment space.
+        for index in 2..<5 {
+            #expect(frames[index].maxX <= points[index].x - ListMarkerGeometry.markerGap + 0.5)
+            #expect(frames[index].width <= ListMarkerGeometry.defaultMarkerLaneWidth - ListMarkerGeometry.markerGap + 0.5)
+            #expect(inkBounds[index].maxX <= points[index].x - ListMarkerGeometry.markerGap + 0.5)
+        }
+    }
+
+    @Test func orderedAndUnorderedMarkersShareDepthLaneWithoutMovingContent() throws {
+        let source = "1. 有序\n- 无序"
+        let storage = NSTextStorage(string: source)
+        let textView = EditorTextView.make(textStorage: storage)
+        textView.frame = NSRect(x: 0, y: 0, width: 320, height: 180)
+        textView.textContainer?.containerSize = NSSize(width: 320, height: CGFloat.greatestFiniteMagnitude)
+
+        let package = engine.prepare(source)
+        _ = engine.render(package: package, selection: nil, into: storage)
+        let fragments = customFragments(in: textView)
+        let ordered = try #require(fragments.first { $0.blockKind == BlockVisual.list.rawValue + ":o" })
+        let unordered = try #require(fragments.first { $0.blockKind == BlockVisual.list.rawValue + ":u" })
+        let orderedLine = try #require(ordered.textLineFragments.first)
+        let unorderedLine = try #require(unordered.textLineFragments.first)
+        let orderedPoint = markerDrawPoint(for: ordered)
+        let unorderedPoint = markerDrawPoint(for: unordered)
+        let orderedFrame = try #require(ordered.listMarkerFrame(at: orderedPoint))
+        let unorderedFrame = try #require(unordered.listMarkerFrame(at: unorderedPoint))
+        let orderedLane = try #require(ordered.listMarkerLaneFrame(at: orderedPoint))
+        let unorderedLane = try #require(unordered.listMarkerLaneFrame(at: unorderedPoint))
+        #expect(abs(orderedLane.minX - unorderedLane.minX) < 0.01)
+        let orderedInk = try #require(markerInkBounds(of: ordered, at: orderedPoint))
+        let unorderedInk = try #require(markerInkBounds(of: unordered, at: unorderedPoint))
+        #expect(abs(orderedInk.minX - unorderedInk.minX) < 2)
+
+        // Convert each line-local location into the same draw coordinate space
+        // used by the marker frame and bitmap assertions.
+        let orderedContentX = orderedPoint.x + orderedLine.locationForCharacter(at: 3).x
+        let unorderedContentX = unorderedPoint.x + unorderedLine.locationForCharacter(at: 2).x
+        #expect(abs(orderedContentX - unorderedContentX) < 0.5)
+        #expect(orderedFrame.maxX <= orderedPoint.x - ListMarkerGeometry.markerGap + 0.5)
+        #expect(unorderedFrame.maxX <= unorderedPoint.x - ListMarkerGeometry.markerGap + 0.5)
     }
 
     @Test func taskAndBulletMarkersAlignToSameContentColumn() {
@@ -586,6 +769,66 @@ import Testing
         return minX
     }
 
+    /// Return the visible ink bounds from the real fragment's marker draw.
+    /// Only block visuals are drawn, so body glyphs cannot mask lane overlap.
+    private func markerDrawPoint(for fragment: MuseLayoutFragment) -> CGPoint {
+        CGPoint(
+            x: fragment.layoutFragmentFrame.origin.x + ListMarkerGeometry.defaultMarkerLaneWidth,
+            y: 20
+        )
+    }
+
+    private func markerInkBounds(
+        of fragment: MuseLayoutFragment,
+        at drawPoint: CGPoint
+    ) -> (minX: CGFloat, maxX: CGFloat)? {
+        let scale: CGFloat = 4
+        let width = 160
+        let height = 160
+        guard let bitmap = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: Int(CGFloat(width) * scale),
+            pixelsHigh: Int(CGFloat(height) * scale),
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bitmapFormat: [],
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ), let context = NSGraphicsContext(bitmapImageRep: bitmap) else {
+            return nil
+        }
+
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = context
+        context.cgContext.scaleBy(x: scale, y: scale)
+        NSColor.white.setFill()
+        NSRect(x: 0, y: 0, width: width, height: height).fill()
+        fragment.drawBlockVisuals(at: drawPoint, in: context.cgContext)
+        context.flushGraphics()
+        NSGraphicsContext.restoreGraphicsState()
+
+        guard let data = bitmap.bitmapData else { return nil }
+        let bytesPerPixel = max(1, bitmap.bitsPerPixel / 8)
+        var minX: Int?
+        var maxX: Int?
+        for row in 0..<bitmap.pixelsHigh {
+            let rowStart = row * bitmap.bytesPerRow
+            for column in 0..<bitmap.pixelsWide {
+                let pixelStart = rowStart + column * bytesPerPixel
+                let pixel = UnsafeBufferPointer(start: data + pixelStart, count: bytesPerPixel)
+                if pixel.prefix(3).contains(where: { $0 < 245 }) {
+                    minX = min(minX ?? column, column)
+                    maxX = max(maxX ?? column, column)
+                }
+            }
+        }
+        guard let minX, let maxX else { return nil }
+        return (CGFloat(minX) / scale, CGFloat(maxX) / scale)
+    }
+
     /// 在指定外观上下文中经真实 fragment 绘制引用背景，采样远离竖线与字形的像素。
     private func quoteBackgroundPixel(of fragment: MuseLayoutFragment, in appearance: NSAppearance) -> [CGFloat] {
         let width = 640
@@ -681,6 +924,49 @@ import Testing
             }
         }
         return count
+    }
+
+    /// Render one already-laid-out fragment into an isolated bitmap and sample
+    /// the marker's center.  TextKit's bitmap coordinate orientation differs
+    /// from the flipped NSString drawing context, so sample both vertical
+    /// orientations and use the darker one.
+    private func markerCenterLuma(of fragment: MuseLayoutFragment) -> CGFloat? {
+        let width = 120
+        let height = 100
+        guard let bitmap = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: width,
+            pixelsHigh: height,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bitmapFormat: [],
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ), let context = NSGraphicsContext(bitmapImageRep: bitmap) else {
+            return nil
+        }
+
+        let drawPoint = CGPoint(x: fragment.layoutFragmentFrame.origin.x + 24, y: 20)
+        guard let markerFrame = fragment.listMarkerFrame(at: drawPoint) else { return nil }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = context
+        NSColor.white.setFill()
+        NSRect(x: 0, y: 0, width: width, height: height).fill()
+        fragment.drawBlockVisuals(at: drawPoint, in: context.cgContext)
+        context.flushGraphics()
+        NSGraphicsContext.restoreGraphicsState()
+
+        let x = min(width - 1, max(0, Int(markerFrame.midX.rounded())))
+        let y = Int(markerFrame.midY.rounded())
+        let candidates = [y, height - 1 - y].map { min(height - 1, max(0, $0)) }
+        return candidates.compactMap { row in
+            bitmap.colorAt(x: x, y: row)?.usingColorSpace(.deviceRGB).map {
+                $0.redComponent + $0.greenComponent + $0.blueComponent
+            }
+        }.min()
     }
 
     @Test func nestedEmphasisCombinesTraits() {

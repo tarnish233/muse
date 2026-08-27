@@ -155,6 +155,10 @@ public nonisolated struct BlockVisualPaletteSnapshot: @unchecked Sendable {
     public let codeBackground: CGColor
     public let marker: CGColor
     public let border: CGColor
+    /// Accent used for checked task markers.
+    public let checkboxChecked: CGColor
+    /// Contrasting label color used for the unchecked checkbox outline.
+    public let checkboxUnchecked: CGColor
 }
 
 /// 块视觉调色板的唯一共享实例。
@@ -191,7 +195,9 @@ public nonisolated final class BlockVisualPalette: @unchecked Sendable {
             quoteBackground: resolvedCGColor(theme.quoteBackground, for: appearance),
             codeBackground: resolvedCGColor(theme.codeBackground, for: appearance),
             marker: resolvedCGColor(theme.markerText, for: appearance),
-            border: resolvedCGColor(theme.borderColor, for: appearance)
+            border: resolvedCGColor(theme.borderColor, for: appearance),
+            checkboxChecked: resolvedCGColor(NSColor.controlAccentColor, for: appearance),
+            checkboxUnchecked: resolvedCGColor(NSColor.secondaryLabelColor, for: appearance)
         )
     }
 

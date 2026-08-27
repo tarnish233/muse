@@ -82,7 +82,7 @@ nonisolated struct TokenScanner {
                 tokens[openFenceToken] = Token(
                     kind: .codeFence,
                     markerRange: open.markerRange,
-                    closingMarkerRange: nil,
+                    closingMarkerRange: isFenceLine,
                     contentRange: openFenceBodyStart..<bodyStart,
                     line: open.line
                 )
@@ -137,7 +137,8 @@ nonisolated struct TokenScanner {
 
     // MARK: - 块级
 
-    /// 行首代码围栏：``` 起 3 个及以上反引号（允许 ≤3 空格缩进）。返回 marker 区间。
+    /// 行首代码围栏：``` 起 3 个及以上反引号（允许 ≤3 空格缩进）。
+    /// 返回整段围栏行，令 info string 与反引号一起参与显隐。
     private func scanFenceMarker(
         _ bytes: [UInt8],
         _ line: Line,
@@ -156,7 +157,7 @@ nonisolated struct TokenScanner {
         let runStart = i
         while i < line.end, bytes[i] == 0x60 { i += 1 }
         guard i - runStart >= 3 else { return nil }
-        return runStart..<i
+        return runStart..<line.end
     }
 
     private func scanBlockAndInline(

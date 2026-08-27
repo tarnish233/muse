@@ -115,11 +115,12 @@ import Testing
         let tokens = scanner.scan(source)
         let fence = tokens.first { $0.kind == .codeFence }
         #expect(fence != nil)
-        #expect(fence?.markerRange == 0..<3) // 只含反引号 run，"swift" 属于围栏行的可读后缀
+        #expect(fence?.markerRange == 0..<8) // 开栏反引号 + info string 一起隐藏/回显
         // 内容 = 开栏行整行之后 到 闭合行起点
         let bodyStart = 8 + 1 // "```swift\n"
         let closeStart = bodyStart + "let a = 1\n".count
         #expect(fence?.contentRange == bodyStart..<closeStart)
+        #expect(fence?.closingMarkerRange == closeStart..<(closeStart + 3))
     }
 
     @Test func unclosedFenceExtendsToEnd() {

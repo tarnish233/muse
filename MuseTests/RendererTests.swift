@@ -176,6 +176,39 @@ import Testing
         #expect(storage.attribute(.museBlock, at: storage.length - 1, effectiveRange: nil) as? String == BlockVisual.codeFence.rawValue)
     }
 
+    @Test func fenceInfoStringAndCloserHiddenWhenCaretOutside() {
+        let source = "段落\n\n```swift\nlet a = 1\n```\n\n尾段"
+        let storage = NSTextStorage(string: source)
+        let package = engine.prepare(source)
+        _ = engine.render(package: package, selection: NSRange(location: storage.length, length: 0), into: storage)
+
+        let opening = (source as NSString).range(of: "```swift")
+        for location in opening.location..<(opening.location + opening.length) {
+            #expect(isHidden(location, in: storage))
+        }
+        let closing = (source as NSString).range(of: "```", options: .backwards)
+        for location in closing.location..<(closing.location + closing.length) {
+            #expect(isHidden(location, in: storage))
+        }
+    }
+
+    @Test func fenceMarkersRevealedWhenCaretInside() {
+        let source = "段落\n\n```swift\nlet a = 1\n```\n\n尾段"
+        let storage = NSTextStorage(string: source)
+        let package = engine.prepare(source)
+        let caret = (source as NSString).range(of: "let a = 1").location
+        _ = engine.render(package: package, selection: NSRange(location: caret, length: 0), into: storage)
+
+        let opening = (source as NSString).range(of: "```swift")
+        for location in opening.location..<(opening.location + opening.length) {
+            #expect(!isHidden(location, in: storage))
+        }
+        let closing = (source as NSString).range(of: "```", options: .backwards)
+        for location in closing.location..<(closing.location + closing.length) {
+            #expect(!isHidden(location, in: storage))
+        }
+    }
+
     /// 块级视觉必须经由 TextKit 2 的 fragment 路径产出。
     ///
     /// 这个测试之前直接调用绘制函数往位图里画，于是在真机上一片空白的同时依然全绿：

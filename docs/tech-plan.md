@@ -2,43 +2,98 @@
 
 一款极简即时渲染 Markdown 编辑器（对标 Typora），纯 macOS 原生实现。
 
-- 版本：v0.2 · 2026-08-26
+- 版本：v0.3 · 2026-08-27
 - 目标平台：macOS 14+
 - 技术栈：Swift 6 · AppKit（TextKit 2）· SwiftUI · swift-markdown
+
+> **v0.3 修订说明**：v0.2 的技术路线（NSTextView + TextKit 2 + swift-markdown）经 M0–M2 验证成立，保持不变。但 v0.2 对两个关键事实的判断是反的，v0.3 予以纠正；同时补入一次替代方案调研：
+>
+> 1. **swift-markdown 的能力被低估**。v0.2 §4.1 假设「AST 不承担精确定位所有 Markdown 标记」，据此立了一个独立的完整 tokenizer。实测 AST 对所有行内节点都给出精确字节区间，marker 位置可由父子区间相减得到，且 `***`、反向嵌套、未闭合、转义、CJK 邻接等难例全部已经正确。
+> 2. **`NSTextLayoutFragment` 的必要性被推迟**。v0.2 §02/§4.2 把它列为「必要时」「Phase 2 再评估」。实测在 layer-backed 的 TextKit 2 `NSTextView` 上，视图级 `draw(_:)` / `drawBackground(in:)` 的输出会被完全覆盖——自定义 fragment 是任何块级视觉的唯一入口，属于 MVP 地基而非后续优化。
+> 3. **替代方案已实测排除**（新增 §2.1）。macOS 26 的 `TextEditor(text: $attributedString)`、STTextView、CodeEditTextView 三条路线逐一核验，结论是继续走 A 方案；细节与依据见 §2.1。
+>
+> 详见 §2.1、§4.1、§4.2、§4.8 与《M2 评价报告》。
 
 ---
 
 ## 01 结论
 
-**技术路线保持不变：使用 AppKit 的 `NSTextView`（TextKit 2）作为编辑核心，SwiftUI 作为应用外壳，swift-markdown 负责 Markdown 语义解析。**
+**技术路线保持不变：使用 AppKit 的 `NSTextView`（TextKit 2）作为编辑核心，SwiftUI 作为应用外壳，swift-markdown 负责 Markdown 解析。**
 
 但实现必须遵守以下边界：
 
 1. `NSTextStorage` 是编辑期唯一可变文本；`NSDocument` 只负责持有编辑缓冲区、序列化和文档生命周期，不能再维护第二份可变 `String`。
 2. 保存内容始终是完整 Markdown 源码。渲染属性、AST、token、图片和主题都是可丢弃、可重建的派生状态。
-3. swift-markdown 负责语义 AST；单独的轻量 `MarkdownTokenScanner` 负责精确定位 `**`、反引号、列表前缀和链接标记等源码 token。
+3. **swift-markdown 是语义与源码定位的唯一来源**。marker 的字节边界从 AST 的父子区间推导，不另建一套 CommonMark 实现。轻量扫描器只负责 AST 按定义不产出节点的情况——主要是编辑中的未闭合语法。
 4. 使用 `SourceIndex` 显式完成 swift-markdown 的 UTF-8 行列位置与 `NSTextStorage` 的 UTF-16 `NSRange` 之间的转换。
-5. 标记隐藏采用“源码字符不删除 + 光标处回显”，但零宽布局、IME、选区、换行和辅助功能必须先通过 M0 原型验证，不能把它当成已经成立的前提。
-6. undo/redo 只记录源码修改；渲染属性不进入撤销栈，文本撤销后重新计算渲染结果。
-7. MVP 先使用整篇解析，但必须在后台处理不可变快照并带 revision；是否支持 200KB 文档以及是否需要增量解析，以基准测试结果决定。
+5. 标记隐藏采用「源码字符不删除 + 光标处回显」，通过属性层实现（近零宽 + 透明）。
+6. **块级视觉（列表符号、引用竖线、通宽背景、分隔线横线）必须通过自定义 `NSTextLayoutFragment` 绘制。** 视图级绘制钩子在 layer-backed 的 TextKit 2 上无效，这是地基而非可选项。
+7. undo/redo 只记录源码修改；渲染属性不进入撤销栈，文本撤销后重新计算渲染结果。
+8. 解析在后台处理不可变快照并带 revision。整篇解析是否够用，以「样式落地延迟」实测结果决定（见 §4.6）。
 
-**工作量预期：**可演示 MVP 约 6～8 周全职；达到可长期日用的稳定程度约 8～12 周。M0 技术验证是开工门槛，若标记隐藏方案不能通过验收，应立即调整交互或布局实现，而不是在 M3 后返工。
+**工作量预期：**可演示 MVP 约 6～8 周全职；达到可长期日用的稳定程度约 8～12 周。M0 是开工门槛，但 v0.2 版的 M0 gate 遗漏了绘制层验收（见《M0 评价报告》§8），v0.3 已补入。
 
 ## 02 方案对比
 
 | 方案 | 手感 / 输入法 | 开发量 | 结论 |
 |---|---|---|---|
-| A · 原生 `NSTextView` + TextKit 2 | 系统原生编辑、IME、滚动和辅助功能基础最好 | 编辑语义、token 定位和布局行为需要自研 | ✅ 推荐（选定） |
-| B · 原生壳 + `WKWebView` + CodeMirror 6 / Milkdown | 开发快，但输入、字体与系统服务隔着 WebKit | 数周可形成可用原型 | ⚠️ M0 失败时的备选 |
-| C · 纯 SwiftUI `TextEditor` | 只能满足纯文本编辑，无法承担即时富文本布局 | 表面简单，但无法实现目标体验 | ❌ 排除 |
+| A · 原生 `NSTextView` + TextKit 2 | 系统原生编辑、IME、滚动和辅助功能基础最好 | 编辑语义与块级绘制需要自研 | ✅ 推荐（选定，M0–M2 已验证） |
+| B · 原生壳 + `WKWebView` + CodeMirror 6 / Milkdown | 开发快，但输入、字体与系统服务隔着 WebKit | 数周可形成可用原型 | ⚠️ 已不再需要（M0 gate 通过） |
+| C · SwiftUI `TextEditor` + `AttributedString` | 原生输入，但拿不到排版层 | 表面最省 | ❌ 排除（见 §2.1，实测三处硬阻塞） |
+| D · 自研排版引擎（不用 TextKit） | 需自建 IME / 选区 / 无障碍 | 极大 | ❌ 排除（见 §2.1） |
 
 补充约束：
 
-- 明确使用 `NSTextView(usingTextLayoutManager: true)` 创建编辑器，并在代码审查中禁止访问 TextKit 1 的 `layoutManager`，避免不可逆地进入兼容模式。
+- 明确使用 TextKit 2 手工栈（`NSTextStorage → NSTextContentStorage → NSTextLayoutManager → NSTextContainer → NSTextView`），并在代码审查中禁止访问 TextKit 1 的 `layoutManager`，避免不可逆地进入兼容模式。
 - SwiftUI 只承载窗口内容、侧栏、工具栏、设置与状态展示；不要让 `updateNSView` 持续把整篇字符串回写给 `NSTextView`。
-- 文档采用 AppKit `NSDocument` 生命周期：`MuseDocument` 持有 `EditorBuffer`，窗口内容通过 `NSWindowController` / `NSHostingController` 或 `NSHostingView` 组合 SwiftUI 与 AppKit。
-- 自定义引用条、零宽 marker、图片等涉及布局的能力，必要时使用 `NSTextLayoutFragment`，但不在未经验证时写成 MVP 的既定实现。
-- SPM 依赖暂时只有 `swift-markdown`；不依赖其未公开或不存在的增量解析 API。
+- 文档采用 AppKit `NSDocument` 生命周期：`MuseDocument` 持有 `EditorBuffer`，窗口内容通过 `NSWindowController` / `NSHostingController` 组合 SwiftUI 与 AppKit。
+- **自定义 `NSTextLayoutFragment` 是块级视觉的唯一入口**，不是"必要时"的备选。SwiftUI 宿主视图会强制整个子树 layer-backing，`wantsLayer = false` 无效。
+- SPM 依赖只有 `swift-markdown`；它与底层 cmark-gfm 都不提供增量解析 API，不要假设存在（已在 swift-markdown 仓库源码层面确认：`incremental` 只出现在 `BlockDirectiveParser.swift` 与一个计数器测试中，无 reparse/partial 公开接口）。
+
+### 2.1 替代方案调研（2026-08-27）
+
+**C · SwiftUI `TextEditor(text: $attributedString)` —— 排除，三处硬阻塞**
+
+API 确实存在（macOS SDK 26.5 的 `SwiftUI.swiftinterface` 实测）：
+
+```swift
+@available(iOS 26.0, macOS 26.0, visionOS 26.0, *)
+public init(text: Binding<AttributedString>,
+            selection: Binding<AttributedTextSelection>? = nil)
+```
+
+格式由 `attributedTextFormattingDefinition(_:)` + `AttributedTextFormattingDefinition`（约束到某个 `AttributeScope`）控制。但对 Muse 有三处不可绕过的阻塞：
+
+1. **没有 `paragraphStyle`。** `AttributeScopes.SwiftUIAttributes` 只含 `font` / `foregroundColor` / `backgroundColor` / `strikethroughStyle` / `underlineStyle` / `kern` / `tracking` / `baselineOffset`，macOS 26 新增 `alignment` 与 `lineHeight`。全 SDK 搜不到任何 SwiftUI scope 暴露 `paragraphStyle`。列表悬挂缩进（`firstLineHeadIndent` / `headIndent`）与嵌套层级缩进因此无法表达——而这是列表渲染的核心。
+2. **`AttributedString` 的 Markdown 是只进不出。** Foundation 只提供 `init(markdown:)` 系列，没有任何序列化/导出接口。「保存内容始终是完整 Markdown 源码」这条铁律直接失效。
+3. **拿不到排版层。** 没有 `NSTextView`、没有 `NSTextLayoutFragment`、没有绘制钩子。§4.8 列出的块级视觉（引用竖线、通宽背景、列表符号、分隔线横线）全部无法实现。
+
+附带发现（可能对 Phase 2 有用）：`AttributedString.MarkdownParsingOptions` 有 `appliesSourcePositionAttributes`，配合 `AttributedString.MarkdownSourcePosition` 能让 Foundation 的 Markdown 解析器输出源码位置。但它仍然只解析不导出，且 `interpretedSyntax` 会吃掉标记字符，不适用于「源码 1:1」的即时渲染。
+
+**结论**：v0.2 排除 SwiftUI `TextEditor` 的判断正确，v0.3 给出了具体依据，避免以后重复评估。
+
+**STTextView（krzyzanowskim）—— 作为参考，不作为依赖**
+
+TextKit 2 的 `NSTextView`/`UITextView` 替代组件，1.5k star，维护活跃（最近推送 2026-08-18）。它的架构与 Muse 在 M2 收口后落地的方案一致：`STTextLayoutFragment` + `STTextView+NSTextLayoutManagerDelegate` + `STTextLayoutFragmentView`——这是对 §4.8 技术选择的独立印证。
+
+两个原因不引入为依赖：
+
+- **授权**：GPL v3 或付费商业授权。闭源产品需购买商业许可。
+- **定位**：它替换的是整个 text view，而 Muse 需要的是 `NSTextView` 的原生编辑语义（IME、无障碍、查找、拼写），只在绘制层做扩展。
+
+**但它的价值很高**：作者维护了一份公开的 TextKit 2 缺陷清单（README「TextKit 2 Bug Reports List」），且明确说明该项目存在的原因就是「NSTextView + TextKit 2 并不完全可用，被具体 bug 阻塞后才另起项目」。与 Muse 直接相关的条目见 §4.8。
+
+**D · CodeEditTextView / CodeEditSourceEditor（CodeEditApp）—— 排除**
+
+CodeEditTextView 是**完全自研的排版引擎**，不使用 TextKit（源码中检索不到 `NSTextLayoutManager`）：自建 `TextLayoutManager`、`TextLineStorage`、`TextLine`、`TextSelectionManager`、`MarkedTextManager`。MIT 授权。CodeEditSourceEditor 在其上叠加 tree-sitter 语法高亮。
+
+它的 README 明确划出了自身边界：如果需要「右到左文本、自定义布局元素、或与系统 text view 的功能对等」，应当用 STTextView 或 `NSTextView`。这三项恰好都是 Muse 的需求，所以这条路线不适用——它是「为代码文档换取极快首屏布局」的取舍，而 Muse 要的是富文本布局与系统级编辑语义。
+
+**这仍是一个值得记住的数据点**：一个严肃的开源编辑器项目评估 TextKit 后选择自研，说明 TextKit 2 的成熟度确实有限（与 STTextView 的缺陷清单互相印证）。若 Muse 后期在 TextKit 2 上遇到不可绕过的阻塞，D 是唯一的兜底，但代价是重建 IME 与无障碍。
+
+**自定义 fragment 做 Markdown 渲染已有先例**
+
+多个开源项目采用同一模式，文件名甚至一致：`nodes-app/swift-markdown-engine` 的 `MarkdownTextLayoutFragment.swift`、`no-problem-dev/swift-markdown-view` 的 `MarkdownLayoutFragment.swift`、`bharathvbcr/MarkDev` 的 `MarkdownLayoutFragment.swift`（注释写明「Custom drawing behind code blocks, callouts, quotes, and rules」）。§4.8 的一条实现风险就来自阅读 MarkDev 的源码注释。
 
 ## 03 总体架构
 
@@ -54,15 +109,20 @@
 │ EditorTextView（NSTextView + TextKit 2）              │
 │ 原生输入 · 选区 · 滚动 · 查找 · 拼写检查 · undo       │
 ├──────────────────────────────────────────────────────┤
-│ Render Pipeline                                      │
+│ Render Pipeline（后台）                              │
 │ String Snapshot + revision                           │
-│   ├─ SourceIndex：UTF-8 SourceRange → UTF-16 NSRange │
-│   ├─ swift-markdown：语义 AST                         │
-│   └─ MarkdownTokenScanner：精确源码 token             │
+│   ├─ swift-markdown：AST = 语义 + 精确源码区间        │
+│   ├─ MarkerDeriver：父子区间相减 → marker 字节边界    │
+│   ├─ TokenScanner：仅补未闭合语法（编辑中态）         │
+│   └─ SourceIndex：UTF-8 → UTF-16 NSRange             │
 │                    ↓                                 │
 │ RenderSnapshot(revision, spans, markers, blocks)     │
 │                    ↓ 仅接受最新 revision             │
-│ 主线程批量应用派生属性                                │
+├──────────────────────────────────────────────────────┤
+│ 主线程输出（两层，缺一不可）                          │
+│   ├─ 属性层：字体/颜色/段落/marker 显隐 → NSTextStorage│
+│   └─ 绘制层：MuseLayoutFragment 画块级视觉            │
+│        由存储上的 .museBlock 属性驱动                 │
 └──────────────────────────────────────────────────────┘
 ```
 
@@ -81,10 +141,10 @@
 textDidChange
 → revision + 1
 → 捕获不可变 String 快照
-→ 后台解析 AST、token 和区间索引
+→ 后台解析 AST、推导 marker、构建区间索引
 → 生成 RenderSnapshot
 → MainActor 检查 revision
-→ 批量应用最新渲染结果
+→ 批量应用最新渲染结果（属性层 + 触发绘制层重绘）
 ```
 
 旧 revision 的解析结果直接丢弃。编辑线程不能等待整篇解析完成。
@@ -107,62 +167,92 @@ muse/
 ├─ Muse.xcodeproj
 ├─ App/
 │  ├─ AppDelegate.swift
-│  └─ AppShellView.swift
+│  └─ main.swift
 ├─ Document/
 │  ├─ MuseDocument.swift
-│  └─ EditorBuffer.swift          # 持有唯一 NSTextStorage
+│  ├─ EditorBuffer.swift          # 持有唯一 NSTextStorage
+│  ├─ RenderCoordinator.swift     # 两条更新流的调度
+│  └─ SampleMarkdown.swift
 ├─ Editor/
-│  ├─ EditorTextView.swift
-│  ├─ EditorView.swift
-│  ├─ EditorCoordinator.swift
-│  └─ MarkerVisibility.swift
+│  ├─ EditorTextView.swift        # TextKit 2 手工栈 + fragment 工厂挂接
+│  ├─ EditorView.swift            # NSViewRepresentable 桥
+│  └─ EditorShellView.swift
 ├─ Parsing/
-│  ├─ MarkdownParser.swift        # swift-markdown 语义 AST
-│  ├─ MarkdownTokenScanner.swift  # 源码 marker/token
+│  ├─ MarkdownSemantics.swift     # swift-markdown AST → 语义 + marker 区间
+│  ├─ TokenScanner.swift          # 仅未闭合语法（编辑中态）
+│  ├─ Token.swift
 │  └─ SourceIndex.swift           # UTF-8 ↔ UTF-16
 ├─ Rendering/
-│  ├─ RenderPipeline.swift
-│  ├─ RenderSnapshot.swift
-│  ├─ RenderEngine.swift
+│  ├─ RenderEngine.swift          # 属性层
+│  ├─ BlockLayoutFragment.swift   # 绘制层（MuseLayoutFragment）
 │  └─ Theme.swift
 ├─ Behaviors/
-│  └─ TypingBehaviors.swift
-└─ Tests/
+│  └─ TypingBehaviors.swift       # M4
+└─ MuseTests/
    ├─ SourceIndexTests.swift
    ├─ TokenScannerTests.swift
+   ├─ MarkdownSemanticsTests.swift
    ├─ RendererTests.swift
-   ├─ BehaviorTests.swift
-   ├─ IMEIntegrationTests.swift
+   ├─ CoordinatorPipelineTests.swift
+   ├─ DocumentTests.swift
    └─ PerformanceTests.swift
 ```
 
 ## 04 核心难点与对策
 
-### 4.1 源码区间：UTF-8、UTF-16 与 token
+### 4.1 源码区间：AST 即定位来源
 
 swift-markdown 的 `SourceLocation` 使用 1-based 行号和 UTF-8 字节列；AppKit 的字符范围使用 UTF-16。`SourceIndex` 为每行缓存 UTF-8 与 UTF-16 起点，并提供经过边界检查的转换接口。
 
-AST 只用于确定“这段内容是什么”，不承担精确定位所有 Markdown 标记。`MarkdownTokenScanner` 从原始源码提取：
+**AST 同时回答「这段内容是什么」和「它在源码的哪里」。** 实测（swift-markdown 0.8.0）所有行内节点都带精确字节区间：
 
-- emphasis / strong / strikethrough delimiter；
-- 行内代码与代码围栏；
-- ATX 标题、引用、列表和任务框前缀；
-- link/image 的 label、destination 与包围标记；
-- 转义字符和暂未闭合的编辑中语法。
+```text
+Strong bytes=0..<10 → "**粗体**"
+  Text bytes=2..<8   → "粗体"
+```
+
+marker 边界由减法得到，无需重新实现分隔符匹配：
+
+- 开标记 = `节点.range.lower ..< 首子.range.lower`
+- 闭标记 = `末子.range.upper ..< 节点.range.upper`
+
+以下难例 AST 全部已经正确，**不需要自建 delimiter run / flanking / mod-3 实现**：
+
+| 难例 | AST 结果 |
+|---|---|
+| `***三层星号***` | `Emphasis(Strong(Text))` 正确嵌套 |
+| `*a **b** c*` | 反向嵌套正确 |
+| `**未闭合` | 不生成 Strong，保持 `Text`（标记自然保持可见） |
+| `\*不是强调\*` | 转义生效，保持 `Text` |
+| `**粗体**、` | CJK 紧邻正常成对，无需自定义标点集 |
+
+AST 还直接提供以下结构信息（v0.2 未使用，实测均可取）：
+
+| 信息 | 取法 |
+|---|---|
+| 列表嵌套深度 | `ListItem` 父链中 `UnorderedList`/`OrderedList` 计数 |
+| 有序列表起始序号 | `OrderedList.startIndex` |
+| 任务框勾选态 | `ListItem.checkbox` |
+| 代码块语言 | `CodeBlock.language` |
+| 表格结构 | `Table` / `Head` / `Body` / `Row` / `Cell`，默认选项即解析，全部带 source position |
+
+**扫描器的剩余职责**：AST 按 CommonMark 定义不为未闭合语法生成节点（这是正确行为），但编辑中态需要知道「这里正在输入一个粗体」以决定 marker 显隐。这是唯一需要字节级扫描的场景，范围应严格限制在此，不得再扩张成第二套 CommonMark 实现——两套实现会产生语义分叉（v0.2 期间实际发生过：扫描器把 `a*b*c` 判为字面量，cmark 判为 `Emphasis`）。
 
 解析器输出最终统一为 UTF-16 `NSRange`，RenderEngine 不再接触 UTF-8 行列。
 
 ### 4.2 标记隐藏与光标处回显
 
-默认策略仍为源码 1:1：marker 字符始终存在，只改变视觉属性。光标或选区进入对应 span 时，恢复其源码 marker；移出后隐藏或弱化。
+marker 字符始终存在，只改变视觉属性。光标或选区进入对应 span 时恢复源码 marker，移出后隐藏或弱化。三种状态：
 
-实现分三级降级：
+| 状态 | 实现 | 用于 |
+|---|---|---|
+| `revealed` | 正常字号 + 弱化色 | 光标所在行/块 |
+| `hidden` | 近零宽字体（0.1pt）+ 透明 | 行内标记、引用/围栏/分隔线标记 |
+| `ghost` | 正常字号 + 透明（**保留宽度**） | 列表/任务标记——图形符号由绘制层在同位置画出 |
 
-1. **首选：**验证零宽或近零宽 marker，不破坏换行、光标、选区、IME 和 VoiceOver。
-2. **降级：**marker 使用弱化色和较小字号，但保留可预测宽度。
-3. **后续：**若必须获得完全无缝的排版，再评估自定义 `NSTextLayoutFragment`，不在 MVP 中仓促实现。
+M0 已验证近零宽方案在中文、emoji、组合字符、跨行选择、自动换行、鼠标点击、方向键下工作正常。降级路径（marker 改弱化色 + 小字号）保留但未启用。
 
-M0 必须覆盖中文、emoji、组合字符、嵌套强调、跨行选择、自动换行、鼠标点击、方向键和 VoiceOver。通过前不承诺“完全零宽”。
+> v0.2 把「自定义 `NSTextLayoutFragment`」列为本节的第三级降级选项。这是分类错误：marker 隐藏（属性层）与块级视觉（绘制层）是两件正交的事，fragment 属于后者且不可绕过。见 §4.8。
 
 ### 4.3 块级编辑行为
 
@@ -198,13 +288,15 @@ M0 必须覆盖中文、emoji、组合字符、嵌套强调、跨行选择、自
 
 ### 4.6 并发与性能
 
-- 主线程：接受输入、维护 selection、应用最新属性。
+- 主线程：接受输入、维护 selection、应用最新属性、绘制块视觉。
 - 后台任务：解析不可变字符串快照，生成纯值 `RenderSnapshot`。
 - 每次编辑递增 revision；旧任务可以被取消，即使不能及时取消，其结果也不得覆盖新 revision。
-- 合并同一事件周期内的连续变化，但不假定“下一 runloop”天然满足性能目标。
+- 合并同一事件周期内的连续变化，但不假定「下一 runloop」天然满足性能目标。
 - 对属性应用统计总耗时；优先更新变化块和可见区域，避免每次无条件重设整篇属性。
 
-性能验收以实测为准：
+**两类指标必须分开验收**（v0.2 只定义了前者，导致解析成本无从判断）：
+
+输入响应——主线程预算，决定「打字是否卡」：
 
 | 文档规模 | 输入主线程预算 | 目标 |
 |---|---:|---|
@@ -212,15 +304,81 @@ M0 必须覆盖中文、emoji、组合字符、嵌套强调、跨行选择、自
 | 200KB | P95 < 16ms | 连续输入不丢帧、不跳光标 |
 | 1MB | 不阻塞输入 | 允许渲染短暂滞后，源码编辑必须可用 |
 
-若 200KB 不达标，Phase 2 采用自建 block index：从编辑点向两侧寻找安全块边界，只重扫受影响块，再与全量 AST 做低频校准。不能依赖 swift-markdown 未提供的公开增量解析能力。
+样式落地延迟——编辑到样式可见的端到端时间，决定「渲染是否跟手」：
+
+| 文档规模 | 目标 | 说明 |
+|---|---:|---|
+| 20KB | < 50ms | 感觉即时 |
+| 200KB | < 150ms | 可察觉但不干扰 |
+| 1MB | 尽力而为 | 允许明显滞后 |
+
+**解析成本实测**（swift-markdown 0.8.0，Debug 构建，Apple Silicon）：
+
+| 文档规模 | 全文档 AST 解析 |
+|---|---:|
+| 20KB | 6.9 ms |
+| 200KB | 64.9 ms |
+
+Release 构建的数字尚未测得（测试 target 在 Release 下模块解析失败，待修）。作为对比，v0.2 的手写字节扫描器在 200KB 上是 8.0 ms——约 8 倍差距，这是 v0.2 采用双层设计的唯一真实理由。但解析在后台运行，不占主线程预算；65ms 落在 200KB 的样式落地延迟目标（<150ms）之内。
+
+因此顺序是：**先用全量 AST 解析，把架构简化下来**；只有当样式落地延迟实测不达标时，才引入块级脏区重解析——即定位变化所在的顶层块，只对该块调用 `Document(parsing:)`，而不是维护第二套 CommonMark 实现。swift-markdown 与 cmark-gfm 都不提供增量解析 API。
 
 ### 4.7 图片
 
-常规 `NSTextAttachment` 通常以 attachment character 表示附件，与“源码字符不变”的核心约束存在冲突。MVP 只提供图片语法样式、路径解析和悬浮/侧边预览；真正的行内图片进入 Phase 2，再选择以下方案之一：
+常规 `NSTextAttachment` 通常以 attachment character 表示附件，与「源码字符不变」的核心约束存在冲突。MVP 只提供图片语法样式、路径解析和悬浮/侧边预览。
 
-- 自定义 TextKit 2 layout fragment；
-- 额外的预览行或 overlay；
-- 明确引入展示文本与源码之间的映射层。
+真正的行内图片进入 Phase 2。由于 §4.8 已经把自定义 fragment 作为既有设施引入，Phase 2 的首选方案是在 fragment 中绘制图片，其次是额外预览行 / overlay。
+
+### 4.8 块级视觉：绘制层
+
+文本属性只能把背景画到字形宽度。以下需求无法用属性表达，必须绘制：
+
+- 引用块整行通宽背景 + 左侧竖线
+- 代码块整行通宽背景（含开/闭栏行）
+- 分隔线的真实横线（marker 隐藏后行内无字形）
+- 列表图形符号：圆点 / 序号 / 复选框
+
+**实现路径只有一条：自定义 `NSTextLayoutFragment`，通过 `NSTextLayoutManagerDelegate` 提供。**
+
+实测结论（macOS 26 / Xcode 26）：在 layer-backed 的 TextKit 2 `NSTextView` 上，视图级 `draw(_:)` 与 `drawBackground(in:)` 的输出被完全覆盖——填一个 300×300 的实色块，一个像素都不可见。字形被渲染进各 fragment 自己的图层，视图自身的绘制在其下方且被背景覆盖。SwiftUI 宿主视图强制整个子树 layer-backing，设 `wantsLayer = false` 无效（运行时实测仍为 `true`）。
+
+关键实现细节：
+
+1. **绘制时机**：override `draw(at:in:)`，先画装饰再 `super.draw`（字形）。
+2. **渲染面必须扩宽**：通宽背景超出字形包围盒，需 override `renderingSurfaceBounds` 并 union 到容器宽度，否则被裁掉。
+3. **块归属来源**：自定义属性 `.museBlock` 由属性层随样式写入整行/整块，fragment 直接读 `NSTextParagraph.attributedString` 的首字符属性——不需要回查 storage 偏移，也不需要自建缓存。
+4. **坐标**：`draw(at:in:)` 的 `point` 是 fragment 局部原点（实测恒为 `(0,0)`）；容器左边缘 = `point.x - layoutFragmentFrame.minX`。绘制文本需要一个 `flipped: true` 的 `NSGraphicsContext`。
+5. **隔离**：基类接口是 nonisolated，主题需相应声明 nonisolated（AppKit 只在主线程调用这些接口）。
+
+**已知的 TextKit 2 缺陷（来自 STTextView 维护者提交给 Apple 的公开清单，见 §2.1 与参考资料）。** 与本节直接相关的几条，在实现和排错时应当预期：
+
+| 编号 | 问题 | 对 Muse 的影响 |
+|---|---|---|
+| FB9692714 | Rendering attributes do not draw properly | 属性层与绘制层不一致时的首查方向 |
+| FB9856587 | 最后一行出现多余的 line fragment | 文末块视觉可能画错位置 |
+| FB15131180 / FB22524198 | extra line fragment 尺寸不正确；`extraLineFragmentAttributes` 是私有 API，导致无法正确计算 | 文末空行的块视觉高度无法可靠算出 |
+| FB13272586 | `NSTextContainer.size` 默认值与文档不符 | 通宽背景依赖容器宽度，需防御 0 / 极大值 |
+
+另有一条**私有 API 依赖**值得知道：STTextView 的 fragment 在 `state < .layoutAvailable` 时会通过混淆的 selector 调用私有的 `layout` 方法，作者注明「没有公开 API 提供这个能力」。Muse 目前靠 `enumerateTextLayoutFragments(options: .ensuresLayout)` 规避，但这说明「绘制时 fragment 尚未排版」是 TextKit 2 的真实缺口，若后续遇到首帧块视觉缺失，根因可能在此。
+
+**实现风险：动态色跨外观失效（已验证机制，待在真机确认）。**
+
+`NSColor.cgColor` 对动态色（`NSColor(name:dynamicProvider:)`）按 `NSAppearance.current` 解析。实测：
+
+```text
+NSAppearance.current = .aqua     → [0.96, 0.97, 0.98, 1.0]
+NSAppearance.current = .darkAqua → [0.15, 0.17, 0.19, 1.0]
+NSAppearance.current = nil       → [0.96, 0.97, 0.98, 1.0]   ← 静默回落到亮色
+```
+
+`current` 未设置时**不报错、直接给亮色**。而 fragment 的绘制回调早于 actor 标注、也不保证运行在视图的外观上下文里，因此「在 `draw(at:in:)` 里对动态 `NSColor` 取 `.cgColor`」有两重风险：
+
+1. 绘制时 `NSAppearance.current` 未指向视图外观 → 暗色模式下块视觉画成亮色；
+2. 即使绘制时外观正确，TextKit 会按 text element 缓存并复用 fragment，外观切换后未必重绘全部 fragment → 残留旧外观的颜色。
+
+对策：不在 fragment 内解析动态色，改为持有一份**共享的、已解析的 `CGColor` 调色板**，在外观变化时整体替换（同一实例换内容，而不是每个 fragment 各持一份副本——副本会比它被解析时的外观活得更久）。这一项列入 M3 待办，验收方式是暗色模式下逐项检查块视觉配色。
+
+**测试必须走真实 fragment 路径。** 直接调用绘制函数往位图里画会绕过 TextKit 图层路径，产生「真机全白、测试全绿」的假绿——v0.2 期间实际发生过（见《M2 评价报告》§4）。断言应落在「`layoutManager` 确实生产自定义 fragment」加「该 fragment 的绘制确实落墨」上。
 
 ## 05 MVP 范围
 
@@ -230,19 +388,23 @@ M0 必须覆盖中文、emoji、组合字符、嵌套强调、跨行选择、自
 - 粗体、斜体、删除线、行内代码；
 - 行内链接样式、点击打开、光标处回显源码；
 - 图片语法样式与悬浮/侧边预览，不替换源码；
-- 无序、有序和任务列表；
+- 无序、有序和任务列表，**含嵌套层级缩进与分级符号**；
 - 代码围栏，无语法高亮；
-- 引用块背景和段落缩进；
+- 引用块通宽背景 + 左竖线；
 - 分隔线；
 - 亮暗主题，跟随系统；
 - 打开、保存、autosave、撤销重做、源码模式切换；
 - 查找替换、拼写检查等 `NSTextView` 原生能力；
 - 基础 VoiceOver、Reduce Motion 和高对比度验收。
 
+**候选 · 视 M3 进度决定**
+
+- 表格渲染（只读呈现）。解析层免费——AST 默认就产出带 source position 的 `Table`/`Row`/`Cell`；成本只在绘制。表格的**可视化编辑**仍留 Phase 2。
+
 **不做 · Phase 2**
 
 - 真正的零占位行内图片；
-- 表格可视化编辑；
+- 表格可视化编辑（列宽拖拽、增删行列）；
 - 数学公式；
 - 代码块语法高亮；
 - 大纲 / TOC 侧栏；
@@ -251,42 +413,63 @@ M0 必须覆盖中文、emoji、组合字符、嵌套强调、跨行选择、自
 
 ## 06 里程碑与验收门槛
 
-| 阶段 | 工期 | 内容与退出条件 |
-|---|---|---|
-| M0 技术验证 | 3～5 天 | TextKit 2 明确启用；中英文/emoji 下区间正确；marker 隐藏、选区、换行、IME、undo、VoiceOver 可接受；20KB/200KB 基准有数据 |
-| M1 骨架 | 1 周 | Xcode 工程；`NSDocument → EditorBuffer → NSTextStorage` 单一所有权；open/save/autosave；SwiftUI 外壳 |
-| M2 解析与渲染 | 1.5～2 周 | `SourceIndex`、TokenScanner、后台 revision 管线；标题、强调、代码、链接；单元测试覆盖 Unicode 与未闭合语法 |
-| M3 光标交互 | 1.5～2 周 | marker 回显、方向键、鼠标命中、跨行选区、源码模式；无 TextKit 1 fallback |
-| M4 块行为 | 1 周 | 列表续行/退出、标题行为、任务列表、自动配对；复合操作一次撤销 |
-| M5 收尾功能 | 1 周 | 代码围栏、引用、分隔线、图片预览、查找替换 |
-| M6 稳定与发布准备 | 1～2 周 | IME 矩阵、autosave/reopen、崩溃恢复、性能、VoiceOver、主题和回归测试 |
+| 阶段 | 工期 | 内容与退出条件 | 状态 |
+|---|---|---|---|
+| M0 技术验证 | 3～5 天 | TextKit 2 明确启用；中英文/emoji 下区间正确；marker 隐藏、选区、换行、IME、undo、VoiceOver 可接受；**块级视觉在真机窗口中可见**；20KB/200KB 基准有数据 | ✅ 通过（绘制层验收后补，见 M0 报告 §8） |
+| M1 骨架 | 1 周 | Xcode 工程；`NSDocument → EditorBuffer → NSTextStorage` 单一所有权；open/save/autosave；SwiftUI 外壳 | ✅ 通过 |
+| M2 解析与渲染 | 1.5～2 周 | `SourceIndex`、AST 语义层、后台 revision 管线；标题、强调、代码、链接；**块级视觉绘制地基（自定义 fragment）**；单元测试覆盖 Unicode 与未闭合语法 | ⚠️ 有条件通过（绘制地基已补齐；AST 收口待做） |
+| M3 光标交互 | 1.5～2 周 | marker 回显、方向键、鼠标命中、跨行选区、源码模式；无 TextKit 1 fallback；**列表嵌套层级缩进**；**块视觉配色改共享调色板**（§4.8 动态色隐患） | 未开始 |
+| M4 块行为 | 1 周 | 列表续行/退出、标题行为、任务列表、自动配对；复合操作一次撤销 | 未开始 |
+| M5 收尾功能 | 1 周 | 图片预览、查找替换、源码模式打磨、（候选）表格渲染 | 未开始 |
+| M6 稳定与发布准备 | 1～2 周 | IME 矩阵、autosave/reopen、崩溃恢复、性能、VoiceOver、主题和回归测试 | 未开始 |
 
-M0 是 go/no-go gate。只有 M0 通过后才进入完整工程搭建；若只能做到 marker 弱化而不能可靠零宽，应在 M0 结束时接受降级设计并固定交互规范。
+**v0.3 对里程碑的两处调整：**
+
+1. **块级视觉从 M5 前移到 M2/M3。** v0.2 把「代码围栏、引用、分隔线」放在 M5「收尾功能」，但它们依赖 §4.8 的绘制地基。把地基放在最后一个功能里程碑等于把最大的架构风险留到最后；实际也已经发生——这些功能在 M2 期间被提前实现，但因地基缺失全部不可见。M5 相应改为图片预览与打磨。
+2. **M0 gate 补入绘制层验收。** v0.2 版 M0 的十项人工验收全部围绕属性层，没有一项检查块级视觉能否画出来，导致假绿测试存活。
+
+M0 仍是 go/no-go gate。
 
 ## 07 风险
 
 | 风险 | 等级 | 对策 |
 |---|---|---|
 | UTF-8 `SourceRange` 与 UTF-16 `NSRange` 错位 | P0 | 独立 `SourceIndex`；中文、emoji、组合字符和多行 golden tests |
-| AST 无法给出精确 marker token | P0 | AST 与轻量 TokenScanner 双层结构；覆盖转义、嵌套与未闭合语法 |
-| 零宽 marker 破坏换行、命中或辅助功能 | P0 | M0 先验证；失败则降级为弱化显示，后续再做自定义 layout fragment |
+| 视图级绘制在 layer-backed TextKit 2 上无效 | P0 | 块级视觉一律走自定义 `NSTextLayoutFragment`；测试断言必须经由 `layoutManager` 真实生产的 fragment（§4.8） |
+| 双层解析实现产生语义分叉 | P0 | AST 是唯一语义与定位来源；扫描器职责严格限于未闭合语法；对 AST 做差异测试（§4.1） |
+| 零宽 marker 破坏换行、命中或辅助功能 | P0 | M0 已验证通过；降级路径（弱化显示）保留 |
 | IME 与异步渲染互相干扰 | P0 | 跳过 marked range；后台快照 + revision；中文输入矩阵 |
 | 文档模型与 text view 出现双重真相 | P0 | `EditorBuffer.textStorage` 是唯一可变正文；SwiftUI 不回写整篇字符串 |
+| 测试绕过真实渲染路径产生假绿 | P1 | 渲染测试必须走 `NSTextLayoutManager` / `NSTextStorage` 真实路径；禁止直接调用绘制函数断言像素 |
+| fragment 内解析动态色导致暗色模式失效 | P1 | 不在 fragment 内取 `NSColor.cgColor`（`NSAppearance.current` 为 nil 时静默回落亮色）；改用共享的已解析 `CGColor` 调色板，外观变化时整体替换（§4.8） |
+| TextKit 2 自身缺陷（多余 line fragment、私有 API 依赖等） | P1 | 参照 STTextView 公开的缺陷清单预判（§2.1、§4.8）；文末空行与首帧块视觉专项检查 |
 | 派生属性污染 undo 栈 | P1 | undo 只记录源码；撤销后重算渲染，不做整篇快照式 undo |
-| 200KB 文档输入卡顿 | P1 | 建立基准；后台解析、旧 revision 丢弃、变化块属性更新；必要时自建 block index |
+| 样式落地延迟不达标 | P1 | 先测全量 AST（200KB 实测 65ms Debug）；不达标时做块级脏区重解析，不自建 CommonMark |
 | TextKit 2 意外降级为 TextKit 1 | P1 | 显式创建；禁止访问 `layoutManager`；开发期监听 fallback 通知并断言 |
-| 行内图片破坏源码 1:1 | P1 | MVP 使用悬浮/侧边预览；真正 inline layout 移至 Phase 2 |
-| 表格、公式和高亮拖慢首版 | P2 | 保持 Phase 2，不进入 MVP 验收 |
+| 行内图片破坏源码 1:1 | P1 | MVP 使用悬浮/侧边预览；Phase 2 复用 §4.8 的 fragment 设施 |
+| TextKit 2 出现不可绕过的阻塞 | P2 | 兜底是自研排版引擎（§2.1 的 D 路线），代价为重建 IME 与无障碍；决策前先确认阻塞不可 workaround |
+| 公式和高亮拖慢首版 | P2 | 保持 Phase 2，不进入 MVP 验收 |
 
 ## 08 验证清单
 
 ### 正确性
 
 - ASCII、中文、emoji、ZWJ emoji、组合附加符的 range 转换；
-- 嵌套/相邻/转义/未闭合 Markdown 标记；
+- 嵌套/相邻/转义/未闭合 Markdown 标记，并与 AST 做差异测试；
+- 列表嵌套深度、有序起始序号、任务框勾选态与 AST 一致；
 - CRLF、LF、空文档、超长单行；
 - undo/redo 后源码、selection 和渲染一致；
 - 源码模式切换不修改文件内容。
+
+### 渲染与绘制
+
+- 块级视觉在**真机窗口**中可见：列表圆点/序号/复选框、引用通宽背景 + 左竖线、代码块通宽背景（含开闭栏行）、分隔线横线；
+- 渲染测试经由 `layoutManager` 真实生产的 fragment，而非直接调用绘制函数；
+- 嵌套列表各层级缩进与符号有区分；
+- 光标进入块内时源码 marker 回显、图形符号让位；
+- **暗色模式下逐项检查块视觉配色**（动态色在 fragment 内解析会静默回落亮色，见 §4.8）；
+- 系统外观切换后已排版区域的块视觉立即跟随（验证 fragment 缓存不残留旧配色）；
+- 文末空行与首帧的块视觉位置正确（对应 FB9856587 / FB15131180 / FB22524198）。
 
 ### 交互
 
@@ -298,19 +481,34 @@ M0 是 go/no-go gate。只有 M0 通过后才进入完整工程搭建；若只�
 
 ### 性能与文档生命周期
 
-- 20KB、200KB、1MB 固定语料的输入延迟与解析耗时；
+- 20KB、200KB、1MB 固定语料的输入延迟、AST 解析耗时与样式落地延迟；
 - 快速连续输入时旧 revision 不覆盖新内容；
 - 打开、保存、Save As、autosave、reopen、外部文件变化与崩溃恢复；
 - 多窗口/多文档之间的 text storage、undo manager 和主题状态完全隔离。
 
 ---
 
-**下一步：**先实现 M0 技术验证工程，不直接铺开完整 UI。M0 产出应包括最小编辑器、range/token 测试、IME/选择行为记录和 20KB/200KB 性能报告；通过 gate 后再进入 M1。
+**下一步：**M2 收口——把解析层从「AST + 完整自建 tokenizer」收敛为「AST 为主 + 未闭合语法补丁」，把列表嵌套深度接进渲染层，并修掉 §4.8 的动态色隐患；然后进入 M3 光标交互。详见《M2 评价报告》§6。
 
 ## 参考资料
 
-- [Apple：What's new in TextKit and text views](https://developer.apple.com/videos/play/wwdc2022/10090/)
-- [Apple：TextKit](https://developer.apple.com/documentation/appkit/textkit)
-- [Apple：NSTextAttachment](https://developer.apple.com/documentation/appkit/nstextattachment)
+### Apple
+
+- [What's new in TextKit and text views（WWDC22）](https://developer.apple.com/videos/play/wwdc2022/10090/)
+- [Meet TextKit 2（WWDC21）](https://developer.apple.com/videos/play/wwdc2021/10061/)
+- [TextKit](https://developer.apple.com/documentation/appkit/textkit)
+- [NSTextLayoutFragment](https://developer.apple.com/documentation/appkit/nstextlayoutfragment)
+- [NSTextLayoutManagerDelegate](https://developer.apple.com/documentation/appkit/nstextlayoutmanagerdelegate)
+- [NSTextAttachment](https://developer.apple.com/documentation/appkit/nstextattachment)
+- [SwiftUI TextEditor](https://developer.apple.com/documentation/swiftui/texteditor)（macOS 26 的 `AttributedString` 绑定，见 §2.1）
+
+### 解析
+
 - [swift-markdown](https://github.com/swiftlang/swift-markdown)
 - [swift-markdown SourceLocation](https://github.com/swiftlang/swift-markdown/blob/main/Sources/Markdown/Infrastructure/SourceLocation.swift)
+
+### 调研过的替代方案与参考实现（§2.1）
+
+- [STTextView](https://github.com/krzyzanowskim/STTextView) —— TextKit 2 的 text view 替代组件（GPLv3 / 商业双授权，不作为依赖）。其 README 的 **TextKit 2 Bug Reports List** 是本方案 §4.8 缺陷清单的来源。
+- [CodeEditTextView](https://github.com/CodeEditApp/CodeEditTextView) / [CodeEditSourceEditor](https://github.com/CodeEditApp/CodeEditSourceEditor) —— 完全自研排版引擎 + tree-sitter（MIT）。§2.1 的 D 路线。
+- [MarkDev](https://github.com/bharathvbcr/MarkDev) —— 自定义 fragment 做 Markdown 块级绘制的先例；§4.8 的动态色隐患线索来自其源码注释。

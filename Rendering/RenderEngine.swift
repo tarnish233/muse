@@ -287,15 +287,13 @@ public struct RenderEngine {
 
     // MARK: - marker 显隐（纯计算，供协调器 diff 后写属性）
 
-    /// marker 的三种显示状态（Typora 模式）：
+    /// marker 的两种显示状态（Typora 模式）：
     /// - `.revealed`：回显源码标记（光标所在行/块内）；
-    /// - `.hidden`：折叠隐藏（近零宽 + 透明），行内标记与引用/围栏/分隔线标记用；
-    /// - `.ghost`：保留宽度的隐形（列表/任务标记）——内容位置不变，
-    ///   图形符号（圆点/序号/复选框）由 MuseLayoutFragment 在同一位置绘制。
+    /// - `.hidden`：折叠隐藏（近零宽 + 透明）。列表图形符号的对齐由段落缩进
+    ///   负责，具体图形由 MuseLayoutFragment 在同一 marker 带绘制。
     public enum MarkerState: Equatable {
         case revealed
         case hidden
-        case ghost
     }
 
     public struct VisibilityEntry {
@@ -320,13 +318,7 @@ public struct RenderEngine {
         }
 
         func defaultState(_ token: Token) -> MarkerState {
-            guard token.isBlockMarker else { return .hidden }
-            switch token.kind {
-            case .unorderedListItem, .orderedListItem, .taskListItem:
-                return .ghost
-            default:
-                return .hidden
-            }
+            .hidden
         }
 
         guard let selection else {
@@ -376,13 +368,6 @@ public struct RenderEngine {
         case .hidden:
             return [
                 .font: theme.hiddenMarkerFont(),
-                .foregroundColor: NSColor.clear,
-                .backgroundColor: NSColor.clear,
-            ]
-        case .ghost:
-            // 宽度保留（15pt mono）、颜色透明：图形符号由绘制层在同位置画出。
-            return [
-                .font: theme.revealedMarkerFont(),
                 .foregroundColor: NSColor.clear,
                 .backgroundColor: NSColor.clear,
             ]

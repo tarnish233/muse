@@ -128,7 +128,7 @@ import Testing
 
     /// 结构标记的光标行回显（Typora 模式）：与 App 完全一致的路径——
     /// 编辑回调 → 后台解析 → applyDirty + reconcileVisibility（forceLines）。
-    /// 不在光标行的列表/任务标记为 ghost（透明保宽），围栏/引用折叠。
+    /// 不在光标行的列表/任务标记为 hidden（近零宽），围栏/引用折叠。
     @Test func structuralMarkersFollowCaretThroughCoordinatorPath() async {
         let source = SampleMarkdown.text
         let storage = NSTextStorage(string: source)
@@ -147,9 +147,9 @@ import Testing
         }
         let revealedFont = RenderEngine.markerVisibilityAttributes(revealed: true)[.font] as? NSFont
 
-        // 打开后光标在文档末尾：列表标记 ghost（回显字号 + 透明），围栏折叠
+        // 打开后光标在文档末尾：列表标记 hidden（近零字号 + 透明），围栏折叠
         let ordered = (source as NSString).range(of: "1. 有序列表第一项")
-        #expect(font(ordered.location) == revealedFont)
+        #expect((font(ordered.location)?.pointSize ?? 100) < 1)
         #expect(alpha(ordered.location) == 0)
         let fence = (source as NSString).range(of: "```swift")
         #expect((font(fence.location)?.pointSize ?? 100) < 1)
@@ -207,12 +207,12 @@ import Testing
         #expect(await waitForApplied(coordinator, atLeast: 2))
 
         let string = storage.string as NSString
-        let markerFont = RenderEngine.markerVisibilityAttributes(revealed: true)[.font] as? NSFont
+        let hiddenMarkerFont = RenderEngine.markerVisibilityAttributes(state: .hidden)[.font] as? NSFont
 
-        // 新列表行：marker ghost（回显字号 + 透明，图形符号由绘制层画）
+        // 新列表行：marker hidden（近零字号 + 透明，图形符号由绘制层画）
         let newList = string.range(of: "- 新列表项")
         #expect(newList.location != NSNotFound)
-        #expect(storage.attribute(.font, at: newList.location, effectiveRange: nil) as? NSFont == markerFont)
+        #expect(storage.attribute(.font, at: newList.location, effectiveRange: nil) as? NSFont == hiddenMarkerFont)
         let listContent = string.range(of: "新列表项")
         #expect(storage.attribute(.foregroundColor, at: listContent.location, effectiveRange: nil) != nil)
 

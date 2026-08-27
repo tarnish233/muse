@@ -27,8 +27,16 @@ public nonisolated final class MuseLayoutFragment: NSTextLayoutFragment {
         guard blockKind != nil, let width = textLayoutManager?.textContainer?.size.width else {
             return base
         }
-        return base.union(CGRect(x: -layoutFragmentFrame.minX, y: 0,
-                                 width: width, height: layoutFragmentFrame.height))
+        let containerLeft = -layoutFragmentFrame.minX
+        // Hidden list markers are drawn immediately before the first content
+        // glyph. Extend the fragment surface far enough to the leading side;
+        // otherwise TextKit clips the replacement glyph at the normal fragment
+        // bounds even though the CGContext draw itself is correct.
+        let markerExtension: CGFloat = blockKind?.hasPrefix(BlockVisual.list.rawValue + ":") == true
+            ? 24
+            : 0
+        return base.union(CGRect(x: containerLeft - markerExtension, y: 0,
+                                 width: width + markerExtension, height: layoutFragmentFrame.height))
     }
 
     /// 只画块视觉、不画字形。生产路径由 `draw(at:in:)` 调用；
@@ -92,36 +100,32 @@ public nonisolated final class MuseLayoutFragment: NSTextLayoutFragment {
         context.restoreGState()
     }
 
-    /// 列表图形符号：源码 marker 处于 ghost（隐形但保留宽度）时，在 marker 位置画圆点/序号/复选框。
+    /// 列表图形符号：源码 marker 处于 hidden（近零宽）时，在段落 marker 带画圆点/序号/复选框。
     /// marker 回显（光标行）时不画——源码标记本体可见。
     private func drawListMarker(kind: String, at point: CGPoint, in context: CGContext) {
         guard let string = elementString, let info = ListMarkerInfo(string) else { return }
 
-        // ghost = 正常字号 + 透明；revealed = 正常字号 + 有颜色；折叠 = 近零字号
         let markerIndex = info.leadingCharacterCount
         guard markerIndex < string.length else { return }
         let font = string.attribute(.font, at: markerIndex, effectiveRange: nil) as? NSFont
-        guard (font?.pointSize ?? 0) >= 1 else { return }
-        if let color = string.attribute(.foregroundColor, at: markerIndex, effectiveRange: nil) as? NSColor,
-           color.alphaComponent > 0 {
-            return // 已回显，不画
-        }
+        let color = string.attribute(.foregroundColor, at: markerIndex, effectiveRange: nil) as? NSColor
+        let isHidden = (font?.pointSize ?? 0) < 1 || color?.alphaComponent == 0
+        guard isHidden else { return } // 已回显或尚未渲染，不画
 
         let palette = BlockVisualPalette.shared.snapshot()
-        let paragraph = string.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle
-        let markerStart = paragraph?.firstLineHeadIndent ?? 0
-        let contentStart = paragraph?.headIndent ?? markerStart + 24
-        let bandWidth = max(0, contentStart - markerStart)
         let glyph = glyphText(kind: kind, info: info) as NSString
         let glyphFont: NSFont = kind.hasSuffix(":t")
             ? NSFont.systemFont(ofSize: 14)
             : NSFont.systemFont(ofSize: 15)
         let glyphSize = glyph.size(withAttributes: [.font: glyphFont])
 
-        // TextKit positions the fragment at the paragraph's first-line indent;
-        // use that fragment origin as the left edge of this marker band. Adding
-        // firstLineHeadIndent again would double the depth offset.
-        let x = point.x + (bandWidth - glyphSize.width) / 2
+        // With a near-zero marker the first line's content starts at the
+        // fragment origin. Draw the replacement glyph immediately to its left;
+        // centering it in the old source-marker band would put it underneath
+        // the first content glyph and the subsequent `super.draw` would cover
+        // it. The fragment origin already includes the depth's first-line
+        // indent, so no extra depth offset is added here.
+        let x = point.x - glyphSize.width - 4
         let y = point.y + (layoutFragmentFrame.height - glyphSize.height) / 2
 
         // fragment 的 CGContext 是左上原点（与文本视图同向）；NSString 绘制需要

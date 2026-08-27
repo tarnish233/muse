@@ -70,8 +70,8 @@ import Testing
     }
 
     @Test func structuralMarkersFollowCaret() {
-        // Typora 模式：结构标记只在光标所在行/块内回显；列表/任务在光标行外为
-        // ghost（保留宽度的透明，图形符号由绘制层画）；引用/围栏折叠隐藏。
+        // Typora 模式：结构标记只在光标所在行/块内回显；列表/任务在光标行外
+        // 近零宽隐藏，图形符号由绘制层画；引用/围栏折叠隐藏。
         let source = "- 甲\n1. 乙\n- [ ] 丙\n> 引\n```\n代码\n```"
         let storage = NSTextStorage(string: source)
         let package = engine.prepare(source)
@@ -84,8 +84,8 @@ import Testing
         // 围栏：光标在块内 → 开栏符回显（有色）
         #expect(font(at: 21, in: storage) == theme.revealedMarkerFont())
         #expect(colorAlpha(21) > 0)
-        // 列表/任务：光标不在行上 → ghost（回显字号 + 透明）
-        #expect(font(at: 0, in: storage) == theme.revealedMarkerFont())
+        // 列表/任务：光标不在行上 → hidden（近零字号 + 透明）
+        #expect(isHidden(0, in: storage))
         #expect(colorAlpha(0) == 0)
         #expect(colorAlpha(9) == 0) // "- [ ] " 起点
         // 引用：折叠隐藏
@@ -396,7 +396,7 @@ import Testing
         textView.textContainer?.containerSize = NSSize(width: 640, height: CGFloat.greatestFiniteMagnitude)
 
         let package = engine.prepare(source)
-        // No caret selection keeps all three list markers in ghost state so the
+        // No caret selection keeps all three list markers hidden so the
         // custom fragment draws each visual marker.
         _ = engine.render(package: package, selection: nil, into: storage)
         let fragments = customFragments(in: textView).filter {
@@ -415,6 +415,34 @@ import Testing
         // allow antialiasing and glyph-width differences at the edge.
         #expect(x[1] - x[0] >= 20)
         #expect(x[2] - x[1] >= 20)
+    }
+
+    @Test func taskAndBulletMarkersAlignToSameContentColumn() {
+        let source = "- 普通项目\n- [ ] 任务项目"
+        let storage = NSTextStorage(string: source)
+        let textView = EditorTextView.make(textStorage: storage)
+        textView.frame = NSRect(x: 0, y: 0, width: 640, height: 200)
+        textView.textContainer?.containerSize = NSSize(width: 640, height: CGFloat.greatestFiniteMagnitude)
+
+        let package = engine.prepare(source)
+        _ = engine.render(package: package, selection: nil, into: storage)
+        let fragments = customFragments(in: textView)
+        guard let bullet = fragments.first(where: { $0.blockKind == BlockVisual.list.rawValue + ":u" }),
+              let task = fragments.first(where: { $0.blockKind == BlockVisual.list.rawValue + ":t" }),
+              let bulletLine = bullet.textLineFragments.first,
+              let taskLine = task.textLineFragments.first else {
+            #expect(Bool(false), "missing real list fragments or line fragments")
+            return
+        }
+
+        // The hidden marker ranges have different source lengths (2 vs 6 UTF-16
+        // code units), so compare the actual content character positions reported
+        // by the real TextKit 2 line fragments.
+        let bulletContentX = bulletLine.locationForCharacter(at: 2).x
+        let taskContentX = taskLine.locationForCharacter(at: 6).x
+        #expect(abs(bulletContentX - taskContentX) < 0.5)
+        #expect(isHidden(0, in: storage))
+        #expect(isHidden((source as NSString).range(of: "- [ ]").location, in: storage))
     }
 
     /// 字形特征断言：NSFontManager.convert 产出的字体在 descriptor 里可能不报字重，
@@ -479,8 +507,14 @@ import Testing
         NSColor.white.setFill()
         NSRect(x: 0, y: 0, width: width, height: height).fill()
         let frame = fragment.layoutFragmentFrame
+        // Hidden list markers are intentionally drawn just before the
+        // fragment origin. Give this isolated bitmap the same leading room
+        // that the real text view's inset provides.
+        let drawX = fragment.blockKind?.hasPrefix(BlockVisual.list.rawValue + ":") == true
+            ? frame.origin.x + 24
+            : frame.origin.x
         fragment.drawBlockVisuals(
-            at: CGPoint(x: frame.origin.x, y: 20),
+            at: CGPoint(x: drawX, y: 20),
             in: context.cgContext
         )
         context.flushGraphics()
@@ -529,7 +563,10 @@ import Testing
         NSColor.white.setFill()
         NSRect(x: 0, y: 0, width: width, height: height).fill()
         let frame = fragment.layoutFragmentFrame
-        fragment.drawBlockVisuals(at: frame.origin, in: context.cgContext)
+        let drawX = fragment.blockKind?.hasPrefix(BlockVisual.list.rawValue + ":") == true
+            ? frame.origin.x + 24
+            : frame.origin.x
+        fragment.drawBlockVisuals(at: CGPoint(x: drawX, y: frame.origin.y), in: context.cgContext)
         context.flushGraphics()
         NSGraphicsContext.restoreGraphicsState()
 

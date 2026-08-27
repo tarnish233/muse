@@ -200,14 +200,14 @@ line=2 museBlock=codeFence | ```
 
 两个独立原因：`token.markerRange` 只覆盖三个反引号，不含 info string；`codeFence` token 的 `closingMarkerRange` 是 `nil`，闭栏标记从未被登记为 marker。这就是截图里 `swift` 单独一行、末尾 ` ``` ` 露在外面的原因。
 
-### 6.3 任务列表 ghost 宽度与图形宽度不匹配（P2）
+### 6.3 任务列表 ghost 宽度与图形宽度不匹配（P2，已修复）
 
 ```text
 任务：ghost '- [x] '=55.6pt  复选框 '☑'=12.5pt  → 空隙 43.1pt
 无序：ghost '- '  =18.5pt    圆点 '•'  = 6.8pt  → 空隙 11.7pt
 ```
 
-`ghost` 状态保留源码 marker 的完整宽度，但绘制的图形符号窄得多，于是符号与文字之间留下大片空白。任务列表尤其明显（43pt）。需要重新设计：要么 ghost 宽度按图形符号裁剪，要么用段落缩进承担对齐、marker 走 `hidden`。
+`ghost` 状态保留源码 marker 的完整宽度，但绘制的图形符号窄得多，于是符号与文字之间留下大片空白。任务列表尤其明显（43pt）。M2-5 采用推荐的方案 A：列表/任务 marker 统一改为 `hidden`，内容列由 M2-3 的段落缩进承担，图形符号在同一段落 marker 带绘制。新增 `RendererTests.taskAndBulletMarkersAlignToSameContentColumn`，通过真实 TextKit 2 line fragment 的字符位置确认 `- ` 与 `- [ ] ` 的内容起始列一致；全量测试通过。真机截图已保存为 [m2-task-list.png](assets/m2-task-list.png)。
 
 ### 6.4 fragment 内解析动态色，暗色模式有风险（P1，已验证机制）
 
@@ -503,6 +503,14 @@ line=4  firstIndent=0.0  headIndent=24.0  |      - 第三层        ← 同一�
 1. `RendererTests.taskAndBulletMarkersAlignToSameContentColumn`：断言任务列表行与无序列表行（同 depth）的内容起始 x 坐标相同
 2. 真机截图：复选框/圆点与文字的间距视觉一致，无大片空白
 3. 若选方案 A，`markerVisibilityAttributes` 的 `.ghost` 状态可能整体不再需要——若确实如此，一并删除并更新 `MarkerState` 枚举与 v0.3 方案 §4.2 的三态表格
+
+**完成记录（2026-08-27）**：已完成，选择方案 A。列表/任务 marker 统一使用近零宽
+`hidden` 状态，删除 `MarkerState.ghost` 及对应三态文档；内容列由现有列表段落缩进
+提供，fragment 将替代图形绘制在内容字形左侧，并扩展 fragment surface 防止被 TextKit
+裁切。新增 `taskAndBulletMarkersAlignToSameContentColumn`，经真实 TextKit 2 line
+fragment 断言两种 marker 的内容起始列一致；Debug 全量 **102 项 / 7 套件**测试通过。
+真机截图已保存为 [m2-task-list.png](assets/m2-task-list.png)，确认圆点/复选框与文字
+间距一致且无 ghost 宽度造成的大空白。
 
 ### 9.6 任务 M2-6：代码围栏闭栏行在文档末尾时不并入块样式
 

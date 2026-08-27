@@ -312,6 +312,31 @@ import Testing
         #expect(light.border.components != dark.border.components)
     }
 
+    @Test func blockVisualsFollowAppearance() {
+        let aqua = NSAppearance(named: .aqua)!
+        let darkAqua = NSAppearance(named: .darkAqua)!
+        defer { BlockVisualPalette.shared.update(for: aqua) }
+
+        let source = "> 引用块"
+        let storage = NSTextStorage(string: source)
+        let textView = EditorTextView.make(textStorage: storage)
+        textView.frame = NSRect(x: 0, y: 0, width: 640, height: 160)
+        textView.textContainer?.containerSize = NSSize(width: 640, height: CGFloat.greatestFiniteMagnitude)
+
+        let package = engine.prepare(source)
+        _ = engine.render(package: package, selection: NSRange(location: storage.length, length: 0), into: storage)
+        guard let fragment = customFragments(in: textView).first(where: {
+            $0.blockKind == BlockVisual.quote.rawValue
+        }) else {
+            #expect(Bool(false), "missing quote fragment")
+            return
+        }
+
+        let lightPixel = quoteBackgroundPixel(of: fragment, in: aqua)
+        let darkPixel = quoteBackgroundPixel(of: fragment, in: darkAqua)
+        #expect(lightPixel != darkPixel)
+    }
+
     // MARK: - 块级视觉标记（MuseLayoutFragment 的驱动属性）
 
     /// .museBlock 属性必须覆盖到行首字符（绘制层按 line/element 起点读取）。
@@ -429,6 +454,49 @@ import Testing
             }
         }
         return count
+    }
+
+    /// 在指定外观上下文中经真实 fragment 绘制引用背景，采样远离竖线与字形的像素。
+    private func quoteBackgroundPixel(of fragment: MuseLayoutFragment, in appearance: NSAppearance) -> [CGFloat] {
+        let width = 640
+        let height = 160
+        guard let bitmap = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: width,
+            pixelsHigh: height,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bitmapFormat: [],
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ), let context = NSGraphicsContext(bitmapImageRep: bitmap) else {
+            return []
+        }
+
+        let frame = fragment.layoutFragmentFrame
+        appearance.performAsCurrentDrawingAppearance {
+            BlockVisualPalette.shared.update(for: appearance)
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = context
+            context.cgContext.setFillColor(NSColor.white.cgColor)
+            context.cgContext.fill(CGRect(x: 0, y: 0, width: width, height: height))
+            fragment.drawBlockVisuals(
+                at: CGPoint(x: frame.origin.x, y: 20),
+                in: context.cgContext
+            )
+            context.flushGraphics()
+            NSGraphicsContext.restoreGraphicsState()
+        }
+
+        // CGContext uses a bottom-left origin while `colorAt` addresses bitmap rows
+        // from the top, so mirror the sample row before reading it back.
+        let drawY = 20 + Int(frame.height / 2)
+        let y = min(height - 1, max(0, height - 1 - drawY))
+        let color = bitmap.colorAt(x: 12, y: y)?.usingColorSpace(.deviceRGB)
+        return [color?.redComponent ?? -1, color?.greenComponent ?? -1, color?.blueComponent ?? -1]
     }
 
     /// 走真实 fragment 绘制路径，统计落墨像素。

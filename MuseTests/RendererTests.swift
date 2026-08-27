@@ -268,6 +268,22 @@ import Testing
         #expect(storage.attribute(.museBlock, at: 5, effectiveRange: nil) as? String == BlockVisual.rule.rawValue)
     }
 
+    @Test func paletteUpdatesOnAppearanceChange() {
+        let aqua = NSAppearance(named: .aqua)!
+        let darkAqua = NSAppearance(named: .darkAqua)!
+        defer { BlockVisualPalette.shared.update(for: aqua) }
+
+        BlockVisualPalette.shared.update(for: aqua)
+        let light = BlockVisualPalette.shared.snapshot()
+        BlockVisualPalette.shared.update(for: darkAqua)
+        let dark = BlockVisualPalette.shared.snapshot()
+
+        #expect(light.quoteBackground.components != dark.quoteBackground.components)
+        #expect(light.codeBackground.components != dark.codeBackground.components)
+        #expect(light.marker.components != dark.marker.components)
+        #expect(light.border.components != dark.border.components)
+    }
+
     // MARK: - 块级视觉标记（MuseLayoutFragment 的驱动属性）
 
     /// .museBlock 属性必须覆盖到行首字符（绘制层按 line/element 起点读取）。

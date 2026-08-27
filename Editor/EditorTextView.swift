@@ -52,4 +52,18 @@ final class EditorTextView: NSTextView {
         textView.textContainerInset = NSSize(width: 20, height: 16)
         return textView
     }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        BlockVisualPalette.shared.update(for: effectiveAppearance)
+
+        // TextKit 2 may reuse already-created fragments across an appearance change.
+        // Invalidate the layout so the visible fragment surfaces are redrawn with the
+        // palette resolved for the new appearance.
+        if let layoutManager = textLayoutManager {
+            layoutManager.invalidateLayout(for: layoutManager.documentRange)
+            layoutManager.textViewportLayoutController.layoutViewport()
+        }
+        needsDisplay = true
+    }
 }

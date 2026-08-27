@@ -44,7 +44,7 @@ nonisolated final class MuseLayoutFragment: NSTextLayoutFragment {
         (textElement as? NSTextParagraph)?.attributedString
     }
 
-    private var blockKind: String? {
+    var blockKind: String? {
         guard let string = elementString, string.length > 0 else { return nil }
         return string.attribute(.museBlock, at: 0, effectiveRange: nil) as? String
     }
@@ -62,7 +62,7 @@ nonisolated final class MuseLayoutFragment: NSTextLayoutFragment {
         }
 
         guard let width = containerWidth else { return }
-        let theme = Theme.standard
+        let palette = BlockVisualPalette.shared.snapshot()
         // 容器左边缘在本次绘制坐标系里的 x（fragment 可能有段落缩进）。
         let left = point.x - layoutFragmentFrame.minX
         let height = layoutFragmentFrame.height
@@ -71,19 +71,19 @@ nonisolated final class MuseLayoutFragment: NSTextLayoutFragment {
         switch kind {
         case BlockVisual.quote.rawValue:
             // 整行通宽背景 + 左侧竖线（Typora 引用块视觉）。
-            context.setFillColor(theme.quoteBackground.cgColor)
+            context.setFillColor(palette.quoteBackground)
             context.fill(CGRect(x: left, y: point.y, width: width, height: height))
-            context.setFillColor(theme.markerText.cgColor)
+            context.setFillColor(palette.marker)
             context.fill(CGRect(x: left, y: point.y, width: 3, height: height))
 
         case BlockVisual.codeFence.rawValue:
             // 代码块通宽背景（含开/闭栏行）。
-            context.setFillColor(theme.codeBackground.cgColor)
+            context.setFillColor(palette.codeBackground)
             context.fill(CGRect(x: left, y: point.y, width: width, height: height))
 
         case BlockVisual.rule.rawValue:
             // 隐形的分隔线行：在间隙中央画真实横线。
-            context.setFillColor(theme.borderColor.cgColor)
+            context.setFillColor(palette.border)
             context.fill(CGRect(x: left, y: point.y + height / 2 - 0.75, width: width, height: 1.5))
 
         default:
@@ -103,11 +103,12 @@ nonisolated final class MuseLayoutFragment: NSTextLayoutFragment {
         let font = string.attribute(.font, at: markerIndex, effectiveRange: nil) as? NSFont
         guard (font?.pointSize ?? 0) >= 1 else { return }
         if let color = string.attribute(.foregroundColor, at: markerIndex, effectiveRange: nil) as? NSColor,
-           color.cgColor.alpha > 0 {
+           color.alphaComponent > 0 {
             return // 已回显，不画
         }
 
         let theme = Theme.standard
+        let palette = BlockVisualPalette.shared.snapshot()
         let bandWidth = (info.markerText as NSString)
             .size(withAttributes: [.font: theme.revealedMarkerFont()]).width
         let glyph = glyphText(kind: kind, info: info) as NSString
@@ -125,7 +126,7 @@ nonisolated final class MuseLayoutFragment: NSTextLayoutFragment {
         NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: true)
         glyph.draw(at: NSPoint(x: x, y: y), withAttributes: [
             .font: glyphFont,
-            .foregroundColor: theme.markerText,
+            .foregroundColor: NSColor(cgColor: palette.marker) ?? NSColor.black,
         ])
         NSGraphicsContext.restoreGraphicsState()
     }

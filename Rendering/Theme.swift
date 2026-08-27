@@ -139,3 +139,62 @@ nonisolated struct Theme: @unchecked Sendable {
         }
     }
 }
+
+/// Fragment 绘制使用的、已经按具体外观解析的颜色。
+///
+/// `NSTextLayoutFragment` 的绘制回调不保证建立了正确的
+/// `NSAppearance.current`，而 TextKit 还可能缓存并复用 fragment。颜色不能在
+/// fragment 内直接从动态 `NSColor` 取 `cgColor`，否则外观切换后可能静默回落亮色。
+nonisolated struct BlockVisualPaletteSnapshot: @unchecked Sendable {
+    let quoteBackground: CGColor
+    let codeBackground: CGColor
+    let marker: CGColor
+    let border: CGColor
+}
+
+/// 块视觉调色板的唯一共享实例。
+///
+/// fragment 的接口是 nonisolated，读写不能依赖 MainActor；外观变化时替换快照
+/// 内容，所有存活 fragment 都会在下一次绘制时读取当前外观的颜色。
+nonisolated final class BlockVisualPalette: @unchecked Sendable {
+    static let shared = BlockVisualPalette()
+
+    private let lock = NSLock()
+    private var current: BlockVisualPaletteSnapshot
+
+    private init() {
+        let appearance = NSAppearance(named: .aqua)!
+        current = Self.snapshot(for: appearance)
+    }
+
+    func snapshot() -> BlockVisualPaletteSnapshot {
+        lock.lock()
+        defer { lock.unlock() }
+        return current
+    }
+
+    func update(for appearance: NSAppearance) {
+        let next = Self.snapshot(for: appearance)
+        lock.lock()
+        current = next
+        lock.unlock()
+    }
+
+    private static func snapshot(for appearance: NSAppearance) -> BlockVisualPaletteSnapshot {
+        let theme = Theme.standard
+        return BlockVisualPaletteSnapshot(
+            quoteBackground: resolvedCGColor(theme.quoteBackground, for: appearance),
+            codeBackground: resolvedCGColor(theme.codeBackground, for: appearance),
+            marker: resolvedCGColor(theme.markerText, for: appearance),
+            border: resolvedCGColor(theme.borderColor, for: appearance)
+        )
+    }
+
+    private static func resolvedCGColor(_ color: NSColor, for appearance: NSAppearance) -> CGColor {
+        var resolved: CGColor?
+        appearance.performAsCurrentDrawingAppearance {
+            resolved = color.cgColor
+        }
+        return resolved ?? NSColor.black.cgColor
+    }
+}

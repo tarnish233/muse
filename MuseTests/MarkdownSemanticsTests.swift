@@ -135,4 +135,16 @@ import Testing
             }
         }
     }
+
+    @Test func ASTProvidesDeepNestedListStructureToScanner() throws {
+        let source = "- parent\n    - child\n"
+        let semantics = MarkdownSemantics(source)
+        #expect(semantics.listItemLines.contains(0))
+        #expect(semantics.listItemLines.contains(1))
+
+        let nested = try #require(RenderEngine().prepare(source).tokens.first { token in
+            token.line == 1 && token.kind == .unorderedListItem
+        })
+        #expect(nested.markerRange.lowerBound == 13) // "- parent\n" + 4 个缩进空格
+    }
 }

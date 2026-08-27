@@ -12,11 +12,17 @@ enum BlockVisual: String {
 }
 
 extension NSAttributedString.Key {
-    static let museBlock = NSAttributedString.Key("museBlock")
+    /// nonisolated：块视觉的 fragment（MuseLayoutFragment）在 nonisolated 的
+    /// 度量路径（renderingSurfaceBounds）里也要读它。Key 本身是 Sendable。
+    nonisolated static let museBlock = NSAttributedString.Key("museBlock")
 }
 
 /// 主题：字体与配色。亮/暗跟随系统外观（动态 NSColor）。
-struct Theme {
+///
+/// nonisolated + Sendable：块视觉在 `NSTextLayoutFragment` 的 nonisolated
+/// 绘制/度量接口里取用主题。NSColor / NSFont 都是不可变且线程安全的，
+/// 主题本身只读，跨隔离域读取无竞争。
+nonisolated struct Theme: @unchecked Sendable {
     let text: NSColor
     let mutedText: NSColor
     let codeText: NSColor

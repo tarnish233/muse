@@ -34,11 +34,21 @@ nonisolated struct MarkdownSemantics: Sendable {
 
     let lineKinds: [LineKind]
     let links: [LinkSyntax]
+    /// AST 判定出的结构行，供 TokenScanner 在需要时扩大缩进识别范围。
+    ///
+    /// 例如 CommonMark 允许列表嵌套在 4 个以上空格之后；扫描器本身不复制块解析规则，
+    /// 只在 AST 已确认该行属于对应结构时消费这些行级提示。
+    let listItemLines: Set<Int>
+    let quoteLines: Set<Int>
+    let fenceLines: Set<Int>
 
     init(_ source: String) {
         let bytes = Array(source.utf8)
         let lineStarts = TokenScanner().lines(source).map(\.start)
         let document = Document(parsing: source)
+
+        var structuralWalker = StructuralLineWalker()
+        structuralWalker.visit(document)
 
         var lineKinds: [LineKind] = []
         for block in document.blockChildren {
@@ -72,6 +82,46 @@ nonisolated struct MarkdownSemantics: Sendable {
 
         self.lineKinds = lineKinds
         self.links = parsed
+        self.listItemLines = structuralWalker.listItemLines
+        self.quoteLines = structuralWalker.quoteLines
+        self.fenceLines = structuralWalker.fenceLines
+    }
+
+    /// 使用 swift-markdown 官方 walker 收集块结构。这个 walker 不生成 token，
+    /// 只把 AST 的语义投影成行号，marker 的字节边界仍由 TokenScanner 精确计算。
+    private struct StructuralLineWalker: MarkupWalker {
+        var listItemLines = Set<Int>()
+        var quoteLines = Set<Int>()
+        var fenceLines = Set<Int>()
+
+        mutating func visitListItem(_ listItem: ListItem) {
+            if let line = listItem.range?.lowerBound.line {
+                listItemLines.insert(max(0, line - 1))
+            }
+            descendInto(listItem)
+        }
+
+        mutating func visitBlockQuote(_ blockQuote: BlockQuote) {
+            Self.markAllLines(blockQuote.range, into: &quoteLines)
+            descendInto(blockQuote)
+        }
+
+        mutating func visitCodeBlock(_ codeBlock: CodeBlock) {
+            Self.markAllLines(codeBlock.range, into: &fenceLines)
+        }
+
+        mutating func defaultVisit(_ markup: Markup) {
+            descendInto(markup)
+        }
+
+        private static func markAllLines(_ range: SourceRange?, into target: inout Set<Int>) {
+            guard let range else { return }
+            let start = max(0, range.lowerBound.line - 1)
+            let end = max(start, range.upperBound.line - 1)
+            for line in start...end {
+                target.insert(line)
+            }
+        }
     }
 
     // MARK: - 链接收集

@@ -157,6 +157,30 @@ import Testing
         #expect(storage.attribute(.backgroundColor, at: 9, effectiveRange: nil) != nil)
     }
 
+    /// 块级视觉必须经由 TextKit 2 的 fragment 路径产出。
+    ///
+    /// 这个测试之前直接调用绘制函数往位图里画，于是在真机上一片空白的同时依然全绿：
+    /// layer-backed 的 TextKit 2 NSTextView 会把字形渲染进各 fragment 自己的图层，
+    /// 视图级 draw/drawBackground 画的内容被整片盖掉。所以断言必须落在
+    /// 「layoutManager 真的生产 MuseLayoutFragment」+「该 fragment 的 draw 真的落墨」上。
+    @Test func blockVisualsComeFromLayoutFragments() {
+        let source = "1. 有序列表\n> 引用块\n```swift\nlet value = 1\n```"
+        let storage = NSTextStorage(string: source)
+        let textView = EditorTextView.make(textStorage: storage)
+        textView.frame = NSRect(x: 0, y: 0, width: 640, height: 360)
+        textView.textContainer?.containerSize = NSSize(width: 640, height: CGFloat.greatestFiniteMagnitude)
+
+        let before = fragmentPixelCount(in: textView)
+        let package = engine.prepare(source)
+        _ = engine.render(package: package, selection: NSRange(location: storage.length, length: 0), into: storage)
+        let after = fragmentPixelCount(in: textView)
+
+        // 委托已挂上：布局管理器生产的是自定义 fragment，而不是系统默认实现。
+        #expect(customFragmentCount(in: textView) > 0)
+        #expect(before == 0)
+        #expect(after > 0)
+    }
+
     @Test func linkLabelStyledWithURL() {
         let source = "[打开](https://apple.com)"
         let storage = NSTextStorage(string: source)
@@ -231,6 +255,74 @@ import Testing
     private func hasTrait(_ font: NSFont?, _ trait: NSFontTraitMask) -> Bool {
         guard let font else { return false }
         return NSFontManager.shared.traits(of: font).contains(trait)
+    }
+
+    /// layoutManager 实际生产的自定义 fragment 数（验证委托挂接）。
+    private func customFragmentCount(in textView: EditorTextView) -> Int {
+        guard let layoutManager = textView.textLayoutManager else { return 0 }
+        var count = 0
+        layoutManager.enumerateTextLayoutFragments(
+            from: layoutManager.documentRange.location,
+            options: [.ensuresLayout]
+        ) { fragment in
+            if fragment is MuseLayoutFragment { count += 1 }
+            return true
+        }
+        return count
+    }
+
+    /// 走真实 fragment 绘制路径，统计落墨像素。
+    private func fragmentPixelCount(in textView: EditorTextView) -> Int {
+        let width = 640
+        let height = 360
+        guard let layoutManager = textView.textLayoutManager,
+              let bitmap = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: width,
+            pixelsHigh: height,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bitmapFormat: [],
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ), let context = NSGraphicsContext(bitmapImageRep: bitmap) else {
+            return 0
+        }
+
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = context
+        NSColor.white.setFill()
+        NSRect(x: 0, y: 0, width: width, height: height).fill()
+        // 只画块视觉、不画字形：字形会淹没像素差，无法区分「块视觉有没有落墨」。
+        layoutManager.enumerateTextLayoutFragments(
+            from: layoutManager.documentRange.location,
+            options: [.ensuresLayout]
+        ) { fragment in
+            guard let museFragment = fragment as? MuseLayoutFragment else { return true }
+            let frame = museFragment.layoutFragmentFrame
+            museFragment.drawBlockVisuals(at: frame.origin, in: context.cgContext)
+            return true
+        }
+        context.flushGraphics()
+        NSGraphicsContext.restoreGraphicsState()
+
+        guard let data = bitmap.bitmapData else { return 0 }
+        let bytesPerPixel = max(1, bitmap.bitsPerPixel / 8)
+        var count = 0
+        for row in 0..<bitmap.pixelsHigh {
+            let rowStart = row * bitmap.bytesPerRow
+            for column in 0..<bitmap.pixelsWide {
+                let pixelStart = rowStart + column * bytesPerPixel
+                let pixel = UnsafeBufferPointer(start: data + pixelStart, count: bytesPerPixel)
+                if pixel.contains(where: { $0 != 0xFF }) {
+                    count += 1
+                }
+            }
+        }
+        return count
     }
 
     @Test func nestedEmphasisCombinesTraits() {

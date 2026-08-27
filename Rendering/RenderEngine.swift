@@ -33,12 +33,18 @@ struct RenderEngine {
 
     nonisolated func prepare(_ source: String) -> Package {
         // AST 先于扫描器：链接语法给出行内扫描的保护区间（URL 区域不做强调配对），
-        // 同时提供链接锚点（嵌套括号标签、平衡括号目的地的精确边界）。
-        // 守卫：文档不含 `[` 时跳过语义层（swift-markdown 全文档解析 200KB 约 90ms，
-        // 那是无链接文档的纯浪费；输入热路径的语义解析已在后台）。
-        let semantics = source.contains("[" ) ? MarkdownSemantics(source) : nil
+        // 同时提供块结构的行级事实（尤其是深层列表/引用的缩进）。
+        // 先做一次极轻量的候选行检查，普通纯文本不必为链接/块语义付全文档解析成本；
+        // 候选命中后，真正的结构判断交给 swift-markdown。
+        let semantics = needsMarkdownSemantics(source) ? MarkdownSemantics(source) : nil
         let lineStarts = scanner.lines(source).map(\.start)
-        var tokens = scanner.scan(source, excludingRanges: semantics?.links.flatMap(\.inertRanges) ?? [])
+        var tokens = scanner.scan(
+            source,
+            excludingRanges: semantics?.links.flatMap(\.inertRanges) ?? [],
+            semanticListLines: semantics?.listItemLines ?? [],
+            semanticQuoteLines: semantics?.quoteLines ?? [],
+            semanticFenceLines: semantics?.fenceLines ?? []
+        )
 
         if let semantics {
             for link in semantics.links {
@@ -55,6 +61,43 @@ struct RenderEngine {
         }
 
         return Package(tokens: tokens, index: SourceIndex(source), lineStarts: lineStarts)
+    }
+
+    /// 只用于决定是否需要启动官方 AST 解析；不判断语义结果。
+    /// 链接仍沿用原有的 `[` 快速路径；普通的 ≤3 空格块由扫描器直接定位，
+    /// 只有可能超出扫描器简化规则的深层/Tab 缩进才需要 AST 介入。
+    private nonisolated func needsMarkdownSemantics(_ source: String) -> Bool {
+        if source.contains("[") {
+            return true
+        }
+
+        let bytes = Array(source.utf8)
+        for line in scanner.lines(source) {
+            var i = line.start
+            while i < line.end, (bytes[i] == 0x20 || bytes[i] == 0x09) {
+                i += 1
+            }
+            guard i < line.end else { continue }
+            let hasExtendedIndent = i - line.start > 3
+                || bytes[line.start..<i].contains(0x09)
+            guard hasExtendedIndent else { continue }
+
+            switch bytes[i] {
+            case 0x23, 0x2A, 0x2B, 0x2D, 0x3E, 0x5F, 0x60:
+                // # heading, * + - list/rule, > quote, _ rule, ` fence/inline code
+                return true
+            default:
+                guard bytes[i] >= 0x30, bytes[i] <= 0x39 else { continue }
+                var j = i
+                while j < line.end, bytes[j] >= 0x30, bytes[j] <= 0x39, j - i < 9 {
+                    j += 1
+                }
+                if j + 1 < line.end, bytes[j] == 0x2E, bytes[j + 1] == 0x20 {
+                    return true
+                }
+            }
+        }
+        return false
     }
 
     private nonisolated func lineIndex(ofByte offset: Int, lineStarts: [Int]) -> Int {
@@ -175,7 +218,7 @@ struct RenderEngine {
     /// - `.revealed`：回显源码标记（光标所在行/块内）；
     /// - `.hidden`：折叠隐藏（近零宽 + 透明），行内标记与引用/围栏/分隔线标记用；
     /// - `.ghost`：保留宽度的隐形（列表/任务标记）——内容位置不变，
-    ///   图形符号（圆点/序号/复选框）由 BlockBackgroundPainter 在同一位置绘制。
+    ///   图形符号（圆点/序号/复选框）由 MuseLayoutFragment 在同一位置绘制。
     enum MarkerState: Equatable {
         case revealed
         case hidden
@@ -288,11 +331,11 @@ struct RenderEngine {
 
         // 无内容 token（分隔线）在 content guard 之前处理。
         if token.kind == .rule {
-            // 分隔线：标记隐藏 + 上下留白；真实横线由 BlockBackgroundPainter 绘制。
+            // 分隔线：标记隐藏 + 上下留白；真实横线由 MuseLayoutFragment 绘制。
             storage.addAttributes([
                 .paragraphStyle: theme.ruleParagraph(),
                 .museBlock: BlockVisual.rule.rawValue,
-            ], range: index.nsRange(token.markerRange))
+            ], range: index.nsRange(package.lineStarts[token.line]..<token.markerRange.upperBound))
             return
         }
 
@@ -303,7 +346,8 @@ struct RenderEngine {
         // 字符仍带 base 样式，整段会被修回 base，悬挂缩进/引用/标题间距全部失效。
         let wholeLine = { () -> NSRange in
             let end = token.contentRange?.upperBound ?? token.markerRange.upperBound
-            return index.nsRange(token.markerRange.lowerBound..<end)
+            let start = token.isBlockMarker ? package.lineStarts[token.line] : token.markerRange.lowerBound
+            return index.nsRange(start..<end)
         }()
 
         switch token.kind {
@@ -336,7 +380,7 @@ struct RenderEngine {
             let lineEnd = token.contentRange?.upperBound ?? token.markerRange.upperBound
             storage.addAttributes(
                 [.museBlock: BlockVisual.quote.rawValue],
-                range: index.nsRange(token.markerRange.lowerBound..<lineEnd)
+                range: index.nsRange(package.lineStarts[token.line]..<lineEnd)
             )
 
         case .codeFence:
@@ -349,7 +393,7 @@ struct RenderEngine {
                     upper = max(upper, package.lineStarts[closeLine + 1])
                 }
             }
-            let fullRange = token.markerRange.lowerBound..<upper
+            let fullRange = package.lineStarts[token.line]..<upper
             storage.addAttributes([
                 .font: theme.codeFont(),
                 .foregroundColor: theme.codeText,

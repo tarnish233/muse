@@ -108,6 +108,7 @@ final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageDelegate
                                                utf16Range: dirtyNS, into: storage)
             reconcileVisibility(package: package, selection: textView?.selectedRange(),
                                 into: storage, forceLines: dirtyLines)
+            textView?.needsDisplay = true
         }
         isApplyingAttributes = false
 
@@ -130,6 +131,7 @@ final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageDelegate
         guard let package = lastPackage else { return }
         suppressUndo {
             reconcileVisibility(package: package, selection: selection, into: storage, forceLines: nil)
+            textView?.needsDisplay = true
         }
     }
 
@@ -139,6 +141,7 @@ final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageDelegate
         guard let package = lastPackage else { return }
         suppressUndo {
             reconcileVisibility(package: package, selection: textView?.selectedRange(), into: storage, forceLines: nil)
+            textView?.needsDisplay = true
         }
     }
 

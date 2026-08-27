@@ -26,7 +26,17 @@ nonisolated struct TokenScanner {
     /// - Parameters:
     ///   - excludingRanges: 行内扫描的保护区间（如链接目的地区域），
     ///     其中的标记字符不做任何解析（UTF-8 字节）。
-    func scan(_ source: String, excludingRanges: [Range<Int>] = []) -> [Token] {
+    ///   - semanticListLines / semanticQuoteLines / semanticFenceLines:
+    ///     由 swift-markdown AST 提供的结构行。CommonMark 的列表/引用可以有
+    ///     超过 3 个空格或使用 tab 缩进；扫描器只在 AST 已确认的行上放宽缩进，
+    ///     避免把普通缩进代码误判为列表。
+    func scan(
+        _ source: String,
+        excludingRanges: [Range<Int>] = [],
+        semanticListLines: Set<Int> = [],
+        semanticQuoteLines: Set<Int> = [],
+        semanticFenceLines: Set<Int> = []
+    ) -> [Token] {
         let bytes = Array(source.utf8)
         let lines = lines(source)
         var tokens: [Token] = []
@@ -37,7 +47,11 @@ nonisolated struct TokenScanner {
         var openFenceBodyStart = 0
 
         for line in lines {
-            let isFenceLine = scanFenceMarker(bytes, line)
+            let isFenceLine = scanFenceMarker(
+                bytes,
+                line,
+                allowExtendedIndent: semanticFenceLines.contains(line.index)
+            )
             if !inFence {
                 if let fence = isFenceLine {
                     inFence = true
@@ -52,7 +66,14 @@ nonisolated struct TokenScanner {
                     openFenceBodyStart = line.next
                     continue
                 }
-                scanBlockAndInline(bytes, line, excludingRanges: excludingRanges, into: &tokens)
+                scanBlockAndInline(
+                    bytes,
+                    line,
+                    excludingRanges: excludingRanges,
+                    allowExtendedIndent: semanticListLines.contains(line.index)
+                        || semanticQuoteLines.contains(line.index),
+                    into: &tokens
+                )
             } else if isFenceLine != nil {
                 inFence = false
                 // 闭合围栏：内容 = 开栏行行尾之后 到 闭合行行首（M0 简化，闭合行样式并入整块）。
@@ -117,10 +138,20 @@ nonisolated struct TokenScanner {
     // MARK: - 块级
 
     /// 行首代码围栏：``` 起 3 个及以上反引号（允许 ≤3 空格缩进）。返回 marker 区间。
-    private func scanFenceMarker(_ bytes: [UInt8], _ line: Line) -> Range<Int>? {
+    private func scanFenceMarker(
+        _ bytes: [UInt8],
+        _ line: Line,
+        allowExtendedIndent: Bool
+    ) -> Range<Int>? {
         var i = line.start
-        let indentLimit = min(line.start + 3, line.end)
-        while i < indentLimit, bytes[i] == 0x20 { i += 1 }
+        let indentLimit = allowExtendedIndent ? line.end : min(line.start + 3, line.end)
+        while i < indentLimit {
+            if bytes[i] == 0x20 || (allowExtendedIndent && bytes[i] == 0x09) {
+                i += 1
+            } else {
+                break
+            }
+        }
         guard i < line.end, bytes[i] == 0x60 else { return nil }
         let runStart = i
         while i < line.end, bytes[i] == 0x60 { i += 1 }
@@ -128,10 +159,22 @@ nonisolated struct TokenScanner {
         return runStart..<i
     }
 
-    private func scanBlockAndInline(_ bytes: [UInt8], _ line: Line, excludingRanges: [Range<Int>], into tokens: inout [Token]) {
+    private func scanBlockAndInline(
+        _ bytes: [UInt8],
+        _ line: Line,
+        excludingRanges: [Range<Int>],
+        allowExtendedIndent: Bool,
+        into tokens: inout [Token]
+    ) {
         var i = line.start
-        let indentLimit = min(line.start + 3, line.end)
-        while i < indentLimit, bytes[i] == 0x20 { i += 1 }
+        let indentLimit = allowExtendedIndent ? line.end : min(line.start + 3, line.end)
+        while i < indentLimit {
+            if bytes[i] == 0x20 || (allowExtendedIndent && bytes[i] == 0x09) {
+                i += 1
+            } else {
+                break
+            }
+        }
         guard i < line.end else { return }
 
         let b = bytes[i]

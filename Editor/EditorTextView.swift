@@ -4,6 +4,9 @@ import AppKit
 /// （v0.2 数据所有权边界：EditorBuffer.textStorage 是唯一可变正文）。
 /// 禁止代码访问 TextKit 1 的 layoutManager（会把视图打进不可逆的兼容模式）。
 final class EditorTextView: NSTextView {
+    /// 块级视觉的 fragment 工厂（layoutManager.delegate 是 unowned，需强引用持有）。
+    private var fragmentProvider: MuseLayoutFragmentProvider?
+
     static func make(textStorage: NSTextStorage) -> EditorTextView {
         // TextKit 2 标准手工栈：NSTextStorage → NSTextContentStorage → NSTextLayoutManager → NSTextContainer。
         let contentStorage = NSTextContentStorage()
@@ -18,6 +21,12 @@ final class EditorTextView: NSTextView {
 
         let textView = EditorTextView(frame: .zero, textContainer: container)
         assert(textView.textLayoutManager != nil, "TextKit 2 未启用：NSTextView 未能挂接 NSTextLayoutManager")
+
+        // 块级视觉（引用通宽背景+左竖线、代码块通宽背景、分隔线横线、列表图形符号）
+        // 走自定义 fragment，不能走视图级 draw —— 见 MuseLayoutFragment 的说明。
+        let provider = MuseLayoutFragmentProvider()
+        textView.fragmentProvider = provider
+        layoutManager.delegate = provider
 
         textView.allowsUndo = true
         textView.usesAdaptiveColorMappingForDarkAppearance = true
@@ -42,12 +51,5 @@ final class EditorTextView: NSTextView {
 
         textView.textContainerInset = NSSize(width: 20, height: 16)
         return textView
-    }
-
-    /// 块级视觉（引用通宽背景+左竖线、代码块通宽背景、分隔线横线）：
-    /// 在字形绘制之前画出块背景（见 BlockBackgroundPainter）。
-    override func draw(_ dirtyRect: NSRect) {
-        BlockBackgroundPainter.drawBlockBackgrounds(in: dirtyRect, textView: self)
-        super.draw(dirtyRect)
     }
 }

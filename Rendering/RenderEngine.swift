@@ -389,9 +389,8 @@ struct RenderEngine {
             if let contentEnd = token.contentRange?.upperBound, contentEnd < package.index.utf8Length {
                 // 闭合行（content 终止处所在行）整行并入样式
                 let closeLine = lineIndex(atUTF8: contentEnd, package: package)
-                if closeLine + 1 < package.lineStarts.count {
-                    upper = max(upper, package.lineStarts[closeLine + 1])
-                }
+                // lineEndUTF8 同时覆盖“闭栏行是最后一行”和“闭栏行后还有内容”两种情况。
+                upper = max(upper, lineEndUTF8(closeLine, package: package))
             }
             let fullRange = package.lineStarts[token.line]..<upper
             storage.addAttributes([

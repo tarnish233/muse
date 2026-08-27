@@ -157,6 +157,25 @@ import Testing
         #expect(storage.attribute(.backgroundColor, at: 9, effectiveRange: nil) != nil)
     }
 
+    @Test func closingFenceAtEndOfDocumentGetsBlockAttribute() {
+        let source = "```swift\nlet a = 1\n```"
+        let storage = NSTextStorage(string: source)
+        let package = engine.prepare(source)
+        _ = engine.render(package: package, selection: NSRange(location: storage.length, length: 0), into: storage)
+
+        let closingStart = storage.length - 3
+        #expect(storage.attribute(.museBlock, at: closingStart, effectiveRange: nil) as? String == BlockVisual.codeFence.rawValue)
+    }
+
+    @Test func unclosedFenceGetsBlockAttributeToDocumentEnd() {
+        let source = "```swift\nlet a = 1\n未闭合"
+        let storage = NSTextStorage(string: source)
+        let package = engine.prepare(source)
+        _ = engine.render(package: package, selection: NSRange(location: storage.length, length: 0), into: storage)
+
+        #expect(storage.attribute(.museBlock, at: storage.length - 1, effectiveRange: nil) as? String == BlockVisual.codeFence.rawValue)
+    }
+
     /// 块级视觉必须经由 TextKit 2 的 fragment 路径产出。
     ///
     /// 这个测试之前直接调用绘制函数往位图里画，于是在真机上一片空白的同时依然全绿：

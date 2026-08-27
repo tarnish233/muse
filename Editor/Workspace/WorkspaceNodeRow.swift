@@ -8,7 +8,7 @@ struct WorkspaceNodeRow: View {
     let openFile: (URL) -> Void
     let revealInFinder: (URL) -> Void
 
-    @State private var isExpanded = true
+    @State private var isExpanded = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {

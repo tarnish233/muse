@@ -5,7 +5,7 @@ struct RenderStatusView: View {
     @ObservedObject var renderer: RenderCoordinator
 
     var body: some View {
-        Label(renderer.statusText, systemImage: "waveform")
+        Text(renderer.statusText)
             .font(.caption.monospacedDigit())
             .lineLimit(1)
             .truncationMode(.middle)

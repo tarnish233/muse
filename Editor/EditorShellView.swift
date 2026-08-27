@@ -6,6 +6,7 @@ import SwiftUI
 struct EditorShellView: View {
     let document: MuseDocument
     @Bindable var chromeState: EditorChromeState
+    let navigation: EditorDocumentNavigation
     @ObservedObject private var renderer: RenderCoordinator
     @State private var workspace = ProjectWorkspace.shared
     @State private var projectSidebarWidth = EditorChromeMetrics.projectSidebarDefaultWidth
@@ -14,9 +15,14 @@ struct EditorShellView: View {
     @State private var selectedFileURL: URL?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    init(document: MuseDocument, chromeState: EditorChromeState) {
+    init(
+        document: MuseDocument,
+        chromeState: EditorChromeState,
+        navigation: EditorDocumentNavigation
+    ) {
         self.document = document
         self.chromeState = chromeState
+        self.navigation = navigation
         renderer = document.renderer
         _selectedFileURL = State(initialValue: document.fileURL?.standardizedFileURL)
     }
@@ -64,8 +70,8 @@ struct EditorShellView: View {
 
             WorkspaceSidebar(
                 workspace: workspace,
-                document: document,
-                selectedFileURL: $selectedFileURL
+                selectedFileURL: $selectedFileURL,
+                openFile: navigation.open
             )
         }
         .background(EditorSurface.sidebar)

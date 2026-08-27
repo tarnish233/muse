@@ -15,7 +15,6 @@ import Testing
 
     private func load(_ source: String, into document: MuseDocument) throws {
         try document.read(from: Data(source.utf8), ofType: markdownType)
-        document.updateChangeCount(.changeCleared)
     }
 
     private func autosave(_ document: MuseDocument, to url: URL) async throws {
@@ -48,6 +47,7 @@ import Testing
         // 初始被示例文档填充，read 应整体覆盖。
         try document.read(from: Data("只有一行".utf8), ofType: "net.daringfireball.markdown")
         #expect(document.buffer.string == "只有一行")
+        #expect(!document.isDocumentEdited)
     }
 
     @Test func nonUTF8IsRejected() throws {

@@ -9,13 +9,15 @@ public final class MuseDocument: NSDocument {
 
     public let buffer = EditorBuffer()
     public let renderer = RenderCoordinator()
+    private var isReadingContent = false
 
     public override init() {
         super.init()
         buffer.textStorage.delegate = renderer
         renderer.attach(storage: buffer.textStorage)
         renderer.onTextEdited = { [weak self] in
-            self?.updateChangeCount(.changeDone)
+            guard let self, !self.isReadingContent else { return }
+            self.updateChangeCount(.changeDone)
         }
         // 新文档填入示例（打开文件时 read(from:) 会整体覆盖）。
         let full = NSRange(location: 0, length: buffer.string.utf16.count)
@@ -42,6 +44,11 @@ public final class MuseDocument: NSDocument {
             throw CocoaError(.fileReadCorruptFile)
         }
         MainActor.assumeIsolated {
+            isReadingContent = true
+            defer {
+                isReadingContent = false
+                updateChangeCount(.changeCleared)
+            }
             let full = NSRange(location: 0, length: buffer.string.utf16.count)
             buffer.textStorage.replaceCharacters(in: full, with: text)
         }

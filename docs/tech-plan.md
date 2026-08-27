@@ -165,12 +165,14 @@ NSDocumentController → MuseDocument → EditorBuffer
 - 项目入口通过 security-scoped bookmark 写入 `UserDefaults`，下次启动恢复；正文不进入偏好存储。
 - 新建文件与文件夹可以作用于项目根目录或任意子文件夹；无扩展名的新文件自动补 `.md`。
 - 文件按“文件夹优先 + Finder 本地化自然顺序”排列；隐藏文件和 package 后代默认不进入树。
-- 点击可编辑文件统一交给 `NSDocumentController` 打开；已经打开的文档只激活已有窗口。
+- 点击可编辑文件统一交给 `NSDocumentController.openDocument(..., display: false)` 读取和注册，再由当前 `EditorWindowController` 通过 `removeWindowController` / `addWindowController` 迁移到目标文档；切换前调用 `NSDocument.canClose`，有未保存修改时保留系统保存提示。
+- 项目根目录默认展开，子文件夹默认收起；点击一个目录只展示它的直接子层，不连带展开更深层目录。
 - “从侧边栏移除”只移除工作区引用并释放安全作用域，不删除磁盘目录。
 - 不使用 `NavigationSplitView`、`.inspector`、`.listStyle(.sidebar)`、`NSToolbar`、`DisclosureGroup` 或 `OutlineGroup`。项目树、标题栏和侧栏按钮均由 Muse 自己布局。
 - 左右开关是 28pt ghost button：默认无边框无底色，悬停时出现低对比填充；左开关固定在交通灯之后，右开关固定在窗口最右侧。
 - 侧栏开合使用可打断、无过冲的 spring（response 0.28 / damping 1.0）；“减少动态效果”开启时改为近乎即时切换。
 - 右侧大纲没有“大纲”标题、顶部横线或人为占位；无标题时使用 `ContentUnavailableView`。
+- 编辑器右下状态显示 `字符: <字符数>  渲染: <耗时>ms`，并为垂直滚动条预留 30pt 右侧间距。
 
 ### 数据所有权
 

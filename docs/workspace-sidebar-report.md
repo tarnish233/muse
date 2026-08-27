@@ -28,7 +28,7 @@
 
 - 顶部只保留“项目”和一个紧邻上下文的 `+` 菜单。
 - `+` 菜单提供“新建项目…”与“打开项目…”。
-- 每个项目根节点独立展开；文件夹继续递归展开，文件点击后打开文稿。展开箭头、层级缩进和 29pt 行高全部自绘，不使用 `DisclosureGroup` 或 `OutlineGroup`。
+- 每个项目根节点默认展开，子文件夹默认收起；点击目录只展开当前目录的直接子层，不自动展开更深层。展开箭头、层级缩进和 29pt 行高全部自绘，不使用 `DisclosureGroup` 或 `OutlineGroup`。
 - 项目菜单提供新建文件、新建文件夹、在访达中显示、从侧边栏移除。
 - 文件夹上下文菜单提供新建文件/文件夹和在访达中显示。
 - 没有项目时显示紧凑的 Codex 风格空状态和两个 28pt 操作按钮，不使用系统 `ContentUnavailableView`。
@@ -55,7 +55,7 @@
 | 打开现有项目 | `NSOpenPanel` |
 | 创建/枚举目录与文件 | `FileManager` |
 | 项目跨启动恢复 | security-scoped URL bookmark + `UserDefaults` |
-| 打开/复用文稿窗口 | `NSDocumentController` |
+| 当前窗口切换文稿 | `NSDocumentController.openDocument(display: false)` + `NSDocument` 官方窗口控制器迁移 API |
 | 在访达中显示 | `NSWorkspace.activateFileViewerSelecting` |
 
 ## 3. 数据与安全语义
@@ -66,6 +66,7 @@
 - 当前支持打开 `.md`、`.markdown`、`.mdown`、`.mkd`、`.txt`、`.text`。
 - 从侧边栏移除项目不会删除或移动项目目录。
 - 文件树默认跳过隐藏文件与 macOS package 的内部后代。
+- 当前文稿存在未保存修改时，侧栏切换文件先调用 `NSDocument.canClose`，继续使用 AppKit 原生的保存、不保存、取消流程。
 
 ## 4. 验收
 

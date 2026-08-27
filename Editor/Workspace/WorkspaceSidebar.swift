@@ -1,11 +1,10 @@
 import AppKit
-import MuseKit
 import SwiftUI
 
 struct WorkspaceSidebar: View {
     @Bindable var workspace: ProjectWorkspace
-    let document: MuseDocument
     @Binding var selectedFileURL: URL?
+    let openFile: (URL) -> Void
 
     @State private var creationRequest: WorkspaceCreationRequest?
     @State private var alert: WorkspaceAlert?
@@ -30,7 +29,7 @@ struct WorkspaceSidebar: View {
                                     selectedFileURL: selectedFileURL,
                                     createFile: { requestCreation(.file, in: $0) },
                                     createFolder: { requestCreation(.folder, in: $0) },
-                                    openFile: openFile,
+                                    openFile: selectFile,
                                     revealInFinder: revealInFinder,
                                     removeProject: { workspace.removeProject(project) }
                                 )
@@ -130,37 +129,21 @@ struct WorkspaceSidebar: View {
             let url = try workspace.createItem(request.kind, named: name, in: request.parentURL)
             creationRequest = nil
             if request.kind == .file {
-                openFile(url)
+                selectFile(url)
             }
         } catch {
             alert = WorkspaceAlert(message: error.localizedDescription)
         }
     }
 
-    private func openFile(_ url: URL) {
+    private func selectFile(_ url: URL) {
         guard workspace.canOpen(url) else {
             alert = WorkspaceAlert(message: WorkspaceOperationError.unsupportedDocument.localizedDescription)
             return
         }
 
         selectedFileURL = url.standardizedFileURL
-        if document.fileURL?.standardizedFileURL == url.standardizedFileURL {
-            document.windowControllers.first?.window?.makeKeyAndOrderFront(nil)
-            return
-        }
-        if let existing = NSDocumentController.shared.documents.first(where: {
-            $0.fileURL?.standardizedFileURL == url.standardizedFileURL
-        }) {
-            existing.windowControllers.first?.window?.makeKeyAndOrderFront(nil)
-            return
-        }
-
-        NSDocumentController.shared.openDocument(withContentsOf: url, display: true) { _, _, error in
-            guard let error else { return }
-            Task { @MainActor in
-                alert = WorkspaceAlert(message: error.localizedDescription)
-            }
-        }
+        openFile(url)
     }
 
     private func revealInFinder(_ url: URL) {

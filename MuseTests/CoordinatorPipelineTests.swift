@@ -26,6 +26,20 @@ import Testing
         return true
     }
 
+    @Test func statusReportsCharactersAndRenderDuration() async {
+        let source = "A😀中"
+        let storage = NSTextStorage(string: source)
+        let coordinator = RenderCoordinator()
+        coordinator.attach(storage: storage)
+        coordinator.onTextEdited = {}
+
+        storage.replaceCharacters(in: NSRange(location: 0, length: storage.length), with: source)
+        #expect(await waitForApplied(coordinator, atLeast: 1))
+        #expect(coordinator.statusText.hasPrefix("字符: \(source.count)  渲染: "))
+        #expect(coordinator.statusText.hasSuffix("ms"))
+        #expect(!coordinator.statusText.contains("tokens"))
+    }
+
     /// 快速连续编辑（第二次编辑在第一次的解析落地前到达）：脏区必须合并/回退，
     /// 第一次修改的行也必须在同一次应用中被重排（复审 P1-1）。
     @Test func rapidEditsCoalesceDirtyRanges() async {

@@ -2,7 +2,7 @@
 
 一款极简即时渲染 Markdown 编辑器（对标 Typora），纯 macOS 原生实现。
 
-- 版本：v0.3 · 2026-08-27
+- 版本：v0.4 · 2026-08-27
 - 目标平台：macOS 14+
 - 技术栈：Swift 6 · AppKit（TextKit 2）· SwiftUI · swift-markdown
 
@@ -13,6 +13,8 @@
 > 3. **替代方案已实测排除**（新增 §2.1）。macOS 26 的 `TextEditor(text: $attributedString)`、STTextView、CodeEditTextView 三条路线逐一核验，结论是继续走 A 方案；细节与依据见 §2.1。
 >
 > 详见 §2.1、§4.1、§4.2、§4.8 与《M2 评价报告》。
+
+> **v0.4 工作区修订说明**：SwiftUI 外壳不再展示“假项目 + 当前文稿”静态列表，改为 Codex 风格的真实目录工作区。三列布局、侧栏表面、宽度、分隔线与开合状态均由 Muse 自己控制，不使用 `NavigationSplitView`、系统 sidebar `List` 或 `.inspector`；左侧项目可展开为文件树，并支持新建项目、打开项目、在项目或任意文件夹中新建文件/文件夹。文件与文档生命周期仍优先使用 macOS 官方 API，详见《工作区与侧栏重构报告》及 §3.1。
 
 ---
 
@@ -141,6 +143,35 @@ CodeEditTextView 是**完全自研的排版引擎**，不使用 TextKit（源码
 └──────────────────────────────────────────────────────┘
 ```
 
+### 3.1 工作区与侧栏
+
+工作区是文档生命周期之外的一层导航状态，不复制正文，也不替代 `NSDocument`：
+
+```text
+ProjectWorkspace（@Observable，全窗口共享）
+├─ security-scoped bookmark → 恢复项目目录
+├─ FileManager → 创建/枚举目录与文件
+├─ WorkspaceProject → 项目根目录
+└─ WorkspaceNode → 可递归展开的文件树
+                           │ 点击 Markdown/纯文本文件
+                           ▼
+NSDocumentController → MuseDocument → EditorBuffer
+```
+
+界面外壳由 `EditorChromeState + ZStack/HStack` 组成三个固定语义区域。窗口启用 `fullSizeContentView`，但不创建 `NSToolbar`；46pt 自绘标题栏与左、中、右三列共享边界。侧栏在视图树中持续存在，通过宽度、透明度和命中状态开合，避免重建编辑器；自定义 1pt 分隔线带 9pt 拖拽命中区。左栏与右栏默认宽度分别为 280pt、300pt，均可在 240–380pt 范围调整。
+
+- “新建项目”使用 `NSSavePanel` 选择名称与位置，再由 `FileManager.createDirectory` 创建真实目录。
+- “打开项目”使用 `NSOpenPanel` 选择现有目录。
+- 项目入口通过 security-scoped bookmark 写入 `UserDefaults`，下次启动恢复；正文不进入偏好存储。
+- 新建文件与文件夹可以作用于项目根目录或任意子文件夹；无扩展名的新文件自动补 `.md`。
+- 文件按“文件夹优先 + Finder 本地化自然顺序”排列；隐藏文件和 package 后代默认不进入树。
+- 点击可编辑文件统一交给 `NSDocumentController` 打开；已经打开的文档只激活已有窗口。
+- “从侧边栏移除”只移除工作区引用并释放安全作用域，不删除磁盘目录。
+- 不使用 `NavigationSplitView`、`.inspector`、`.listStyle(.sidebar)`、`NSToolbar`、`DisclosureGroup` 或 `OutlineGroup`。项目树、标题栏和侧栏按钮均由 Muse 自己布局。
+- 左右开关是 28pt ghost button：默认无边框无底色，悬停时出现低对比填充；左开关固定在交通灯之后，右开关固定在窗口最右侧。
+- 侧栏开合使用可打断、无过冲的 spring（response 0.28 / damping 1.0）；“减少动态效果”开启时改为近乎即时切换。
+- 右侧大纲没有“大纲”标题、顶部横线或人为占位；无标题时使用 `ContentUnavailableView`。
+
 ### 数据所有权
 
 - `EditorBuffer.textStorage`：编辑期唯一真相，所有键入、粘贴和行为命令都修改它。
@@ -191,7 +222,14 @@ muse/
 ├─ Editor/
 │  ├─ EditorTextView.swift        # TextKit 2 手工栈 + fragment 工厂挂接
 │  ├─ EditorView.swift            # NSViewRepresentable 桥
-│  └─ EditorShellView.swift
+│  ├─ EditorShellView.swift        # 自绘标题栏、三列、宽度与开合动画
+│  ├─ CodexDocumentTitlebar.swift  # 中央文稿标题栏
+│  ├─ CodexTitlebarButton.swift    # 扁平 ghost 开关
+│  ├─ EditorChromeMetrics.swift    # 标题栏与侧栏几何常量
+│  ├─ EditorChromeState.swift      # 两侧栏窗口级状态
+│  ├─ SidebarResizeHandle.swift    # 自定义可拖拽分隔线
+│  ├─ DocumentOutlineView.swift
+│  └─ Workspace/                   # 项目持久化、目录树与文件操作
 ├─ Parsing/
 │  ├─ MarkdownSemantics.swift     # swift-markdown AST → 语义 + marker 区间
 │  ├─ TokenScanner.swift          # 仅未闭合语法（编辑中态）
@@ -210,6 +248,7 @@ muse/
    ├─ RendererTests.swift
    ├─ CoordinatorPipelineTests.swift
    ├─ DocumentTests.swift
+   ├─ WorkspaceTests.swift
    └─ PerformanceTests.swift
 ```
 

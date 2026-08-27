@@ -19,6 +19,12 @@ extension NSAttributedString.Key {
     public nonisolated static let museListNumber = NSAttributedString.Key("museListNumber")
     /// AST-provided list depth consumed by the custom layout fragment.
     public nonisolated static let museListDepth = NSAttributedString.Key("museListDepth")
+    /// UTF-16 offset of the source marker inside its paragraph.
+    public nonisolated static let museListMarkerLocation = NSAttributedString.Key("museListMarkerLocation")
+    /// UTF-16 length of the complete source marker, including trailing spacing.
+    public nonisolated static let museListMarkerLength = NSAttributedString.Key("museListMarkerLength")
+    /// AST-provided task state. The drawing layer must not reparse `[x]` from source.
+    public nonisolated static let museTaskChecked = NSAttributedString.Key("museTaskChecked")
 }
 
 /// 主题：字体与配色。亮/暗跟随系统外观（动态 NSColor）。
@@ -120,11 +126,13 @@ public nonisolated struct Theme: @unchecked Sendable {
     public func listParagraph(depth: Int) -> NSMutableParagraphStyle {
         let p = baseParagraph()
         p.paragraphSpacing = 3
-        // 悬挂缩进（Typora 视觉）：marker 在行首，换行对齐内容列。
-        // 每深入一层，marker 带与内容列都向右移动 24pt。
+        // Typora 风格的悬挂缩进：一级列表也从正文边缘向内收，marker 不再
+        // 悬挂到编辑器最左侧；续行严格对齐内容列。每深入一层移动 24pt。
+        let baseIndent: CGFloat = 24
+        let markerLaneWidth: CGFloat = 24
         let level = max(1, depth)
-        p.firstLineHeadIndent = CGFloat(level - 1) * 24
-        p.headIndent = CGFloat(level) * 24
+        p.firstLineHeadIndent = baseIndent + CGFloat(level - 1) * markerLaneWidth
+        p.headIndent = baseIndent + CGFloat(level) * markerLaneWidth
         return p
     }
 
@@ -172,7 +180,9 @@ public nonisolated final class BlockVisualPalette: @unchecked Sendable {
     private var current: BlockVisualPaletteSnapshot
 
     private init() {
-        let appearance = NSAppearance(named: .aqua)!
+        guard let appearance = NSAppearance(named: .aqua) else {
+            fatalError("The system Aqua appearance is unavailable.")
+        }
         current = Self.snapshot(for: appearance)
     }
 

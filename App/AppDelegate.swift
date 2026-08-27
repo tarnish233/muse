@@ -8,25 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillFinishLaunching(_ notification: Notification) {
         AppPreferences.applyAppearance()
         MuseDocument.windowControllerFactory = { document in
-            let hosting = NSHostingController(rootView: EditorShellView(document: document))
-            let window = NSWindow(
-                contentRect: .zero,
-                styleMask: [.titled, .closable, .resizable, .miniaturizable, .fullSizeContentView],
-                backing: .buffered,
-                defer: false
-            )
-            window.contentViewController = hosting
-            window.setContentSize(NSSize(width: 1040, height: 700))
-            window.minSize = NSSize(width: 720, height: 420)
-            window.title = document.displayName
-            window.titleVisibility = .hidden
-            window.titlebarAppearsTransparent = true
-            window.isMovableByWindowBackground = true
-            window.toolbarStyle = .unified
-            window.isReleasedWhenClosed = false
-            let controller = NSWindowController(window: window)
-            window.makeKeyAndOrderFront(nil)
-            return controller
+            EditorWindowController(document: document)
         }
     }
 

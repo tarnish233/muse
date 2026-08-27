@@ -36,9 +36,13 @@ final class SettingsNavigation {
 
 struct SettingsView: View {
     @State private var navigation = SettingsNavigation.shared
-    @State private var history: [SettingsTab] = [.general]
+    @State private var history: [SettingsTab]
     @State private var historyIndex = 0
-    @State private var isTraversingHistory = false
+
+    init() {
+        let initialTab = SettingsNavigation.shared.selectedTab ?? .general
+        _history = State(initialValue: [initialTab])
+    }
 
     private var activeTab: SettingsTab { navigation.selectedTab ?? .general }
 
@@ -100,22 +104,18 @@ struct SettingsView: View {
 
     private func goBack() {
         guard historyIndex > 0 else { return }
-        isTraversingHistory = true
         historyIndex -= 1
         navigation.selectedTab = history[historyIndex]
-        DispatchQueue.main.async { isTraversingHistory = false }
     }
 
     private func goForward() {
         guard historyIndex < history.count - 1 else { return }
-        isTraversingHistory = true
         historyIndex += 1
         navigation.selectedTab = history[historyIndex]
-        DispatchQueue.main.async { isTraversingHistory = false }
     }
 
     private func record(_ selection: SettingsTab?) {
-        guard !isTraversingHistory, let selection else { return }
+        guard let selection else { return }
         guard history[historyIndex] != selection else { return }
         history = Array(history.prefix(historyIndex + 1))
         history.append(selection)

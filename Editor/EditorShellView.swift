@@ -1,209 +1,147 @@
-import AppKit
 import MuseKit
 import SwiftUI
 
-/// The SwiftUI shell owns navigation and status UI. The document text remains
-/// exclusively owned by MuseDocument -> EditorBuffer -> NSTextStorage.
+/// Window-level navigation shell. Source text remains owned exclusively by
+/// MuseDocument -> EditorBuffer -> NSTextStorage.
 struct EditorShellView: View {
     let document: MuseDocument
-    @ObservedObject var renderer: RenderCoordinator
-    @State private var sidebarVisibility: NavigationSplitViewVisibility = .all
+    @Bindable var chromeState: EditorChromeState
+    @ObservedObject private var renderer: RenderCoordinator
+    @State private var workspace = ProjectWorkspace.shared
+    @State private var projectSidebarWidth = EditorChromeMetrics.projectSidebarDefaultWidth
+    @State private var outlineSidebarWidth = EditorChromeMetrics.outlineSidebarDefaultWidth
     @State private var selectedHeadingID: Int?
+    @State private var selectedFileURL: URL?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    init(document: MuseDocument) {
+    init(document: MuseDocument, chromeState: EditorChromeState) {
         self.document = document
-        self.renderer = document.renderer
+        self.chromeState = chromeState
+        renderer = document.renderer
+        _selectedFileURL = State(initialValue: document.fileURL?.standardizedFileURL)
     }
 
     var body: some View {
-        NavigationSplitView(columnVisibility: $sidebarVisibility) {
-            FileSidebar(document: document)
-                .navigationSplitViewColumnWidth(min: 210, ideal: 238, max: 300)
-        } detail: {
-            HSplitView {
-                EditorDetail(document: document, renderer: renderer)
-                    .frame(minWidth: 420, maxWidth: .infinity, maxHeight: .infinity)
+        ZStack(alignment: .top) {
+            HStack(spacing: 0) {
+                projectSidebar
 
-                OutlineSidebar(
-                    renderer: renderer,
-                    selectedHeadingID: $selectedHeadingID
+                SidebarResizeHandle(
+                    side: .leading,
+                    isPresented: chromeState.isProjectSidebarPresented,
+                    width: $projectSidebarWidth,
+                    range: EditorChromeMetrics.projectSidebarRange
                 )
-                .frame(minWidth: 190, idealWidth: 220, maxWidth: 280, maxHeight: .infinity)
-            }
-        }
-        .navigationSplitViewStyle(.balanced)
-        .toolbar {
-            ToolbarItemGroup(placement: .navigation) {
-                Button {
-                    NSDocumentController.shared.newDocument(nil)
-                } label: {
-                    Image(systemName: "folder.badge.plus")
-                }
-                .help("新建文稿")
 
-                Button {
-                    NSApp.keyWindow?.firstResponder?
-                        .tryToPerform(
-                            #selector(NSSplitViewController.toggleSidebar(_:)),
-                            with: nil
-                        )
-                } label: {
-                    Image(systemName: "sidebar.left")
-                }
-                .help("显示或隐藏侧栏")
+                editorColumn
+
+                SidebarResizeHandle(
+                    side: .trailing,
+                    isPresented: chromeState.isOutlinePresented,
+                    width: $outlineSidebarWidth,
+                    range: EditorChromeMetrics.outlineSidebarRange
+                )
+
+                outlineSidebar
             }
+
+            titlebarControls
         }
-        .onChange(of: selectedHeadingID) { _, newValue in
-            guard let newValue,
-                  let heading = renderer.outline.first(where: { $0.id == newValue })
-            else { return }
-            renderer.reveal(heading: heading)
+        .ignoresSafeArea(.container, edges: .top)
+        .animation(sidebarAnimation, value: chromeState.isProjectSidebarPresented)
+        .animation(sidebarAnimation, value: chromeState.isOutlinePresented)
+        .onChange(of: selectedHeadingID, revealSelectedHeading)
+        .onChange(of: document.fileURL) { _, newURL in
+            selectedFileURL = newURL?.standardizedFileURL
+            workspace.refreshAll()
         }
     }
-}
 
-// MARK: - Files and projects
+    private var projectSidebar: some View {
+        VStack(spacing: 0) {
+            Color.clear
+                .frame(height: EditorChromeMetrics.titlebarHeight)
 
-private struct FileSidebar: View {
-    let document: MuseDocument
-
-    var body: some View {
-        List {
-            Section("项目") {
-                Label("Muse", systemImage: "folder")
-                    .fontWeight(.medium)
-            }
-
-            Section("文件") {
-                Button(action: focusCurrentDocument) {
-                    Label {
-                        Text(document.displayName)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    } icon: {
-                        Image(systemName: "doc.text")
-                    }
-                }
-                .buttonStyle(.plain)
-            }
+            WorkspaceSidebar(
+                workspace: workspace,
+                document: document,
+                selectedFileURL: $selectedFileURL
+            )
         }
-        .listStyle(.sidebar)
-        .scrollEdgeEffectStyleSoftIfAvailable()
-        .navigationTitle("Muse")
+        .background(EditorSurface.sidebar)
+        .frame(width: chromeState.isProjectSidebarPresented ? projectSidebarWidth : 0)
+        .opacity(chromeState.isProjectSidebarPresented ? 1 : 0)
+        .clipped()
+        .allowsHitTesting(chromeState.isProjectSidebarPresented)
     }
 
-    private func focusCurrentDocument() {
-        document.windowControllers.first?.window?.makeKeyAndOrderFront(nil)
-    }
-}
+    private var editorColumn: some View {
+        VStack(spacing: 0) {
+            CodexDocumentTitlebar(
+                document: document,
+                reservesWindowControls: !chromeState.isProjectSidebarPresented
+            )
+            .frame(height: EditorChromeMetrics.titlebarHeight)
 
-// MARK: - Editor
-
-private struct EditorDetail: View {
-    let document: MuseDocument
-    @ObservedObject var renderer: RenderCoordinator
-
-    var body: some View {
-        EditorView(document: document)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .overlay(alignment: .bottomTrailing) {
-                RenderStatus(renderer: renderer)
-                    .padding(.trailing, 12)
-                    .padding(.bottom, 6)
-                    .allowsHitTesting(false)
-            }
-    }
-}
-
-private struct RenderStatus: View {
-    @ObservedObject var renderer: RenderCoordinator
-
-    var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "waveform")
-                .font(.caption2)
-            Text(renderer.statusText)
-                .font(.caption.monospacedDigit())
-                .lineLimit(1)
-                .truncationMode(.middle)
+            EditorDetailView(document: document, renderer: renderer)
+                .frame(minWidth: 400, maxWidth: .infinity, maxHeight: .infinity)
         }
-        .foregroundStyle(.secondary)
+        .background(EditorSurface.main)
     }
-}
 
-// MARK: - Outline
+    private var outlineSidebar: some View {
+        VStack(spacing: 0) {
+            Color.clear
+                .frame(height: EditorChromeMetrics.titlebarHeight)
 
-private struct OutlineSidebar: View {
-    @ObservedObject var renderer: RenderCoordinator
-    @Binding var selectedHeadingID: Int?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text("大纲")
-                    .font(.headline)
-                Spacer(minLength: 0)
-                Text("\(renderer.outline.count)")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.tertiary)
-            }
-            .padding(.horizontal, 14)
-            .frame(height: 44)
-
-            Divider().opacity(0.35)
-
-            List(selection: $selectedHeadingID) {
-                if renderer.outline.isEmpty {
-                    Text("尚无标题")
-                        .font(.callout)
-                        .foregroundStyle(.tertiary)
-                        .listRowSeparator(.hidden)
-                } else {
-                    ForEach(renderer.outline) { heading in
-                        OutlineRow(heading: heading)
-                            .tag(heading.id as Int?)
-                            .listRowSeparator(.hidden)
-                    }
-                }
-            }
-            .listStyle(.sidebar)
-            .scrollContentBackground(.hidden)
-            .scrollEdgeEffectStyleSoftIfAvailable()
+            DocumentOutlineView(
+                renderer: renderer,
+                selectedHeadingID: $selectedHeadingID
+            )
         }
-        .background(.bar)
+        .background(EditorSurface.sidebar)
+        .frame(width: chromeState.isOutlinePresented ? outlineSidebarWidth : 0)
+        .opacity(chromeState.isOutlinePresented ? 1 : 0)
+        .clipped()
+        .allowsHitTesting(chromeState.isOutlinePresented)
     }
-}
 
-private struct OutlineRow: View {
-    let heading: RenderCoordinator.OutlineHeading
+    private var titlebarControls: some View {
+        HStack(spacing: 0) {
+            CodexTitlebarButton(
+                systemImage: "sidebar.left",
+                accessibilityLabel: "切换项目栏",
+                showsActiveBackground: false,
+                isActive: chromeState.isProjectSidebarPresented
+            ) {
+                chromeState.isProjectSidebarPresented.toggle()
+            }
+            .padding(.leading, EditorChromeMetrics.leadingControlInset)
 
-    var body: some View {
-        HStack(spacing: 8) {
-            Text("H\(heading.level)")
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(.tertiary)
-                .frame(width: 22, alignment: .leading)
-            Text(heading.title)
-                .font(.system(size: 13, weight: heading.level == 1 ? .semibold : .regular))
-                .lineLimit(1)
-                .truncationMode(.tail)
             Spacer(minLength: 0)
+
+            CodexTitlebarButton(
+                systemImage: "sidebar.right",
+                accessibilityLabel: "切换大纲栏",
+                showsActiveBackground: true,
+                isActive: chromeState.isOutlinePresented
+            ) {
+                chromeState.isOutlinePresented.toggle()
+            }
+            .padding(.trailing, EditorChromeMetrics.trailingControlInset)
         }
-        .padding(.leading, CGFloat(max(0, heading.level - 1)) * 10)
-        .padding(.vertical, 2)
-        .contentShape(Rectangle())
+        .frame(height: EditorChromeMetrics.titlebarHeight)
+        .frame(maxWidth: .infinity)
     }
-}
 
-// MARK: - macOS 26 helpers
+    private var sidebarAnimation: Animation {
+        reduceMotion ? .linear(duration: 0.01) : .spring(response: 0.28, dampingFraction: 1)
+    }
 
-private extension View {
-    @ViewBuilder
-    func scrollEdgeEffectStyleSoftIfAvailable() -> some View {
-        if #available(macOS 26.0, *) {
-            scrollEdgeEffectStyle(.soft, for: .all)
-        } else {
-            self
-        }
+    private func revealSelectedHeading() {
+        guard let selectedHeadingID,
+              let heading = renderer.outline.first(where: { $0.id == selectedHeadingID })
+        else { return }
+        renderer.reveal(heading: heading)
     }
 }

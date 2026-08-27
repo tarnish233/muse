@@ -277,6 +277,12 @@ public struct RenderEngine {
             let start = token.isBlockMarker ? package.lineStarts[token.line] : token.markerRange.lowerBound
             return index.nsRange(start..<end)
         }()
+        let markerNS = index.nsRange(token.markerRange)
+        let lineStart = index.utf16Offset(package.lineStarts[token.line])
+        let listMarkerAttributes: [NSAttributedString.Key: Any] = [
+            .museListMarkerLocation: NSNumber(value: markerNS.location - lineStart),
+            .museListMarkerLength: NSNumber(value: markerNS.length),
+        ]
 
         switch token.kind {
         case .heading(let level):
@@ -286,26 +292,27 @@ public struct RenderEngine {
             ], range: wholeLine)
 
         case let .unorderedListItem(depth):
-            storage.addAttributes([
+            storage.addAttributes(listMarkerAttributes.merging([
                 .paragraphStyle: theme.listParagraph(depth: depth),
                 .museBlock: BlockVisual.list.rawValue + ":u",
                 .museListDepth: NSNumber(value: depth),
-            ], range: wholeLine)
+            ]) { _, new in new }, range: wholeLine)
 
         case let .orderedListItem(depth, number):
-            storage.addAttributes([
+            storage.addAttributes(listMarkerAttributes.merging([
                 .paragraphStyle: theme.listParagraph(depth: depth),
                 .museBlock: BlockVisual.list.rawValue + ":o",
                 .museListDepth: NSNumber(value: depth),
                 .museListNumber: NSNumber(value: number),
-            ], range: wholeLine)
+            ]) { _, new in new }, range: wholeLine)
 
-        case let .taskListItem(depth, _):
-            storage.addAttributes([
+        case let .taskListItem(depth, checked):
+            storage.addAttributes(listMarkerAttributes.merging([
                 .paragraphStyle: theme.listParagraph(depth: depth),
                 .museBlock: BlockVisual.list.rawValue + ":t",
                 .museListDepth: NSNumber(value: depth),
-            ], range: wholeLine)
+                .museTaskChecked: NSNumber(value: checked),
+            ]) { _, new in new }, range: wholeLine)
             // [ ] / [x] 用代码字体区分（点击切换留到 M4）。
             storage.addAttributes([.font: theme.codeFont()], range: index.nsRange(token.markerRange))
 

@@ -137,7 +137,8 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
 
         let elapsed = start.duration(to: clock.now)
         let ms = Double(elapsed.components.seconds) * 1000 + Double(elapsed.components.attoseconds) / 1e15
-        statusText = "tokens: \(package.tokens.count) · 增量渲染: \(String(format: "%.1f", ms)) ms"
+        let formattedMilliseconds = ms.formatted(.number.precision(.fractionLength(1)))
+        statusText = "tokens: \(package.tokens.count) · 增量渲染: \(formattedMilliseconds) ms"
     }
 
     /// 从 tokens 抽取 heading 大纲（供 SwiftUI 侧边栏）。UTF-8 → UTF-16 的转换只做一次。

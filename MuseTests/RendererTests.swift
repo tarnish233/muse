@@ -347,6 +347,22 @@ import Testing
         #expect(checked.listMarkerColor?.components != palette.marker.components)
     }
 
+    @Test func listMarkerVariantsUseASTAttributes() {
+        let source = "* [ ] 星号任务\n+ [x] 加号任务\n\n1) 括号序号"
+        let storage = NSTextStorage(string: source)
+        let textView = EditorTextView.make(textStorage: storage)
+        textView.frame = NSRect(x: 0, y: 0, width: 640, height: 220)
+        textView.textContainer?.containerSize = NSSize(width: 640, height: CGFloat.greatestFiniteMagnitude)
+
+        let package = engine.prepare(source)
+        _ = engine.render(package: package, selection: nil, into: storage)
+        let glyphs = customFragments(in: textView).compactMap(\.listMarkerGlyph)
+
+        #expect(glyphs.contains(.task(checked: false)))
+        #expect(glyphs.contains(.task(checked: true)))
+        #expect(glyphs.contains(.ordered(number: 1)))
+    }
+
     @Test func blockVisualsFollowAppearance() {
         let aqua = NSAppearance(named: .aqua)!
         let darkAqua = NSAppearance(named: .darkAqua)!
@@ -393,7 +409,7 @@ import Testing
         #expect(block(24) == BlockVisual.rule.rawValue)      // 分隔线（空白行之后）
     }
 
-    /// 列表悬挂缩进：depth 1 的 marker 在行首、换行从 24pt 缩进（Typora 视觉）。
+    /// 列表悬挂缩进：一级 marker 本身内收 24pt，换行对齐 48pt 内容列。
     @Test func listParagraphHasHangingIndent() {
         let source = "- 长列表项内容" + String(repeating: "足够长到可以换行，", count: 20)
         let storage = NSTextStorage(string: source)
@@ -402,8 +418,9 @@ import Testing
 
         // 段落样式覆盖整行（含 marker）：NSTextStorage 的段落修复不会把它修回 base
         let paragraph = storage.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle
-        #expect(paragraph?.headIndent == 24)
-        #expect(paragraph?.firstLineHeadIndent == 0)
+        #expect(paragraph?.headIndent == 48)
+        #expect(paragraph?.firstLineHeadIndent == 24)
+        #expect((paragraph?.headIndent ?? 0) - (paragraph?.firstLineHeadIndent ?? 0) == 24)
     }
 
     @Test func listParagraphIndentScalesWithDepth() {
@@ -416,8 +433,8 @@ import Testing
             storage.attribute(.paragraphStyle, at: $0, effectiveRange: nil) as? NSParagraphStyle
         }
         #expect(paragraphs.count == 3)
-        #expect(paragraphs.map(\.firstLineHeadIndent) == [0, 24, 48])
-        #expect(paragraphs.map(\.headIndent) == [24, 48, 72])
+        #expect(paragraphs.map(\.firstLineHeadIndent) == [24, 48, 72])
+        #expect(paragraphs.map(\.headIndent) == [48, 72, 96])
         #expect(paragraphs[0].firstLineHeadIndent < paragraphs[1].firstLineHeadIndent)
         #expect(paragraphs[1].firstLineHeadIndent < paragraphs[2].firstLineHeadIndent)
     }

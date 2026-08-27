@@ -219,7 +219,7 @@ public nonisolated final class MuseLayoutFragment: NSTextLayoutFragment {
             return nil
         }
 
-        let markerIndex = info.leadingCharacterCount
+        let markerIndex = info.markerLocation
         guard markerIndex < string.length else { return nil }
         let font = string.attribute(.font, at: markerIndex, effectiveRange: nil) as? NSFont
         let color = string.attribute(.foregroundColor, at: markerIndex, effectiveRange: nil) as? NSColor
@@ -230,7 +230,7 @@ public nonisolated final class MuseLayoutFragment: NSTextLayoutFragment {
         let glyphSize = (glyph.text as NSString).size(withAttributes: [.font: glyphFont])
         let contentIndex = min(
             string.length - 1,
-            info.leadingCharacterCount + (info.markerText as NSString).length
+            info.markerLocation + info.markerLength
         )
         let bodyFont = string.attribute(.font, at: contentIndex, effectiveRange: nil) as? NSFont
             ?? Theme.standard.baseFont()
@@ -412,42 +412,23 @@ public nonisolated final class MuseLayoutFragmentProvider: NSObject, NSTextLayou
 
 /// 列表行的源码标记信息（供图形符号绘制）。
 nonisolated private struct ListMarkerInfo {
-    let leadingCharacterCount: Int
+    let markerLocation: Int
+    let markerLength: Int
     let markerLaneWidth: CGFloat
-    let markerText: String
     let checked: Bool
     let number: Int?
     let depth: Int
 
-    /// 从元素属性串解析前导空白与 marker 文本；非列表行返回 nil。
+    /// Consume semantic attributes written by RenderEngine. Markdown syntax is
+    /// deliberately not reparsed here: swift-markdown already accepted the
+    /// exact bullet, checkbox, ordered delimiter, and whitespace variant.
     init?(_ string: NSAttributedString) {
-        let line = string.string
-        var leadingCharacterCount = 0
-        var cursor = line.startIndex
-        while cursor < line.endIndex, line[cursor] == " " || line[cursor] == "\t" {
-            leadingCharacterCount += 1
-            cursor = line.index(after: cursor)
-        }
-
-        let rest = line[cursor...]
-        if rest.hasPrefix("- [x] ") || rest.hasPrefix("- [X] ") {
-            markerText = "- [x] "
-            checked = true
-        } else if rest.hasPrefix("- [ ] ") {
-            markerText = "- [ ] "
-            checked = false
-        } else if rest.hasPrefix("- ") || rest.hasPrefix("* ") || rest.hasPrefix("+ ") {
-            markerText = String(rest.prefix(2))
-            checked = false
-        } else {
-            // 有序 "1. "：数字 + ". "
-            let digits = rest.prefix { $0.isNumber }
-            guard !digits.isEmpty, rest.dropFirst(digits.count).hasPrefix(". ") else { return nil }
-            markerText = String(digits) + ". "
-            checked = false
-        }
-
-        self.leadingCharacterCount = leadingCharacterCount
+        guard string.length > 0,
+              let location = (string.attribute(.museListMarkerLocation, at: 0, effectiveRange: nil) as? NSNumber)?.intValue,
+              let length = (string.attribute(.museListMarkerLength, at: 0, effectiveRange: nil) as? NSNumber)?.intValue,
+              location >= 0, length > 0, location + length <= string.length else { return nil }
+        markerLocation = location
+        markerLength = length
         let paragraph = string.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle
         let paragraphLaneWidth = (paragraph?.headIndent ?? 0) - (paragraph?.firstLineHeadIndent ?? 0)
         self.markerLaneWidth = paragraphLaneWidth > 0
@@ -455,5 +436,6 @@ nonisolated private struct ListMarkerInfo {
             : ListMarkerGeometry.defaultMarkerLaneWidth
         self.number = (string.attribute(.museListNumber, at: 0, effectiveRange: nil) as? NSNumber)?.intValue
         self.depth = max(1, (string.attribute(.museListDepth, at: 0, effectiveRange: nil) as? NSNumber)?.intValue ?? 1)
+        self.checked = (string.attribute(.museTaskChecked, at: 0, effectiveRange: nil) as? NSNumber)?.boolValue ?? false
     }
 }

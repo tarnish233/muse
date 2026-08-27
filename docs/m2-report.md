@@ -2,10 +2,10 @@
 
 - 日期：2026-08-27
 - 范围：v0.3 方案 §06 中 M2「解析与渲染」的退出条件
-- 结论：**有条件通过（PASS with conditions）**
-  - 退出条件的功能项全部达成，78 项测试全绿。
+- 结论：**通过（PASS）**
+  - M2-1～M2-9 的功能与定性验收全部完成，最终 103 项测试 / 7 套件全绿。
   - 期间存在一个 P0 缺陷（块级视觉完全不可见）与一个 P0 测试缺陷（假绿），**已于 2026-08-27 修复**。
-  - 一项架构收口未做（AST 能力未用尽，导致重复实现与语义分叉），**必须在 M3 之前完成**，见 §5。
+  - AST 唯一语义来源已收口；`TokenScanner.swift` 从 595 行缩至 76 行，`a*b*c` 语义分叉已消除。
 
 M2 的退出条件（v0.3 修订后）：`SourceIndex`、AST 语义层、后台 revision 管线；标题、强调、代码、链接；块级视觉绘制地基（自定义 fragment）；单元测试覆盖 Unicode 与未闭合语法。
 
@@ -15,17 +15,17 @@ M2 的退出条件（v0.3 修订后）：`SourceIndex`、AST 语义层、后台 
 
 | 交付物 | 位置 | 行数 | 测试 |
 |---|---|---:|---|
-| UTF-8 ↔ UTF-16 索引 | `Parsing/SourceIndex.swift` | 109 | 8 项 |
+| UTF-8 ↔ UTF-16 索引 | `Parsing/SourceIndex.swift` | 113 | 8 项 |
 | 源码 token 扫描器 | `Parsing/TokenScanner.swift` | 76 | 28 项 |
 | swift-markdown 语义层 | `Parsing/MarkdownSemantics.swift` | 679 | 18 项 |
-| token 模型 | `Parsing/Token.swift` | 50 | — |
-| 渲染引擎（属性层） | `Rendering/RenderEngine.swift` | 517 | 17 项 |
-| 块级视觉（绘制层） | `Rendering/BlockLayoutFragment.swift` | 199 | 随渲染测试 |
-| 主题 | `Rendering/Theme.swift` | 141 | — |
-| 渲染协调器 | `Document/RenderCoordinator.swift` | 194 | 8 项 |
-| 性能基准 | `MuseTests/PerformanceTests.swift` | 136 | 5 项 |
+| token 模型 | `Parsing/Token.swift` | 66 | — |
+| 渲染引擎（属性层） | `Rendering/RenderEngine.swift` | 455 | 17 项 |
+| 块级视觉（绘制层） | `Rendering/BlockLayoutFragment.swift` | 216 | 随渲染测试 |
+| 主题 | `Rendering/Theme.swift` | 205 | — |
+| 渲染协调器 | `Document/RenderCoordinator.swift` | 246 | 8 项 |
+| 性能基准 | `MuseTests/PerformanceTests.swift` | 137 | 5 项 |
 
-**78 项测试 / 7 套件全绿**（Swift Testing）。产品代码 2338 行。
+**103 项测试 / 7 套件全绿**（Swift Testing）。产品代码 2497 行。
 
 ## 2. 达成的部分
 
@@ -47,7 +47,19 @@ M2 的退出条件（v0.3 修订后）：`SourceIndex`、AST 语义层、后台 
 
 200KB 样式落地延迟仍低于 v0.3 规定的 150ms；增量引擎应用耗时 1.896ms。性能套件在全量运行中也保持 `<100ms` 协调器断言通过。
 
-> Release 数字缺失——测试目标在 Release 下构建失败，见《M1 评价报告》§5.2。这是一个需要修的测量缺口。
+### 性能（Release 构建，Apple Silicon）
+
+最终命令在 Release 配置下成功构建并通过 **103 项 / 7 套件**：
+
+| 项目 | Release 实测 |
+|---|---:|
+| 20KB `RenderEngine.prepare`（AST + SourceIndex） | 3.565 ms |
+| 200KB `RenderEngine.prepare`（AST + SourceIndex） | 36.665 ms |
+| 200KB `applyDirty` | 0.318 ms |
+| 200KB 协调器单键路径（编辑 → 样式落地） | 33.493 ms |
+| 1MB 全管线 | 1035.931 ms |
+
+200KB 全量 AST 解析低于 v0.3 §4.6 的 150ms 样式落地延迟目标，当前不需要块级增量解析。
 
 ## 3. P0 缺陷：块级视觉完全不可见（已修复）
 
@@ -83,7 +95,7 @@ layer-backed 的 TextKit 2 `NSTextView` 把字形渲染进各 fragment 自己的
 3. 块归属直接读 `NSTextParagraph.attributedString` 首字符的 `.museBlock`——原实现那套「元素偏移回查 storage + 手写缓存（`museBlockCache` / `museBlockSignature` / `ObjectIdentifier` 追踪 / `hasBlockMarkup` 全文档扫描）」整块删掉了，净减 100+ 行。
 4. `draw(at:in:)` 的 `point` 实测恒为 `(0,0)`；容器左边缘 = `point.x - layoutFragmentFrame.minX`；绘制文本需要 `flipped: true` 的 `NSGraphicsContext`。
 
-修复后真机确认：序号 `1.` `2.`、圆点 `•`、复选框 `☑` `☐`、引用通宽背景 + 左竖线、代码块通宽背景（含开闭栏行）、分隔线横线全部正常。78 项测试全绿。
+修复后真机确认：序号 `1.` `2.`、圆点 `•`、复选框 `☑` `☐`、引用通宽背景 + 左竖线、代码块通宽背景（含开闭栏行）、分隔线横线全部正常。最终 103 项测试全绿。
 
 ## 4. P0 测试缺陷：假绿（已修复）
 
@@ -105,8 +117,6 @@ layer-backed 的 TextKit 2 `NSTextView` 把字形渲染进各 fragment 自己的
 ## 5. 架构收口：AST 能力已用尽（P1，已完成）
 
 本节保留收口前的事实、语义分叉和决策依据；M2-4 已按 §5.5 完成收口，以下旧实现对比用于说明变更前后的可复核差异。
-
-这是 M2 最实质的问题，也是唯一还没动手的一项。
 
 ### 5.1 事实
 
@@ -179,7 +189,7 @@ line=4  firstIndent=0.0  headIndent=24.0  |      - 第三层        ← 同一�
 
 均已精确定位，优先级低于 §5。
 
-### 6.1 代码围栏闭栏行在文档末尾时不并入块样式（P2）
+### 6.1 代码围栏闭栏行在文档末尾时不并入块样式（P2，已修复）
 
 ```text
 --- 闭栏行在文档末尾 ---
@@ -190,7 +200,9 @@ line=2 museBlock=codeFence | ```
 
 根因在 `RenderEngine.applyStyle` 的 `.codeFence` 分支：并入闭栏行依赖 `closeLine + 1 < package.lineStarts.count`，闭栏行是最后一行时该条件为假。现有测试 `blockMarkersCoverLineStarts` 用的源码闭栏行后面还有内容，所以没覆盖到这个边界。
 
-### 6.2 开栏行 info string 与闭栏行标记不隐藏（P2）
+M2-6 已修正为按闭栏行所在行的实际末端覆盖样式；`closingFenceAtEndOfDocumentGetsBlockAttribute`、`unclosedFenceGetsBlockAttributeToDocumentEnd` 与原有尾随内容场景均通过。
+
+### 6.2 开栏行 info string 与闭栏行标记不隐藏（P2，已修复）
 
 光标在围栏块外时逐字符实测（源码 `段落\n\n```swift\nlet a = 1\n```\n\n尾段`）：
 
@@ -202,6 +214,8 @@ line=2 museBlock=codeFence | ```
 
 两个独立原因：`token.markerRange` 只覆盖三个反引号，不含 info string；`codeFence` token 的 `closingMarkerRange` 是 `nil`，闭栏标记从未被登记为 marker。这就是截图里 `swift` 单独一行、末尾 ` ``` ` 露在外面的原因。
 
+M2-7 已将开栏 marker 扩展到 info string，并从 AST 结构登记闭栏 marker；`fenceInfoStringAndCloserHiddenWhenCaretOutside` 与 `fenceMarkersRevealedWhenCaretInside` 均通过。真机证据见 [m2-inline-and-fence.jpg](assets/m2-inline-and-fence.jpg)，代码块上下边缘未见 `swift` 或闭栏标记残留。
+
 ### 6.3 任务列表 ghost 宽度与图形宽度不匹配（P2，已修复）
 
 ```text
@@ -211,7 +225,7 @@ line=2 museBlock=codeFence | ```
 
 `ghost` 状态保留源码 marker 的完整宽度，但绘制的图形符号窄得多，于是符号与文字之间留下大片空白。任务列表尤其明显（43pt）。M2-5 采用推荐的方案 A：列表/任务 marker 统一改为 `hidden`，内容列由 M2-3 的段落缩进承担，图形符号在同一段落 marker 带绘制。新增 `RendererTests.taskAndBulletMarkersAlignToSameContentColumn`，通过真实 TextKit 2 line fragment 的字符位置确认 `- ` 与 `- [ ] ` 的内容起始列一致；全量测试通过。真机截图已保存为 [m2-task-list.png](assets/m2-task-list.png)。
 
-### 6.4 fragment 内解析动态色，暗色模式有风险（P1，已验证机制）
+### 6.4 fragment 内解析动态色，暗色模式有风险（P1，已解决）
 
 `MuseLayoutFragment` 在 `draw(at:in:)` 里对动态 `NSColor` 取 `.cgColor`。实测该调用按 `NSAppearance.current` 解析，**且 current 为 nil 时不报错、静默回落亮色**：
 
@@ -223,11 +237,11 @@ NSAppearance.current = nil       → [0.96, 0.97, 0.98, 1.0]
 
 两重风险：绘制回调不保证在视图外观上下文里运行；TextKit 按 text element 缓存并复用 fragment，外观切换后未必重绘全部 fragment。
 
-线索来自阅读 `bharathvbcr/MarkDev` 的 `MarkdownLayoutFragment.swift` 源码注释（见 §7）。机制已验证，真机暗色模式表现尚未确认（本轮 GUI 自动化未能稳定拉起窗口）。对策与验收方式已写入 v0.3 方案 §4.8，列入 M3。
+线索来自阅读 `bharathvbcr/MarkDev` 的 `MarkdownLayoutFragment.swift` 源码注释（见 §7）。M2-8 已改为锁保护的共享、按外观解析的 `CGColor` 调色板，并在 `viewDidChangeEffectiveAppearance()` 中更新和使 TextKit 2 视图重排。`paletteUpdatesOnAppearanceChange` 与 `blockVisualsFollowAppearance` 均通过；真机从浅色热切换到深色后，代码块背景与窗口配色立即更新。证据见 [m2-appearance-light.jpg](assets/m2-appearance-light.jpg) 和 [m2-appearance-dark.jpg](assets/m2-appearance-dark.jpg)。
 
-### 6.5 引用左竖线的连续性待确认（P3）
+### 6.5 引用左竖线的连续性（P3，非缺陷）
 
-真机截图中引用块左侧竖线呈分段而非连续。可能与 fragment 高度 / 行片段划分有关，也可能是截图缩放假象。需要放大核对后再定性。
+用包含长行软换行、多个 `>` 行和空行分隔的引用样本在真机窗口中 1:1 核对，左竖线覆盖了引用 fragment 的完整高度，没有可见断点。对截图像素进一步检查，x=20–22 在 y=48–194 连续 147 行无空洞；原先的“分段”是缩放观感，不是 fragment 绘制缺陷。证据见 [m2-quote-continuity.jpg](assets/m2-quote-continuity.jpg)。
 
 ### 6.6 并行性能基准互相竞争（P2，测试隔离已处理）
 
@@ -244,6 +258,14 @@ M1-2 抽取 framework 后，首次直接打开 Debug App 暴露出两个宿主�
 “No document could be created.”。已将 framework 以 `@rpath` 嵌入并修正为
 `MuseKit.MuseDocument`；重新构建后通过真机打开、编辑并显示嵌套列表。该问题不是
 静默忽略，修复涉及 `Muse.xcodeproj/project.pbxproj` 与 `Muse-Info.plist`。
+
+### 6.8 M2-4 初版围栏范围查找造成性能退化（P2，已修复）
+
+M2-4 初版按每个代码块从文档起点反查围栏行，导致 1MB 全管线达到
+`4010.175459 ms`、200KB 协调器路径达到 `199.801625 ms`，超过既有粗防线。该问题在
+完成验收前已改为使用 AST `CodeBlock` 的 source range 做有界查找，不改变 AST 的语义
+决策；修复后 Debug 全量 103 项通过，1MB 为 `1405.897541 ms`，协调器为
+`92.379542 ms`。未降低任何性能断言。
 
 ## 7. 替代方案调研（2026-08-27）
 
@@ -267,7 +289,7 @@ M2 交付的管线质量是高的：后台 revision + 脏行带增量 + 显隐 d
 
 **AST 能力未用尽（§5）是判断问题，现已收口。** M2 初期名义上引入了 swift-markdown，实际只用它做链接锚点和三个行号集合，同时用 595 行手写代码重新实现了 AST 已经做对的事——包括 M0 报告明确承认扫描器做不到、要「记入 M2」解决的反向嵌套。M2-4 已将这份重复实现删除，解析入口统一为 AST。
 
-此前结论为「有条件通过」的原因是解析层带着一份 595 行的重复实现和一处已知语义分叉；M2-4 已解决该条件，最终结论仍待 §9.10 的全部判据与 M2-9 定性完成。
+此前结论为「有条件通过」的原因是解析层带着一份 595 行的重复实现和一处已知语义分叉；M2-4、M2-8 与 M2-9 已分别解决架构、配色和连续性判据，最终结论按 §9.10 已更新为「通过」。
 
 **方法上的一条收获：** 这一轮所有结论都来自可复现的探针（AST 区间打印、逐字符属性 dump、像素落墨实验、动态色解析对比），而不是读代码推断。§3 的根因、§5.1 的能力对比、§6.1–6.4 的边界，都是先写探针拿到数据再下判断——其中 §5.1 直接推翻了方案沿用两个版本的核心假设，§6.4 找出了一个刚写完的代码里的隐患。**在这类「框架行为不确定」的领域，实测的信息量远高于代码审阅。**
 
@@ -293,7 +315,7 @@ M2-9（引用竖线连续性）          ← 独立，先定性再决定是否�
 
 建议先做独立项（M2-6/7/8）建立信心，再动 M2-1 这条主线。
 
-### 9.1 任务 M2-1：语义层输出完整 marker 区间与结构信息
+### 9.1 任务 M2-1：语义层输出完整 marker 区间与结构信息（✅ 已完成）
 
 **现状**：`Parsing/MarkdownSemantics.swift` 只对外暴露 `lineKinds`、`links`、`listItemLines`、`quoteLines`、`fenceLines`——三个行号 `Set` 加链接区间，AST 能力用了不到十分之一。
 
@@ -376,7 +398,7 @@ checkbox/language，并继续提供链接与结构行集合；`RenderEngine.prep
 `94.091292 ms`；性能套件已标为 serialized，避免并行基准的 CPU 竞争污染端到端测量，
 没有改变任何阈值或跳过测试。
 
-### 9.2 任务 M2-2：Token 携带层级与序号
+### 9.2 任务 M2-2：Token 携带层级与序号（✅ 已完成）
 
 **现状**：`Parsing/Token.swift` 的 `Token.Kind` 是：
 
@@ -420,7 +442,7 @@ depth 从 1 起（最外层 = 1）。在 `RenderEngine.prepare` 中用 M2-1 的 
 `listTokensCarryDepth`、`orderedListTokensCarryNumber` 测试；全量 **99 项 / 7 套件**
 测试通过。
 
-### 9.3 任务 M2-3：列表嵌套层级缩进（MVP 明确要求的功能）
+### 9.3 任务 M2-3：列表嵌套层级缩进（MVP 明确要求的功能，✅ 已完成）
 
 **现状**：`Rendering/Theme.swift` 的 `listParagraph()` 无参数，返回固定值。实测所有层级拿到完全相同的缩进：
 
@@ -453,7 +475,7 @@ line=4  firstIndent=0.0  headIndent=24.0  |      - 第三层        ← 同一�
 真机截图已保存为 [m2-nested-list.png](assets/m2-nested-list.png)，确认三层列表呈阶梯
 缩进且符号与内容列对齐。
 
-### 9.4 任务 M2-4：收缩 TokenScanner 到只处理未闭合语法
+### 9.4 任务 M2-4：收缩 TokenScanner 到只处理未闭合语法（✅ 已完成）
 
 **这一项风险最高，务必在 M2-1/2/3 全部验收通过后再做。**
 
@@ -493,7 +515,7 @@ line=4  firstIndent=0.0  headIndent=24.0  |      - 第三层        ← 同一�
 `92.379542 ms`，未放宽任何断言。
 真机截图已保存为 [m2-inline-and-fence.jpg](assets/m2-inline-and-fence.jpg)，确认粗体、斜体、删除线、行内代码、嵌套强调、三层星号与代码围栏均正常显示，围栏 info string 与闭栏标记在块外隐藏。
 
-### 9.5 任务 M2-5：任务列表 ghost 宽度与图形宽度对齐
+### 9.5 任务 M2-5：任务列表 ghost 宽度与图形宽度对齐（✅ 已完成）
 
 **现状**（实测数值）：
 
@@ -523,7 +545,7 @@ fragment 断言两种 marker 的内容起始列一致；Debug 全量 **102 项 /
 真机截图已保存为 [m2-task-list.png](assets/m2-task-list.png)，确认圆点/复选框与文字
 间距一致且无 ghost 宽度造成的大空白。
 
-### 9.6 任务 M2-6：代码围栏闭栏行在文档末尾时不并入块样式
+### 9.6 任务 M2-6：代码围栏闭栏行在文档末尾时不并入块样式（✅ 已完成）
 
 **现状**（可复现）：
 
@@ -557,7 +579,10 @@ if let contentEnd = token.contentRange?.upperBound, contentEnd < package.index.u
 2. 同时保留「闭栏行后有内容」的既有断言不回归
 3. 补一个「未闭合围栏延伸到文档末尾」的断言（`TokenScanner` 有这个分支，渲染侧应确认块属性覆盖到末尾）
 
-### 9.7 任务 M2-7：开栏行 info string 与闭栏行标记未隐藏
+**完成记录（2026-08-27）**：已完成。闭栏行无论位于文档末尾还是后面仍有内容，均纳入
+代码块属性；未闭合围栏也覆盖到文档末尾。对应的三个边界断言与全量测试通过。
+
+### 9.7 任务 M2-7：开栏行 info string 与闭栏行标记未隐藏（✅ 已完成）
 
 **现状**（光标在围栏块外，源码 `段落\n\n```swift\nlet a = 1\n```\n\n尾段`，逐字符实测）：
 
@@ -586,7 +611,11 @@ if let contentEnd = token.contentRange?.upperBound, contentEnd < package.index.u
 2. `fenceMarkersRevealedWhenCaretInside`：光标在围栏块内时三者全部回显
 3. 真机截图确认代码块上下边缘干净，无 `swift` 与 ` ``` ` 残留
 
-### 9.8 任务 M2-8：块视觉配色改共享调色板（修暗色模式隐患）
+**完成记录（2026-08-27）**：已完成。AST code block 输出的开栏 info string 与闭栏 marker
+均纳入显隐范围；两个回显/隐藏测试通过，真机截图见
+[m2-inline-and-fence.jpg](assets/m2-inline-and-fence.jpg)。
+
+### 9.8 任务 M2-8：块视觉配色改共享调色板（修暗色模式隐患，✅ 已完成）
 
 **现状**：`Rendering/BlockLayoutFragment.swift` 的 `drawDecoration` 与 `drawListMarker` 在绘制时对动态 `NSColor` 取 `.cgColor`（如 `theme.quoteBackground.cgColor`）。实测该调用按 `NSAppearance.current` 解析，**且 current 为 nil 时不报错、静默回落亮色**：
 
@@ -619,7 +648,12 @@ NSAppearance.current = nil       → [0.96, 0.97, 0.98, 1.0]
 3. **真机验证**（M0 §9.4 的第 12、13 项）：暗色模式下块视觉配色正确；App 打开时热切换系统外观，已排版区域立即跟随，不需要滚动或编辑触发
 4. 在本报告 §6.4 回填「真机确认：通过」
 
-### 9.9 任务 M2-9：引用块左竖线连续性定性
+**完成记录（2026-08-27）**：已完成。共享调色板测试与真实 fragment 外观测试均通过，
+`withKnownIssue` 已不存在；真机已在 App 打开状态从浅色切换到深色并切回，已排版的代码块
+背景随之更新。浅色/深色截图见 [m2-appearance-light.jpg](assets/m2-appearance-light.jpg) 和
+[m2-appearance-dark.jpg](assets/m2-appearance-dark.jpg)，§6.4 已回填通过。
+
+### 9.9 任务 M2-9：引用块左竖线连续性定性（✅ 已完成，非缺陷）
 
 **现状**：真机截图中引用块左侧竖线呈分段而非连续。可能原因：fragment 高度与行片段划分不一致；或仅是截图缩放假象。
 
@@ -630,6 +664,9 @@ NSAppearance.current = nil       → [0.96, 0.97, 0.98, 1.0]
 3. 若是假象：在本报告 §6.5 记录「已核对，非缺陷」并结束
 
 **验收**：本报告 §6.5 有明确定性结论（缺陷 + 修法，或非缺陷）；若是缺陷则修复并补真机截图。
+
+**完成记录（2026-08-27）**：已完成，结论为非缺陷。多行软换行引用在真机 1:1 截图中竖线
+连续，像素核对结果及截图见 §6.5。
 
 ### 9.10 M2 的结论如何更新
 
@@ -643,7 +680,11 @@ NSAppearance.current = nil       → [0.96, 0.97, 0.98, 1.0]
 6. 全量测试全绿，且测试数不低于当前 78 项
 7. 本报告 §5「未做的架构收口」改写为「已收口」，附收口前后的行数与语义分叉对比
 
-**只要第 2 条或第 3 条未达成，结论必须保持「有条件通过」**——那意味着解析层仍带着重复实现进入 M3，而这正是本报告给出条件结论的原因。
+**最终自查（2026-08-27）**：以上七条均已满足。M2-1～M2-8 的验收通过，M2-9
+定性为非缺陷；`TokenScanner.swift` 为 76 行且不含旧 CommonMark 匹配逻辑，
+`RenderEngine.prepare` 无 `needsMarkdownSemantics` 短路；真机确认嵌套列表阶梯缩进、浅深色
+外观热切换和块视觉；Debug/Release 均为 103 项 / 7 套件全绿。因此本报告结论由
+「有条件通过」更新为 **「通过」**。
 
 ### 9.11 交付要求
 

@@ -73,7 +73,7 @@ M1-1 已用临时目录和 AppKit autosave 完成回调覆盖「编辑 → autos
 - `updateChangeCount` 的调用时机正确（启动示例文档调了 `.changeCleared`，编辑时由 `RenderCoordinator.onTextEdited` 调 `.changeDone`，但渲染属性写入被包在 undo 抑制里，需确认不会误标脏）；
 - 渲染属性不会误标脏，字符编辑会标脏。
 
-4 项测试均通过；本轮没有发现渲染误标脏缺陷。崩溃恢复的系统级人工验证仍属于 M0-3 清单范围，不由这组单元测试替代。
+4 项测试均通过；本轮没有发现渲染误标脏缺陷。崩溃恢复的系统级人工验证仍属于 M0-3 清单范围，不由这组单元测试替代。截止本次收口，累计回归为 103 项 / 7 套件。
 
 ### 5.2 测试目标不 import 产品模块，Release 下构建失败（P1，已由 M1-2 解决）
 
@@ -128,7 +128,8 @@ M1 补齐了原先遗漏的 autosave/reopen 验收，并用共享框架恢复了
 
 **注意**：AppKit 的 autosave 是异步的。测试里不要靠 `sleep` 等待，用 `autosave(withImplicitCancellability:completionHandler:)` 的回调，或直接调 `save(to:ofType:for:completionHandler:)` 走确定性路径。
 
-**验收**：4 项测试存在且通过。本分支在 M0-1/M0-2/M2-6/M2-7/M2-8 已增加 7 项回归测试，因此总测试数由 85 增至 **89**；本任务未发现渲染误标脏缺陷。
+**验收**：4 项测试存在且通过。本任务提交时总测试数由 85 增至 **89**；随后 M2 收口
+新增测试，最终回归为 **103 项 / 7 套件**；本任务未发现渲染误标脏缺陷。
 
 ### 7.2 任务 M1-2：测试目标框架化，修复 Release 构建（✅ 已完成）
 
@@ -146,7 +147,8 @@ xcodebuild test -project Muse.xcodeproj -scheme Muse \
   -destination 'platform=macOS,arch=arm64' -derivedDataPath build -configuration Release
 ```
 
-**已消除的代价**：性能测试现在可以在 Release 配置下重复运行。当前 Release 数字见 §8；M2-1 完成 AST 语义层后，会在 §8 与《M2 评价报告》§5.4 补记最终 AST 解析数字。
+**已消除的代价**：性能测试现在可以在 Release 配置下重复运行。最终 Release 数字见 §8；
+M2-1/M2-4 完成 AST 语义层收口后，200KB 全量 AST 解析仍低于样式落地目标。
 
 **已完成**（首选方案）：把 `Document/`、`Parsing/`、`Rendering/` 抽成 `MuseKit` framework target，App 与 MuseTests 都依赖它。
 
@@ -160,9 +162,9 @@ xcodebuild test -project Muse.xcodeproj -scheme Muse \
 
 **验收**（三项均满足）：
 
-1. Debug 下当前 **89 项**测试全绿；
+1. Debug 下最终 **103 项**测试全绿；
 2. **Release 下测试构建成功且全绿**——这是本任务的核心目标；
-3. 已在 Release 下重跑 `PerformanceTests`，并将 200KB `RenderEngine.prepare`、`applyDirty`、协调器端到端耗时填入 §8。最终 AST 语义层的解析数字在 M2-1 完成后补记；若 200KB 全量 AST 仍 < 150ms，在《M2 评价报告》§5.4 记录「全量 AST 方案确认可行，块级增量不必做」。
+3. 已在 Release 下重跑 `PerformanceTests`，并将 200KB `RenderEngine.prepare`、`applyDirty`、协调器端到端耗时填入 §8；最终全量 AST 解析为 36.665ms，低于 150ms，已在《M2 评价报告》记录「全量 AST 方案确认可行，块级增量不必做」。
 
 ## 8. Release 性能基准
 
@@ -173,16 +175,18 @@ xcodebuild test -project Muse.xcodeproj -scheme Muse -configuration Release \
   -destination 'platform=macOS,arch=arm64' -derivedDataPath build-release
 ```
 
-当前 Release 构建在 MuseKit 抽取后通过，测试结果为 **85 项 / 7 套件全绿**。以下是同一次运行的输出；M2-1 完成后会把「扫描 + 索引」列替换/补充为最终 AST 解析数字。
+最终 Release 构建通过，测试结果为 **103 项 / 7 套件全绿**。以下为最终全量运行输出，
+`RenderEngine.prepare` 已代表 AST + SourceIndex 管线。
 
 | 场景 | Release 实测 |
 |---|---:|
-| 20KB `RenderEngine.prepare`（扫描 + 索引） | 0.502 ms |
-| 200KB `RenderEngine.prepare`（扫描 + 索引） | 4.973 ms |
-| 200KB `applyDirty` | 0.310 ms |
-| 200KB 协调器单键路径（编辑 → 样式落地） | 21.929 ms |
-| 1MB 全管线 | 901.448 ms |
+| 20KB `RenderEngine.prepare`（AST + SourceIndex） | 3.565 ms |
+| 200KB `RenderEngine.prepare`（AST + SourceIndex） | 36.665 ms |
+| 200KB `applyDirty` | 0.318 ms |
+| 200KB 协调器单键路径（编辑 → 样式落地） | 33.493 ms |
+| 1MB 全管线 | 1035.931 ms |
 
-这组数字用于证明 Release 测量链路已恢复；其中 AST 方案是否满足 150ms 判据，待 M2-1 的最终语义输出接入后按同一配置复测。
+这组数字证明 Release 测量链路已恢复；200KB 全量 AST 解析与协调器端到端均满足 v0.3
+的 150ms 样式落地判据，块级增量解析暂不需要。
 
 第 3 项不是可选的。这个任务存在的唯一理由就是拿到那个数字。

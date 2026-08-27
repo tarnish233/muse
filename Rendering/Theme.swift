@@ -17,6 +17,8 @@ extension NSAttributedString.Key {
     public nonisolated static let museBlock = NSAttributedString.Key("museBlock")
     /// AST-provided ordered-list number consumed by the custom layout fragment.
     public nonisolated static let museListNumber = NSAttributedString.Key("museListNumber")
+    /// AST-provided list depth consumed by the custom layout fragment.
+    public nonisolated static let museListDepth = NSAttributedString.Key("museListDepth")
 }
 
 /// 主题：字体与配色。亮/暗跟随系统外观（动态 NSColor）。
@@ -115,13 +117,14 @@ public nonisolated struct Theme: @unchecked Sendable {
         return p
     }
 
-    public func listParagraph() -> NSMutableParagraphStyle {
+    public func listParagraph(depth: Int) -> NSMutableParagraphStyle {
         let p = baseParagraph()
         p.paragraphSpacing = 3
         // 悬挂缩进（Typora 视觉）：marker 在行首，换行对齐内容列。
-        // 首行从 0 开始（"- " 占据行首），后续行从 24pt 缩进。
-        p.firstLineHeadIndent = 0
-        p.headIndent = 24
+        // 每深入一层，marker 带与内容列都向右移动 24pt。
+        let level = max(1, depth)
+        p.firstLineHeadIndent = CGFloat(level - 1) * 24
+        p.headIndent = CGFloat(level) * 24
         return p
     }
 

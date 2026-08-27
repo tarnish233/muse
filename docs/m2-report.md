@@ -234,6 +234,15 @@ M2-1 接入全文档 AST 后，性能套件与其他测试套件并行运行时�
 测得 `94.091292 ms`。这是测量环境的竞争，不是通过放宽断言处理；性能套件改为
 serialized 后，规格要求的默认全量运行在未降低 `<100 ms` 断言的情况下通过。
 
+### 6.7 MuseKit 抽取后的 Debug App 打包/文档注册问题（P1，已修复）
+
+M1-2 抽取 framework 后，首次直接打开 Debug App 暴露出两个宿主集成问题：App
+没有把 `MuseKit.framework` 嵌入 bundle，且 `NSDocumentClass` 仍指向旧的
+`Muse.MuseDocument`。前者会导致动态库加载失败，后者会导致 AppKit 报
+“No document could be created.”。已将 framework 以 `@rpath` 嵌入并修正为
+`MuseKit.MuseDocument`；重新构建后通过真机打开、编辑并显示嵌套列表。该问题不是
+静默忽略，修复涉及 `Muse.xcodeproj/project.pbxproj` 与 `Muse-Info.plist`。
+
 ## 7. 替代方案调研（2026-08-27）
 
 M2 的绘制层踩坑后做了一次横向调研，确认「自定义 fragment」是否是正确方向，以及是否有现成方案可用。完整结论写入 v0.3 方案 §2.1，此处记要点。
@@ -434,6 +443,13 @@ line=4  firstIndent=0.0  headIndent=24.0  |      - 第三层        ← 同一�
 2. `nestedListMarkersAlignWithIndent`：经真实 fragment 断言各层符号的绘制 x 坐标随 depth 递增
 3. **真机截图核对**：打开示例文档，确认嵌套列表呈阶梯缩进、符号与文字对齐、三层符号分别为 `•` `◦` `▪`。截图存到 `docs/assets/m2-nested-list.png` 并在本报告 §6 引用
 4. 现有 `listParagraphHasHangingIndent` 测试会失败（它断言 `headIndent == 24`），改为断言 depth 1 的值
+
+**完成记录（2026-08-27）**：已完成。列表段落样式按 AST 携带的 depth 使用 24pt
+阶梯缩进，列表 fragment 的 marker 带随实际段落缩进定位，并按 depth 绘制
+`•`/`◦`/`▪`。新增 `listParagraphIndentScalesWithDepth` 与
+`nestedListMarkersAlignWithIndent`；Debug 全量 **101 项 / 7 套件**测试通过。
+真机截图已保存为 [m2-nested-list.png](assets/m2-nested-list.png)，确认三层列表呈阶梯
+缩进且符号与内容列对齐。
 
 ### 9.4 任务 M2-4：收缩 TokenScanner 到只处理未闭合语法
 

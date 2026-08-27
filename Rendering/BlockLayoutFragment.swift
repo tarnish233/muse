@@ -107,17 +107,21 @@ public nonisolated final class MuseLayoutFragment: NSTextLayoutFragment {
             return // 已回显，不画
         }
 
-        let theme = Theme.standard
         let palette = BlockVisualPalette.shared.snapshot()
-        let bandWidth = (info.markerText as NSString)
-            .size(withAttributes: [.font: theme.revealedMarkerFont()]).width
+        let paragraph = string.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle
+        let markerStart = paragraph?.firstLineHeadIndent ?? 0
+        let contentStart = paragraph?.headIndent ?? markerStart + 24
+        let bandWidth = max(0, contentStart - markerStart)
         let glyph = glyphText(kind: kind, info: info) as NSString
         let glyphFont: NSFont = kind.hasSuffix(":t")
             ? NSFont.systemFont(ofSize: 14)
             : NSFont.systemFont(ofSize: 15)
         let glyphSize = glyph.size(withAttributes: [.font: glyphFont])
 
-        let x = point.x + info.leadingWidth + (bandWidth - glyphSize.width) / 2
+        // TextKit positions the fragment at the paragraph's first-line indent;
+        // use that fragment origin as the left edge of this marker band. Adding
+        // firstLineHeadIndent again would double the depth offset.
+        let x = point.x + (bandWidth - glyphSize.width) / 2
         let y = point.y + (layoutFragmentFrame.height - glyphSize.height) / 2
 
         // fragment 的 CGContext 是左上原点（与文本视图同向）；NSString 绘制需要
@@ -137,9 +141,9 @@ public nonisolated final class MuseLayoutFragment: NSTextLayoutFragment {
             // 序号来自 AST，经渲染属性传入；绘制层不重新解析源码。
             return "\(info.number ?? 1)."
         }
-        // 无序：按层级（每 2 个缩进单位一级；tab 按 4 个空格计）。
-        let level = info.indentationUnits / 2
-        return ["•", "◦", "▪"][min(level, 2)]
+        // 无序：层级来自 AST 写入的属性，而不是源码缩进猜测。
+        let level = max(1, info.depth)
+        return ["•", "◦", "▪"][min(level - 1, 2)]
     }
 }
 
@@ -166,6 +170,7 @@ nonisolated private struct ListMarkerInfo {
     let markerText: String
     let checked: Bool
     let number: Int?
+    let depth: Int
 
     /// 从元素属性串解析前导空白与 marker 文本；非列表行返回 nil。
     init?(_ string: NSAttributedString) {
@@ -202,5 +207,6 @@ nonisolated private struct ListMarkerInfo {
         self.leadingWidth = (String(line.prefix(leadingCharacterCount)) as NSString)
             .size(withAttributes: [.font: Theme.standard.baseFont()]).width
         self.number = (string.attribute(.museListNumber, at: 0, effectiveRange: nil) as? NSNumber)?.intValue
+        self.depth = max(1, (string.attribute(.museListDepth, at: 0, effectiveRange: nil) as? NSNumber)?.intValue ?? 1)
     }
 }

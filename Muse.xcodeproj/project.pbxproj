@@ -10,6 +10,7 @@
 		B0000000000000000000001 /* MuseKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = AF0000000000000000000003 /* MuseKit.framework */; };
 		B0000000000000000000002 /* MuseKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = AF0000000000000000000003 /* MuseKit.framework */; };
 		B0000000000000000000003 /* Markdown in Frameworks */ = {isa = PBXBuildFile; productRef = AA0000000000000000000004 /* Markdown */; };
+		B0000000000000000000004 /* MuseKit.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = AF0000000000000000000003 /* MuseKit.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -119,6 +120,20 @@
 		};
 /* End PBXFrameworksBuildPhase section */
 
+/* Begin PBXCopyFilesBuildPhase section */
+		BA0000000000000000000010 /* Embed Frameworks */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+				B0000000000000000000004 /* MuseKit.framework in Embed Frameworks */,
+			);
+			name = "Embed Frameworks";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
 /* Begin PBXGroup section */
 		AD0000000000000000000001 = {
 			isa = PBXGroup;
@@ -152,6 +167,7 @@
 			buildPhases = (
 				BA0000000000000000000001 /* Sources */,
 				BA0000000000000000000002 /* Frameworks */,
+				BA0000000000000000000010 /* Embed Frameworks */,
 				BA0000000000000000000003 /* Resources */,
 			);
 			buildRules = (
@@ -531,6 +547,7 @@
 				DEFINES_MODULE = YES;
 				DYLIB_COMPATIBILITY_VERSION = 1;
 				DYLIB_CURRENT_VERSION = 1;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
 				GENERATE_INFOPLIST_FILE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.muse.MuseKit;
@@ -548,6 +565,7 @@
 				DEFINES_MODULE = YES;
 				DYLIB_COMPATIBILITY_VERSION = 1;
 				DYLIB_CURRENT_VERSION = 1;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
 				ENABLE_TESTABILITY = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;

@@ -359,7 +359,7 @@ import Testing
         #expect(block(24) == BlockVisual.rule.rawValue)      // 分隔线（空白行之后）
     }
 
-    /// 列表悬挂缩进：marker 在行首、换行从 24pt 缩进（Typora 视觉）。
+    /// 列表悬挂缩进：depth 1 的 marker 在行首、换行从 24pt 缩进（Typora 视觉）。
     @Test func listParagraphHasHangingIndent() {
         let source = "- 长列表项内容" + String(repeating: "足够长到可以换行，", count: 20)
         let storage = NSTextStorage(string: source)
@@ -370,6 +370,51 @@ import Testing
         let paragraph = storage.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle
         #expect(paragraph?.headIndent == 24)
         #expect(paragraph?.firstLineHeadIndent == 0)
+    }
+
+    @Test func listParagraphIndentScalesWithDepth() {
+        let source = "- 一层\n  - 二层\n    - 三层"
+        let storage = NSTextStorage(string: source)
+        let package = engine.prepare(source)
+        _ = engine.render(package: package, selection: NSRange(location: storage.length, length: 0), into: storage)
+
+        let paragraphs = [0, 5, 12].compactMap {
+            storage.attribute(.paragraphStyle, at: $0, effectiveRange: nil) as? NSParagraphStyle
+        }
+        #expect(paragraphs.count == 3)
+        #expect(paragraphs.map(\.firstLineHeadIndent) == [0, 24, 48])
+        #expect(paragraphs.map(\.headIndent) == [24, 48, 72])
+        #expect(paragraphs[0].firstLineHeadIndent < paragraphs[1].firstLineHeadIndent)
+        #expect(paragraphs[1].firstLineHeadIndent < paragraphs[2].firstLineHeadIndent)
+    }
+
+    @Test func nestedListMarkersAlignWithIndent() {
+        let source = "- 一层\n  - 二层\n    - 三层"
+        let storage = NSTextStorage(string: source)
+        let textView = EditorTextView.make(textStorage: storage)
+        textView.frame = NSRect(x: 0, y: 0, width: 640, height: 240)
+        textView.textContainer?.containerSize = NSSize(width: 640, height: CGFloat.greatestFiniteMagnitude)
+
+        let package = engine.prepare(source)
+        // No caret selection keeps all three list markers in ghost state so the
+        // custom fragment draws each visual marker.
+        _ = engine.render(package: package, selection: nil, into: storage)
+        let fragments = customFragments(in: textView).filter {
+            $0.blockKind == BlockVisual.list.rawValue + ":u"
+        }
+        #expect(fragments.count == 3)
+
+        let markerX = fragments.map(markerInkMinX(of:))
+        #expect(markerX.allSatisfy { $0 != nil })
+        let x = markerX.compactMap { $0 }
+        #expect(x.count == 3)
+        guard x.count == 3 else { return }
+        #expect(x[1] > x[0])
+        #expect(x[2] > x[1])
+        // The marker band itself advances by the theme's 24pt depth step;
+        // allow antialiasing and glyph-width differences at the edge.
+        #expect(x[1] - x[0] >= 20)
+        #expect(x[2] - x[1] >= 20)
     }
 
     /// 字形特征断言：NSFontManager.convert 产出的字体在 descriptor 里可能不报字重，
@@ -455,6 +500,53 @@ import Testing
             }
         }
         return count
+    }
+
+    /// Return the left-most ink from a real list fragment's block-visual draw.
+    /// The fragment is obtained through TextKit 2 enumeration; this measures the
+    /// actual marker placement rather than a parallel coordinate calculation.
+    private func markerInkMinX(of fragment: MuseLayoutFragment) -> Int? {
+        let width = 640
+        let height = 160
+        guard let bitmap = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: width,
+            pixelsHigh: height,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bitmapFormat: [],
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ), let context = NSGraphicsContext(bitmapImageRep: bitmap) else {
+            return nil
+        }
+
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = context
+        NSColor.white.setFill()
+        NSRect(x: 0, y: 0, width: width, height: height).fill()
+        let frame = fragment.layoutFragmentFrame
+        fragment.drawBlockVisuals(at: frame.origin, in: context.cgContext)
+        context.flushGraphics()
+        NSGraphicsContext.restoreGraphicsState()
+
+        guard let data = bitmap.bitmapData else { return nil }
+        let bytesPerPixel = max(1, bitmap.bitsPerPixel / 8)
+        var minX: Int?
+        for row in 0..<bitmap.pixelsHigh {
+            let rowStart = row * bitmap.bytesPerRow
+            for column in 0..<bitmap.pixelsWide {
+                let pixelStart = rowStart + column * bytesPerPixel
+                let pixel = UnsafeBufferPointer(start: data + pixelStart, count: bytesPerPixel)
+                if pixel.prefix(3).contains(where: { $0 < 245 }) {
+                    minX = min(minX ?? column, column)
+                }
+            }
+        }
+        return minX
     }
 
     /// 在指定外观上下文中经真实 fragment 绘制引用背景，采样远离竖线与字形的像素。

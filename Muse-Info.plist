@@ -24,7 +24,7 @@
 				<string>public.plain-text</string>
 			</array>
 			<key>NSDocumentClass</key>
-			<string>$(PRODUCT_MODULE_NAME).MuseDocument</string>
+			<string>MuseKit.MuseDocument</string>
 		</dict>
 	</array>
 	<key>UTImportedTypeDeclarations</key>

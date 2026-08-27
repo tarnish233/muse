@@ -430,20 +430,27 @@ public struct RenderEngine {
                 .paragraphStyle: theme.headingParagraph(level: level),
             ], range: wholeLine)
 
-        case .unorderedListItem:
-            storage.addAttributes([.paragraphStyle: theme.listParagraph()], range: wholeLine)
-            storage.addAttributes([.museBlock: BlockVisual.list.rawValue + ":u"], range: wholeLine)
-
-        case .orderedListItem(_, let number):
-            storage.addAttributes([.paragraphStyle: theme.listParagraph()], range: wholeLine)
+        case let .unorderedListItem(depth):
             storage.addAttributes([
+                .paragraphStyle: theme.listParagraph(depth: depth),
+                .museBlock: BlockVisual.list.rawValue + ":u",
+                .museListDepth: NSNumber(value: depth),
+            ], range: wholeLine)
+
+        case let .orderedListItem(depth, number):
+            storage.addAttributes([
+                .paragraphStyle: theme.listParagraph(depth: depth),
                 .museBlock: BlockVisual.list.rawValue + ":o",
+                .museListDepth: NSNumber(value: depth),
                 .museListNumber: NSNumber(value: number),
             ], range: wholeLine)
 
-        case .taskListItem:
-            storage.addAttributes([.paragraphStyle: theme.listParagraph()], range: wholeLine)
-            storage.addAttributes([.museBlock: BlockVisual.list.rawValue + ":t"], range: wholeLine)
+        case let .taskListItem(depth, _):
+            storage.addAttributes([
+                .paragraphStyle: theme.listParagraph(depth: depth),
+                .museBlock: BlockVisual.list.rawValue + ":t",
+                .museListDepth: NSNumber(value: depth),
+            ], range: wholeLine)
             // [ ] / [x] 用代码字体区分（点击切换留到 M4）。
             storage.addAttributes([.font: theme.codeFont()], range: index.nsRange(token.markerRange))
 

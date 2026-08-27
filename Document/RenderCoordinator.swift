@@ -89,7 +89,9 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
         let snapshot = storage.string
         let engine = self.engine
 
-        parseTask = Task.detached(priority: .userInitiated) { [weak self] in
+        // 输入回路是编辑器的交互预算；让最新快照在系统负载下优先于已取消的
+        // 低优先级解析，避免后台任务互相争抢时把单键延迟推过端到端门槛。
+        parseTask = Task.detached(priority: .high) { [weak self] in
             let package = engine.prepare(snapshot)
             guard !Task.isCancelled else { return }
             await self?.applyParsed(package: package, rev: rev, dirtyNS: dirtyNS)

@@ -148,4 +148,125 @@ import Testing
         })
         #expect(nested.markerRange.lowerBound == 13) // "- parent\n" + 4 个缩进空格
     }
+
+    // MARK: - M2-1：AST marker 与块结构输出
+
+    @Test func inlineMarkersMatchByteBoundaries() throws {
+        let source = "**粗体**、*斜体*、~~删除线~~、`行内代码`"
+        let semantics = MarkdownSemantics(source)
+
+        let strong = try #require(semantics.inlineMarkers.first { $0.kind == .strong })
+        #expect(strong.openMarker == 0..<2)
+        #expect(strong.content == 2..<8)
+        #expect(strong.closeMarker == 8..<10)
+
+        let emphasis = try #require(semantics.inlineMarkers.first { $0.kind == .emphasis })
+        #expect(emphasis.openMarker == 13..<14)
+        #expect(emphasis.content == 14..<20)
+        #expect(emphasis.closeMarker == 20..<21)
+
+        let strike = try #require(semantics.inlineMarkers.first { $0.kind == .strikethrough })
+        #expect(strike.openMarker == 24..<26)
+        #expect(strike.content == 26..<35)
+        #expect(strike.closeMarker == 35..<37)
+
+        let code = try #require(semantics.inlineMarkers.first { $0.kind == .inlineCode })
+        #expect(code.openMarker == 40..<41)
+        #expect(code.content == 41..<53)
+        #expect(code.closeMarker == 53..<54)
+    }
+
+    @Test func nestedEmphasisMarkersFromAST() throws {
+        let source = "**粗体里的 *斜体* 与 `代码`**"
+        let semantics = MarkdownSemantics(source)
+
+        let outer = try #require(semantics.inlineMarkers.first {
+            $0.kind == .strong && $0.openMarker == 0..<2
+        })
+        #expect(outer.content == 2..<36)
+        #expect(outer.closeMarker == 36..<38)
+
+        let nestedEmphasis = try #require(semantics.inlineMarkers.first {
+            $0.kind == .emphasis && $0.openMarker == 15..<16
+        })
+        #expect(nestedEmphasis.content == 16..<22)
+        #expect(nestedEmphasis.closeMarker == 22..<23)
+
+        let nestedCode = try #require(semantics.inlineMarkers.first {
+            $0.kind == .inlineCode && $0.openMarker == 28..<29
+        })
+        #expect(nestedCode.content == 29..<35)
+        #expect(nestedCode.closeMarker == 35..<36)
+
+        let triple = MarkdownSemantics("***三层星号***").inlineMarkers
+        #expect(triple.contains {
+            $0.kind == .emphasis && $0.openMarker == 0..<1 && $0.closeMarker == 17..<18
+        })
+        #expect(triple.contains {
+            $0.kind == .strong && $0.openMarker == 1..<3 && $0.closeMarker == 15..<17
+        })
+    }
+
+    @Test func reverseNestedEmphasisFromAST() throws {
+        let semantics = MarkdownSemantics("*a **b** c*")
+        let outer = try #require(semantics.inlineMarkers.first { $0.kind == .emphasis })
+        let inner = try #require(semantics.inlineMarkers.first { $0.kind == .strong })
+
+        #expect(outer.openMarker == 0..<1)
+        #expect(outer.content == 1..<10)
+        #expect(outer.closeMarker == 10..<11)
+        #expect(inner.openMarker == 3..<5)
+        #expect(inner.content == 5..<6)
+        #expect(inner.closeMarker == 6..<8)
+    }
+
+    @Test func unclosedEmphasisProducesNoMarker() {
+        let semantics = MarkdownSemantics("**未闭合")
+        #expect(semantics.inlineMarkers.isEmpty)
+    }
+
+    @Test func listDepthAndNumberFromAST() throws {
+        let source = "- 一层\n  - 二层\n    - 三层\n\n3. 三\n4. 四\n"
+        let blocks = MarkdownSemantics(source).blocks
+
+        let unorderedDepths = blocks.compactMap { block -> Int? in
+            guard case let .unorderedList(depth) = block.kind else { return nil }
+            return depth
+        }
+        #expect(unorderedDepths == [1, 2, 3])
+
+        let ordered = blocks.compactMap { block -> (depth: Int, number: Int)? in
+            guard case let .orderedList(depth, number) = block.kind else { return nil }
+            return (depth, number)
+        }
+        #expect(ordered.map(\.depth) == [1, 1])
+        #expect(ordered.map(\.number) == [3, 4])
+    }
+
+    @Test func taskCheckboxFromAST() throws {
+        let blocks = MarkdownSemantics("- [x] 完成\n- [ ] 待办\n").blocks
+        let tasks = blocks.compactMap { block -> Bool? in
+            guard case let .taskList(_, checked) = block.kind else { return nil }
+            return checked
+        }
+        #expect(tasks == [true, false])
+    }
+
+    @Test func codeFenceLanguageFromAST() throws {
+        let blocks = MarkdownSemantics("```swift\nlet value = 1\n```\n").blocks
+        #expect(blocks.contains { block in
+            guard case let .codeFence(language) = block.kind else { return false }
+            return language == "swift"
+        })
+    }
+
+    @Test func nestedListWithoutLinksStillUsesAST() throws {
+        let source = "- root\n  - child\n"
+        #expect(!source.contains("["))
+        let blocks = MarkdownSemantics(source).blocks
+        #expect(blocks.contains { block in
+            guard case .unorderedList(depth: 2) = block.kind else { return false }
+            return block.line == 1
+        })
+    }
 }

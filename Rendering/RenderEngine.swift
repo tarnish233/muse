@@ -8,6 +8,16 @@ import AppKit
 /// - `applyDirty`：只重置+重排受影响行的属性（输入热路径；配合后台解析见 RenderCoordinator）。
 /// 行级粒度与线式 tokenizer 一致（行内语法以行为界），是"变化块增量"的第一版近似。
 public struct RenderEngine {
+    private final class ScanResult: @unchecked Sendable {
+        let semaphore = DispatchSemaphore(value: 0)
+        nonisolated(unsafe) var tokens: [Token] = []
+    }
+
+    private final class IndexResult: @unchecked Sendable {
+        let semaphore = DispatchSemaphore(value: 0)
+        nonisolated(unsafe) var index: SourceIndex?
+    }
+
     /// 后台解析产物：纯值、Sendable，可跨线程（v0.2 RenderSnapshot 的第一版形态）。
     public nonisolated struct Package: Sendable {
         public let tokens: [Token]
@@ -44,70 +54,69 @@ public struct RenderEngine {
 
     public nonisolated func prepare(_ source: String) -> Package {
         let scanner = TokenScanner()
-        // AST 先于扫描器：链接语法给出行内扫描的保护区间（URL 区域不做强调配对），
-        // 同时提供块结构的行级事实（尤其是深层列表/引用的缩进）。
-        // 先做一次极轻量的候选行检查，普通纯文本不必为链接/块语义付全文档解析成本；
-        // 候选命中后，真正的结构判断交给 swift-markdown。
-        let semantics = needsMarkdownSemantics(source) ? MarkdownSemantics(source) : nil
-        let lineStarts = scanner.lines(source).map(\.start)
-        var tokens = scanner.scan(
-            source,
-            excludingRanges: semantics?.links.flatMap(\.inertRanges) ?? [],
-            semanticListLines: semantics?.listItemLines ?? [],
-            semanticQuoteLines: semantics?.quoteLines ?? [],
-            semanticFenceLines: semantics?.fenceLines ?? []
-        )
-
-        if let semantics {
-            for link in semantics.links {
-                tokens.append(Token(
-                    kind: .link,
-                    markerRange: link.openBracket,
-                    closingMarkerRange: link.tail,
-                    contentRange: link.label,
-                    linkDestination: link.destination,
-                    line: lineIndex(ofByte: link.label.lowerBound, lineStarts: lineStarts)
-                ))
-            }
-            tokens.sort { $0.markerRange.lowerBound < $1.markerRange.lowerBound }
+        let speculativeScan = ScanResult()
+        let speculativeIndex = IndexResult()
+        DispatchQueue.global(qos: .userInitiated).async {
+            speculativeScan.tokens = TokenScanner().scan(source)
+            speculativeScan.semaphore.signal()
         }
+        DispatchQueue.global(qos: .userInitiated).async {
+            speculativeIndex.index = SourceIndex(source)
+            speculativeIndex.semaphore.signal()
+        }
+        let sourceLines = scanner.lines(source)
+        let lineStarts = sourceLines.map(\.start)
 
-        return Package(tokens: tokens, index: SourceIndex(source), lineStarts: lineStarts)
+        // AST 是语义与源码定位的唯一来源。即使文档没有链接或深层缩进，也必须
+        // 构建语义层，避免候选行短路让同一 Markdown 在不同输入形态下走两套规则。
+        let semantics = MarkdownSemantics(source, lines: sourceLines)
+        speculativeScan.semaphore.wait()
+        var tokens = speculativeScan.tokens
+
+        // 普通行的 scanner 结果与 AST 的块结论一致时直接复用并行结果；链接保护区
+        // 或 AST 确认的扩展缩进存在时再用完整语义参数重扫，保证这些边界不靠猜测。
+        if !semantics.links.isEmpty || requiresSemanticRescan(source, semantics: semantics, lines: sourceLines) {
+            tokens = scanner.scan(
+                source,
+                excludingRanges: semantics.links.flatMap(\.inertRanges),
+                semanticListLines: semantics.listItemLines,
+                semanticQuoteLines: semantics.quoteLines,
+                semanticFenceLines: semantics.fenceLines
+            )
+        }
+        speculativeIndex.semaphore.wait()
+
+        for link in semantics.links {
+            tokens.append(Token(
+                kind: .link,
+                markerRange: link.openBracket,
+                closingMarkerRange: link.tail,
+                contentRange: link.label,
+                linkDestination: link.destination,
+                line: lineIndex(ofByte: link.label.lowerBound, lineStarts: lineStarts)
+            ))
+        }
+        tokens.sort { $0.markerRange.lowerBound < $1.markerRange.lowerBound }
+
+        return Package(tokens: tokens, index: speculativeIndex.index!, lineStarts: lineStarts)
     }
 
-    /// 只用于决定是否需要启动官方 AST 解析；不判断语义结果。
-    /// 链接仍沿用原有的 `[` 快速路径；普通的 ≤3 空格块由扫描器直接定位，
-    /// 只有可能超出扫描器简化规则的深层/Tab 缩进才需要 AST 介入。
-    private nonisolated func needsMarkdownSemantics(_ source: String) -> Bool {
-        let scanner = TokenScanner()
-        if source.contains("[") {
-            return true
-        }
-
+    private nonisolated func requiresSemanticRescan(
+        _ source: String,
+        semantics: MarkdownSemantics,
+        lines: [TokenScanner.Line]
+    ) -> Bool {
+        guard !semantics.blocks.isEmpty else { return false }
         let bytes = Array(source.utf8)
-        for line in scanner.lines(source) {
-            var i = line.start
-            while i < line.end, (bytes[i] == 0x20 || bytes[i] == 0x09) {
-                i += 1
+        for block in semantics.blocks {
+            guard block.line < lines.count else { continue }
+            let line = lines[block.line]
+            var index = line.start
+            while index < line.end, bytes[index] == 0x20 || bytes[index] == 0x09 {
+                index += 1
             }
-            guard i < line.end else { continue }
-            let hasExtendedIndent = i - line.start > 3
-                || bytes[line.start..<i].contains(0x09)
-            guard hasExtendedIndent else { continue }
-
-            switch bytes[i] {
-            case 0x23, 0x2A, 0x2B, 0x2D, 0x3E, 0x5F, 0x60:
-                // # heading, * + - list/rule, > quote, _ rule, ` fence/inline code
+            if index - line.start > 3 || bytes[line.start..<index].contains(0x09) {
                 return true
-            default:
-                guard bytes[i] >= 0x30, bytes[i] <= 0x39 else { continue }
-                var j = i
-                while j < line.end, bytes[j] >= 0x30, bytes[j] <= 0x39, j - i < 9 {
-                    j += 1
-                }
-                if j + 1 < line.end, bytes[j] == 0x2E, bytes[j + 1] == 0x20 {
-                    return true
-                }
             }
         }
         return false

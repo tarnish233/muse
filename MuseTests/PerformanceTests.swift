@@ -5,7 +5,7 @@ import Testing
 /// M0 性能基准：20KB / 200KB（混合中文 + markdown 构造）的
 /// 「扫描 + 索引」与「属性批量应用」耗时。目标（v0.2 4.6）不作为断言门槛，
 /// 只记录基线数据；断言上限为"不死循环/明显退化"的粗防线。
-@Suite @MainActor struct PerformanceTests {
+@Suite(.serialized) @MainActor struct PerformanceTests {
     let clock = ContinuousClock()
 
     /// 确定性语料：重复若干种块，直到达到目标大小。

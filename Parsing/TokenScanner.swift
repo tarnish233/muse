@@ -236,7 +236,7 @@ public nonisolated struct TokenScanner {
                bytes[i + 4] == 0x5D, bytes[i + 5] == 0x20 {
                 let checked = bytes[i + 3] != 0x20
                 tokens.append(Token(
-                    kind: .taskListItem(checked: checked),
+                    kind: .taskListItem(depth: 1, checked: checked),
                     markerRange: i..<(i + 6),
                     closingMarkerRange: nil,
                     contentRange: (i + 6)..<line.end,
@@ -247,7 +247,7 @@ public nonisolated struct TokenScanner {
                 return
             }
             tokens.append(Token(
-                kind: .unorderedListItem,
+                kind: .unorderedListItem(depth: 1),
                 markerRange: i..<(i + 2),
                 closingMarkerRange: nil,
                 contentRange: (i + 2)..<line.end,
@@ -264,8 +264,9 @@ public nonisolated struct TokenScanner {
             var j = i
             while j < line.end, bytes[j] >= 0x30, bytes[j] <= 0x39, j - i < 9 { j += 1 }
             if j - i >= 1, j + 1 < line.end, bytes[j] == 0x2E, bytes[j + 1] == 0x20 {
+                let number = Int(String(decoding: bytes[i..<j], as: UTF8.self)) ?? 1
                 tokens.append(Token(
-                    kind: .orderedListItem,
+                    kind: .orderedListItem(depth: 1, number: number),
                     markerRange: i..<(j + 2),
                     closingMarkerRange: nil,
                     contentRange: (j + 2)..<line.end,
@@ -281,7 +282,7 @@ public nonisolated struct TokenScanner {
         if b == 0x3E { // >
             let markerEnd = i + 1 < line.end && bytes[i + 1] == 0x20 ? i + 2 : i + 1
             tokens.append(Token(
-                kind: .blockquote,
+                kind: .blockquote(depth: 1),
                 markerRange: i..<markerEnd,
                 closingMarkerRange: nil,
                 contentRange: markerEnd..<line.end,

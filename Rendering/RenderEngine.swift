@@ -86,6 +86,43 @@ public struct RenderEngine {
         }
         speculativeIndex.semaphore.wait()
 
+        var unorderedDepthByLine: [Int: Int] = [:]
+        var orderedInfoByLine: [Int: (depth: Int, number: Int)] = [:]
+        var taskInfoByLine: [Int: (depth: Int, checked: Bool)] = [:]
+        var quoteDepthByLine: [Int: Int] = [:]
+        for block in semantics.blocks {
+            switch block.kind {
+            case let .unorderedList(depth):
+                unorderedDepthByLine[block.line] = depth
+            case let .orderedList(depth, number):
+                orderedInfoByLine[block.line] = (depth, number)
+            case let .taskList(depth, checked):
+                taskInfoByLine[block.line] = (depth, checked)
+            case let .blockquote(depth):
+                quoteDepthByLine[block.line] = depth
+            case .heading, .codeFence:
+                break
+            }
+        }
+        tokens = tokens.map { token in
+            switch token.kind {
+            case .unorderedListItem:
+                guard let depth = unorderedDepthByLine[token.line] else { return token }
+                return replacing(token, kind: .unorderedListItem(depth: depth))
+            case .orderedListItem:
+                guard let info = orderedInfoByLine[token.line] else { return token }
+                return replacing(token, kind: .orderedListItem(depth: info.depth, number: info.number))
+            case .taskListItem:
+                guard let info = taskInfoByLine[token.line] else { return token }
+                return replacing(token, kind: .taskListItem(depth: info.depth, checked: info.checked))
+            case .blockquote:
+                guard let depth = quoteDepthByLine[token.line] else { return token }
+                return replacing(token, kind: .blockquote(depth: depth))
+            default:
+                return token
+            }
+        }
+
         for link in semantics.links {
             tokens.append(Token(
                 kind: .link,
@@ -99,6 +136,17 @@ public struct RenderEngine {
         tokens.sort { $0.markerRange.lowerBound < $1.markerRange.lowerBound }
 
         return Package(tokens: tokens, index: speculativeIndex.index!, lineStarts: lineStarts)
+    }
+
+    private nonisolated func replacing(_ token: Token, kind: Token.Kind) -> Token {
+        Token(
+            kind: kind,
+            markerRange: token.markerRange,
+            closingMarkerRange: token.closingMarkerRange,
+            contentRange: token.contentRange,
+            linkDestination: token.linkDestination,
+            line: token.line
+        )
     }
 
     private nonisolated func requiresSemanticRescan(
@@ -231,7 +279,10 @@ public struct RenderEngine {
 
     private func quoteLines(of package: Package?) -> Set<Int> {
         guard let package else { return [] }
-        return Set(package.tokens.compactMap { $0.kind == .blockquote ? $0.line : nil })
+        return Set(package.tokens.compactMap { token in
+            if case .blockquote = token.kind { return token.line }
+            return nil
+        })
     }
 
     // MARK: - marker 显隐（纯计算，供协调器 diff 后写属性）
@@ -379,12 +430,16 @@ public struct RenderEngine {
                 .paragraphStyle: theme.headingParagraph(level: level),
             ], range: wholeLine)
 
-        case .unorderedListItem, .orderedListItem:
+        case .unorderedListItem:
             storage.addAttributes([.paragraphStyle: theme.listParagraph()], range: wholeLine)
-            storage.addAttributes(
-                [.museBlock: BlockVisual.list.rawValue + (token.kind == .orderedListItem ? ":o" : ":u")],
-                range: wholeLine
-            )
+            storage.addAttributes([.museBlock: BlockVisual.list.rawValue + ":u"], range: wholeLine)
+
+        case .orderedListItem(_, let number):
+            storage.addAttributes([.paragraphStyle: theme.listParagraph()], range: wholeLine)
+            storage.addAttributes([
+                .museBlock: BlockVisual.list.rawValue + ":o",
+                .museListNumber: NSNumber(value: number),
+            ], range: wholeLine)
 
         case .taskListItem:
             storage.addAttributes([.paragraphStyle: theme.listParagraph()], range: wholeLine)

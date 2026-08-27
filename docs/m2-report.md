@@ -402,6 +402,13 @@ depth 从 1 起（最外层 = 1）。在 `RenderEngine.prepare` 中用 M2-1 的 
 2. `orderedListTokensCarryNumber`——`3. / 4.` 断言 number 为 3/4；`1. / 2.` 断言 1/2
 3. 全量测试全绿（改枚举会牵动很多处，这一步的重点是不回归）
 
+**完成记录（2026-08-27）**：已完成。`Token.Kind` 现在携带列表/引用的 AST
+`depth`，有序列表同时携带 `number`；`RenderEngine.prepare` 将
+`MarkdownSemantics.blocks` 的结构信息写回 token，并通过 `museListNumber` 属性供
+真实布局 fragment 绘制有序 marker，绘制层不再从源码抠序号。新增
+`listTokensCarryDepth`、`orderedListTokensCarryNumber` 测试；全量 **99 项 / 7 套件**
+测试通过。
+
 ### 9.3 任务 M2-3：列表嵌套层级缩进（MVP 明确要求的功能）
 
 **现状**：`Rendering/Theme.swift` 的 `listParagraph()` 无参数，返回固定值。实测所有层级拿到完全相同的缩进：

@@ -15,6 +15,8 @@ extension NSAttributedString.Key {
     /// nonisolated：块视觉的 fragment（MuseLayoutFragment）在 nonisolated 的
     /// 度量路径（renderingSurfaceBounds）里也要读它。Key 本身是 Sendable。
     public nonisolated static let museBlock = NSAttributedString.Key("museBlock")
+    /// AST-provided ordered-list number consumed by the custom layout fragment.
+    public nonisolated static let museListNumber = NSAttributedString.Key("museListNumber")
 }
 
 /// 主题：字体与配色。亮/暗跟随系统外观（动态 NSColor）。

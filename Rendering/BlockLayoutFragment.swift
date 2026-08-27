@@ -134,8 +134,8 @@ public nonisolated final class MuseLayoutFragment: NSTextLayoutFragment {
     private func glyphText(kind: String, info: ListMarkerInfo) -> String {
         if kind.hasSuffix(":t") { return info.checked ? "☑" : "☐" }
         if kind.hasSuffix(":o") {
-            // 序号：取源码数字（"12. " → "12."）
-            return String(info.markerText.prefix { $0.isNumber }) + "."
+            // 序号来自 AST，经渲染属性传入；绘制层不重新解析源码。
+            return "\(info.number ?? 1)."
         }
         // 无序：按层级（每 2 个缩进单位一级；tab 按 4 个空格计）。
         let level = info.indentationUnits / 2
@@ -165,6 +165,7 @@ nonisolated private struct ListMarkerInfo {
     let leadingWidth: CGFloat
     let markerText: String
     let checked: Bool
+    let number: Int?
 
     /// 从元素属性串解析前导空白与 marker 文本；非列表行返回 nil。
     init?(_ string: NSAttributedString) {
@@ -200,5 +201,6 @@ nonisolated private struct ListMarkerInfo {
         self.indentationUnits = indentationUnits
         self.leadingWidth = (String(line.prefix(leadingCharacterCount)) as NSString)
             .size(withAttributes: [.font: Theme.standard.baseFont()]).width
+        self.number = (string.attribute(.museListNumber, at: 0, effectiveRange: nil) as? NSNumber)?.intValue
     }
 }

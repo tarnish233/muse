@@ -28,36 +28,36 @@ import Testing
     @Test func unorderedList() {
         let tokens = scanner.scan("- 第一项")
         #expect(tokens.count == 1)
-        #expect(tokens[0].kind == .unorderedListItem)
+        #expect(tokens[0].kind == .unorderedListItem(depth: 1))
         #expect(tokens[0].markerRange == 0..<2)
         #expect(tokens[0].contentRange == 2..<11) // "第一项" 9 字节
     }
 
     @Test func taskList() {
         let done = scanner.scan("- [x] 完成")
-        #expect(done.first?.kind == .taskListItem(checked: true))
+        #expect(done.first?.kind == .taskListItem(depth: 1, checked: true))
         #expect(done.first?.markerRange == 0..<6)
 
         let todo = scanner.scan("- [ ] 待办")
-        #expect(todo.first?.kind == .taskListItem(checked: false))
+        #expect(todo.first?.kind == .taskListItem(depth: 1, checked: false))
 
         // 大写的 X 也算完成
         let upper = scanner.scan("- [X] 大写")
-        #expect(upper.first?.kind == .taskListItem(checked: true))
+        #expect(upper.first?.kind == .taskListItem(depth: 1, checked: true))
 
         // "- [ ]" 后无空格则不识别为任务
-        #expect(scanner.scan("- [ ]未闭合").allSatisfy { !($0.kind == .taskListItem(checked: false)) })
+        #expect(scanner.scan("- [ ]未闭合").allSatisfy { !($0.kind == .taskListItem(depth: 1, checked: false)) })
     }
 
     @Test func orderedList() {
         let tokens = scanner.scan("12. 第十二项")
-        #expect(tokens.first?.kind == .orderedListItem)
+        #expect(tokens.first?.kind == .orderedListItem(depth: 1, number: 12))
         #expect(tokens.first?.markerRange == 0..<4) // "12. "
     }
 
     @Test func blockquote() {
         let tokens = scanner.scan("> 引用内容")
-        #expect(tokens.first?.kind == .blockquote)
+        #expect(tokens.first?.kind == .blockquote(depth: 1))
         #expect(tokens.first?.markerRange == 0..<2)
         #expect(tokens.first?.contentRange == 2..<14) // "引用内容" 12 字节
     }
@@ -161,7 +161,7 @@ import Testing
 
     @Test func inlineInsideList() {
         let tokens = scanner.scan("- **粗体**")
-        #expect(tokens.contains { $0.kind == .unorderedListItem })
+        #expect(tokens.contains { $0.kind == .unorderedListItem(depth: 1) })
         let strong = tokens.first { $0.kind == .strong }
         #expect(strong?.markerRange == 2..<4)
         #expect(strong?.contentRange == 4..<10)
@@ -169,11 +169,11 @@ import Testing
 
     @Test func inlineInsideTaskAndQuote() {
         let task = scanner.scan("- [x] `完成`")
-        #expect(task.contains { $0.kind == .taskListItem(checked: true) })
+        #expect(task.contains { $0.kind == .taskListItem(depth: 1, checked: true) })
         #expect(task.contains { $0.kind == .inlineCode })
 
         let quote = scanner.scan("> *引*")
-        #expect(quote.contains { $0.kind == .blockquote })
+        #expect(quote.contains { $0.kind == .blockquote(depth: 1) })
         let em = quote.first { $0.kind == .emphasis }
         #expect(em?.contentRange == 3..<6)
         #expect(em?.closingMarkerRange == 6..<7)
@@ -251,7 +251,7 @@ import Testing
         #expect(scanner.scan("___").first?.kind == .rule)
         // 不足三个 / 是列表 / 后有文字 → 不是分隔线
         #expect(scanner.scan("--").isEmpty)
-        #expect(scanner.scan("- 项").first?.kind == .unorderedListItem)
+        #expect(scanner.scan("- 项").first?.kind == .unorderedListItem(depth: 1))
         #expect(!scanner.scan("--- 后文").contains { $0.kind == .rule })
     }
 }

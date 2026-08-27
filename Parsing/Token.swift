@@ -6,10 +6,10 @@ import Foundation
 public nonisolated struct Token: Equatable, Sendable {
     public enum Kind: Equatable, Sendable {
         case heading(level: Int)
-        case unorderedListItem
-        case orderedListItem
-        case taskListItem(checked: Bool)
-        case blockquote
+        case unorderedListItem(depth: Int)
+        case orderedListItem(depth: Int, number: Int)
+        case taskListItem(depth: Int, checked: Bool)
+        case blockquote(depth: Int)
         case codeFence
         case strong
         case emphasis

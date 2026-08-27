@@ -144,9 +144,36 @@ import Testing
         #expect(semantics.listItemLines.contains(1))
 
         let nested = try #require(RenderEngine().prepare(source).tokens.first { token in
-            token.line == 1 && token.kind == .unorderedListItem
+            guard token.line == 1 else { return false }
+            guard case let .unorderedListItem(depth) = token.kind else { return false }
+            return depth == 2
         })
         #expect(nested.markerRange.lowerBound == 13) // "- parent\n" + 4 个缩进空格
+    }
+
+    // MARK: - M2-2：Token 携带 AST 层级与序号
+
+    @Test func listTokensCarryDepth() throws {
+        let source = "- 一层\n  - 二层\n    - 三层\n"
+        let depths = RenderEngine().prepare(source).tokens.compactMap { token -> Int? in
+            guard case let .unorderedListItem(depth) = token.kind else { return nil }
+            return depth
+        }
+        #expect(depths == [1, 2, 3])
+    }
+
+    @Test func orderedListTokensCarryNumber() throws {
+        let engine = RenderEngine()
+        let numbers = engine.prepare("3. 三\n4. 四\n").tokens.compactMap { token -> Int? in
+            guard case let .orderedListItem(_, number) = token.kind else { return nil }
+            return number
+        }
+        let resetNumbers = engine.prepare("1. 一\n2. 二\n").tokens.compactMap { token -> Int? in
+            guard case let .orderedListItem(_, number) = token.kind else { return nil }
+            return number
+        }
+        #expect(numbers == [3, 4])
+        #expect(resetNumbers == [1, 2])
     }
 
     // MARK: - M2-1：AST marker 与块结构输出

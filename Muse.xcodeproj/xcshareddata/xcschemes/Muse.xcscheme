@@ -14,6 +14,20 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
+               BlueprintIdentifier = "AC0000000000000000000003"
+               BuildableName = "MuseKit.framework"
+               BlueprintName = "MuseKit"
+               ReferencedContainer = "container:Muse.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "YES"
+            buildForProfiling = "YES"
+            buildForArchiving = "YES"
+            buildForAnalyzing = "YES">
+            <BuildableReference
+               BuildableIdentifier = "primary"
                BlueprintIdentifier = "AC0000000000000000000001"
                BuildableName = "Muse.app"
                BlueprintName = "Muse"

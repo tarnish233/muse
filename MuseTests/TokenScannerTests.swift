@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+@testable import MuseKit
 
 /// M0 版扫描器的行为契约：字节区间的精确性由这些测试固化。
 @Suite struct TokenScannerTests {

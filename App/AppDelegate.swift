@@ -1,8 +1,24 @@
 import AppKit
+import SwiftUI
+import MuseKit
 
 /// NSDocument 生命周期应用（M1）：不手动建窗口，开存由 NSDocumentController 管理。
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        MuseDocument.windowControllerFactory = { document in
+            let hosting = NSHostingController(rootView: EditorShellView(document: document))
+            let window = NSWindow(contentViewController: hosting)
+            window.setContentSize(NSSize(width: 960, height: 660))
+            window.minSize = NSSize(width: 480, height: 320)
+            window.title = document.displayName
+            window.isReleasedWhenClosed = false
+            let controller = NSWindowController(window: window)
+            window.makeKeyAndOrderFront(nil)
+            return controller
+        }
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.mainMenu = buildMainMenu()
         NSApp.activate(ignoringOtherApps: true)

@@ -1,4 +1,5 @@
 import AppKit
+import MuseKit
 
 /// M1：编辑视图。手工搭建 TextKit 2 栈，把文档的单一 NSTextStorage 挂进编辑面
 /// （v0.2 数据所有权边界：EditorBuffer.textStorage 是唯一可变正文）。

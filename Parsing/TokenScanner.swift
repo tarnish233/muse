@@ -14,13 +14,13 @@ import Foundation
 /// - 链接标签/目的地边界由 MarkdownSemantics 提供，本扫描器只消费保护区间；
 /// - 软换行内嵌套块的精确语义以差异测试与 AST 对齐为准。
 /// nonisolated：在后台解析任务中运行。
-nonisolated struct TokenScanner {
-    struct Line {
+public nonisolated struct TokenScanner {
+    public struct Line {
         /// 本行内容 [start, end)，不含换行符；next 为下一行起点（= end + 换行宽度）。
-        let start: Int
-        let end: Int
-        let next: Int
-        let index: Int
+        public let start: Int
+        public let end: Int
+        public let next: Int
+        public let index: Int
     }
 
     /// - Parameters:
@@ -30,7 +30,9 @@ nonisolated struct TokenScanner {
     ///     由 swift-markdown AST 提供的结构行。CommonMark 的列表/引用可以有
     ///     超过 3 个空格或使用 tab 缩进；扫描器只在 AST 已确认的行上放宽缩进，
     ///     避免把普通缩进代码误判为列表。
-    func scan(
+    public init() {}
+
+    public func scan(
         _ source: String,
         excludingRanges: [Range<Int>] = [],
         semanticListLines: Set<Int> = [],
@@ -108,7 +110,7 @@ nonisolated struct TokenScanner {
     // MARK: - 行结构
 
     /// 每行字节区间，供渲染层计算"光标所在行"。
-    func lines(_ source: String) -> [Line] {
+    public func lines(_ source: String) -> [Line] {
         computeLines(Array(source.utf8))
     }
 

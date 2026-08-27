@@ -2,8 +2,8 @@ import AppKit
 import SwiftUI
 
 /// 新文档的默认示例（打开已有文件时会被内容整体覆盖；M1 后移入欢迎页）。
-enum SampleMarkdown {
-    static let text = """
+public enum SampleMarkdown {
+    public static let text = """
     # Muse · M0 技术验证
 
     这是一份用于验证「即时渲染」的示例文档。原则：**渲染只写属性，不改字符**。

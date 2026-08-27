@@ -1,5 +1,6 @@
 import AppKit
 import Testing
+@testable import MuseKit
 
 /// M0 性能基准：20KB / 200KB（混合中文 + markdown 构造）的
 /// 「扫描 + 索引」与「属性批量应用」耗时。目标（v0.2 4.6）不作为断言门槛，

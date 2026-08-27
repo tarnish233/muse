@@ -1,6 +1,6 @@
 import AppKit
 import Testing
-@testable import Muse
+@testable import MuseKit
 
 /// 协调器管线：并发编辑、结构变更与陈旧样式（第二轮复审 P1 项的回归测试）。
 /// 这些场景不直接操作引擎层，而是走"编辑回调 → 后台解析 → 应用"的真实路径。

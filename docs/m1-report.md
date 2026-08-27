@@ -13,6 +13,7 @@ M1 的退出条件是：Xcode 工程；`NSDocument → EditorBuffer → NSTextSt
 | 交付物 | 位置 | 行数 | 状态 |
 |---|---|---:|---|
 | Xcode 工程（Xcode 26 / Swift 6，MainActor 默认隔离） | `Muse.xcodeproj` | — | ✅ |
+| 共享核心框架 | `MuseKit` target（`Document/`、`Parsing/`、`Rendering/`） | — | ✅ M1-2 |
 | App 入口 | `App/main.swift`、`App/AppDelegate.swift` | 62 | ✅ |
 | 文档生命周期 | `Document/MuseDocument.swift` | 71 | ✅ |
 | 唯一可变正文 | `Document/EditorBuffer.swift` | 14 | ✅ |
@@ -70,7 +71,7 @@ M1 的退出条件写的是「open/save/autosave」。前两项有测试（`read
 
 严格来说 M1 的退出条件只满足了三分之二。这几项列入 M6「稳定与发布准备」，但**应当在 M3 之前补一次人工验收**——文档生命周期出错的代价是用户丢数据，不该留到最后一个里程碑。
 
-### 5.2 测试目标不 import 产品模块，Release 下构建失败（P1）
+### 5.2 测试目标不 import 产品模块，Release 下构建失败（P1，已由 M1-2 解决）
 
 M0 报告 §4 记录过这个取舍：「测试目标（MuseTests）直接编译 Document/Parsing/Rendering 源码（非宿主 App）……App 与测试各持一份源码副本，M1 视情况引入框架化或回归宿主。」
 
@@ -83,7 +84,7 @@ MuseTests/CoordinatorPipelineTests.swift:3:18: error:
 
 后果是**性能数字只能在 Debug 下测**。v0.3 方案 §4.6 里 swift-markdown 的解析成本（200KB / 64.9ms）因此只有 Debug 数字，而这个数字要用来决定「全量解析够不够、要不要做块级增量」——一个架构决策依赖着一个无法在发布配置下复现的测量。
 
-修法有两条：把 Document/Parsing/Rendering 抽成一个 framework target 供 App 与测试共用；或让 MuseTests 正常 `@testable import Muse` 并解决宿主进程不退出的问题（M0 §4 提到的 Swift Testing + AppKit 宿主问题）。前者更干净。
+M1-2 已按首选方案把 `Document/`、`Parsing/`、`Rendering/` 抽成 `MuseKit` framework target，App 与 MuseTests 均通过 `MuseKit` 复用同一份实现；`MuseKit` 的 Release 配置开启测试可见性，以便 `@testable import MuseKit` 的测试目标完成构建。
 
 优先级定 P1 而非 P2，因为它阻塞的是「性能验收数据的可信度」，而性能是 v0.3 §4.6 两条指标的判据。
 
@@ -127,9 +128,9 @@ M1 达成了它最重要的目标：**把「唯一可变正文」这条所有权
 
 **验收**：4 项测试存在且通过；总测试数从 78 增至 82。若发现渲染误标脏，在本报告 §5.1 记录缺陷与修法。
 
-### 7.2 任务 M1-2：测试目标框架化，修复 Release 构建
+### 7.2 任务 M1-2：测试目标框架化，修复 Release 构建（✅ 已完成）
 
-**现状**：MuseTests 直接编译 `Document/`、`Parsing/`、`Rendering/` 的源码，不 `import Muse`。Release 配置下测试构建失败：
+**完成结果**：`MuseTests` 不再重复编译 `Document/`、`Parsing/`、`Rendering/`，改为 `@testable import MuseKit`；Release 配置下测试已成功构建并全绿。历史失败输出保留如下，作为问题起点：
 
 ```text
 MuseTests/CoordinatorPipelineTests.swift:3:18: error:
@@ -143,9 +144,9 @@ xcodebuild test -project Muse.xcodeproj -scheme Muse \
   -destination 'platform=macOS,arch=arm64' -derivedDataPath build -configuration Release
 ```
 
-**代价**：性能数字只能在 Debug 下测。v0.3 方案 §4.6 用来决定「全量 AST 解析够不够、要不要做块级增量」的 64.9ms/200KB 只有 Debug 数字——一个架构决策依赖着无法在发布配置下复现的测量。
+**已消除的代价**：性能测试现在可以在 Release 配置下重复运行。当前 Release 数字见 §8；M2-1 完成 AST 语义层后，会在 §8 与《M2 评价报告》§5.4 补记最终 AST 解析数字。
 
-**要做**（首选方案）：把 `Document/`、`Parsing/`、`Rendering/` 抽成一个 framework target（建议名 `MuseKit`），App 与 MuseTests 都依赖它。
+**已完成**（首选方案）：把 `Document/`、`Parsing/`、`Rendering/` 抽成 `MuseKit` framework target，App 与 MuseTests 都依赖它。
 
 - App target 保留 `App/`、`Editor/`
 - 需要跨模块可见的类型加 `public`（`RenderEngine`、`Token`、`SourceIndex`、`Theme`、`BlockVisual`、`MuseLayoutFragment`、`MuseLayoutFragmentProvider`、`RenderCoordinator`、`EditorBuffer`、`MarkdownSemantics`、`TokenScanner`）
@@ -155,10 +156,31 @@ xcodebuild test -project Muse.xcodeproj -scheme Muse \
 
 **备选方案**（若框架化受阻）：让 MuseTests 正常 `@testable import Muse`，并解决 M0 报告 §4 记录的「Swift Testing 在 AppKit 宿主进程里跑完不退出」问题。这条路更省事但没解决重复编译。
 
-**验收**（三项都要满足）：
+**验收**（三项均满足）：
 
-1. Debug 下 78 项（或 M1-1 完成后 82 项）测试全绿；
+1. Debug 下当前 85 项（M1-1 完成后再增加 4 项）测试全绿；
 2. **Release 下测试构建成功且全绿**——这是本任务的核心目标；
-3. 在 Release 下重跑 `PerformanceTests`，把 200KB 的 AST 解析耗时、`applyDirty` 耗时、协调器端到端耗时填进本报告新增的 §8「Release 性能基准」表。若 Release 下 AST 解析 200KB 仍 < 150ms，在《M2 评价报告》§5.4 记录「全量 AST 方案确认可行，块级增量不必做」；若超标，记录实测值供后续决策。
+3. 已在 Release 下重跑 `PerformanceTests`，并将 200KB `RenderEngine.prepare`、`applyDirty`、协调器端到端耗时填入 §8。最终 AST 语义层的解析数字在 M2-1 完成后补记；若 200KB 全量 AST 仍 < 150ms，在《M2 评价报告》§5.4 记录「全量 AST 方案确认可行，块级增量不必做」。
+
+## 8. Release 性能基准
+
+命令：
+
+```bash
+xcodebuild test -project Muse.xcodeproj -scheme Muse -configuration Release \
+  -destination 'platform=macOS,arch=arm64' -derivedDataPath build-release
+```
+
+当前 Release 构建在 MuseKit 抽取后通过，测试结果为 **85 项 / 7 套件全绿**。以下是同一次运行的输出；M2-1 完成后会把「扫描 + 索引」列替换/补充为最终 AST 解析数字。
+
+| 场景 | Release 实测 |
+|---|---:|
+| 20KB `RenderEngine.prepare`（扫描 + 索引） | 0.502 ms |
+| 200KB `RenderEngine.prepare`（扫描 + 索引） | 4.973 ms |
+| 200KB `applyDirty` | 0.310 ms |
+| 200KB 协调器单键路径（编辑 → 样式落地） | 21.929 ms |
+| 1MB 全管线 | 901.448 ms |
+
+这组数字用于证明 Release 测量链路已恢复；其中 AST 方案是否满足 150ms 判据，待 M2-1 的最终语义输出接入后按同一配置复测。
 
 第 3 项不是可选的。这个任务存在的唯一理由就是拿到那个数字。

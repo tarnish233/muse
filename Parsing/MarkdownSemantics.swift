@@ -4,45 +4,62 @@ import Markdown
 /// swift-markdown 语义层（v0.2 §4.1）：AST 回答"这段内容是什么"，
 /// TokenScanner 回答"精确的标记字符在哪"。在后台解析任务中构建，
 /// 只提取 Sendable 的纯值信息；本层不触碰 AppKit/存储。
-nonisolated struct MarkdownSemantics: Sendable {
+public nonisolated struct MarkdownSemantics: Sendable {
     /// 行级块分类（0-based 行号），供差异测试与后续增量渲染使用。
-    struct LineKind: Sendable, Equatable {
-        enum Kind: Sendable, Equatable {
+    public struct LineKind: Sendable, Equatable {
+        public enum Kind: Sendable, Equatable {
             case heading(Int)  // ATX 级别
             case quote
             case list
             case fence        // 围栏体内（含开/闭栏行）
         }
 
-        let line: Int
-        let kind: Kind
+        public let line: Int
+        public let kind: Kind
+
+        public init(line: Int, kind: Kind) {
+            self.line = line
+            self.kind = kind
+        }
     }
 
     /// 行内链接语法定位（均为 UTF-8 字节偏移）。
-    struct LinkSyntax: Sendable, Equatable {
+    public struct LinkSyntax: Sendable, Equatable {
         /// `[`（单字节）
-        let openBracket: Range<Int>
+        public let openBracket: Range<Int>
         /// 标签内容
-        let label: Range<Int>
+        public let label: Range<Int>
         /// `]` 到 `)` 的整段（标记隐藏时连同目的地一起隐藏）
-        let tail: Range<Int>
+        public let tail: Range<Int>
         /// 目的地（tail 内部）
-        let destination: Range<Int>
+        public let destination: Range<Int>
         /// 行内扫描的保护区间（tail）——强调分隔符不进入 URL 区域配对
-        var inertRanges: [Range<Int>] { [tail] }
+        public var inertRanges: [Range<Int>] { [tail] }
+
+        public init(
+            openBracket: Range<Int>,
+            label: Range<Int>,
+            tail: Range<Int>,
+            destination: Range<Int>
+        ) {
+            self.openBracket = openBracket
+            self.label = label
+            self.tail = tail
+            self.destination = destination
+        }
     }
 
-    let lineKinds: [LineKind]
-    let links: [LinkSyntax]
+    public let lineKinds: [LineKind]
+    public let links: [LinkSyntax]
     /// AST 判定出的结构行，供 TokenScanner 在需要时扩大缩进识别范围。
     ///
     /// 例如 CommonMark 允许列表嵌套在 4 个以上空格之后；扫描器本身不复制块解析规则，
     /// 只在 AST 已确认该行属于对应结构时消费这些行级提示。
-    let listItemLines: Set<Int>
-    let quoteLines: Set<Int>
-    let fenceLines: Set<Int>
+    public let listItemLines: Set<Int>
+    public let quoteLines: Set<Int>
+    public let fenceLines: Set<Int>
 
-    init(_ source: String) {
+    public init(_ source: String) {
         let bytes = Array(source.utf8)
         let lineStarts = TokenScanner().lines(source).map(\.start)
         let document = Document(parsing: source)

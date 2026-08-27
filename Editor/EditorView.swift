@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import MuseKit
 
 /// SwiftUI ↔ AppKit 桥。SwiftUI 只承载结构（窗口内容/状态栏），
 /// 编辑面仍是 EditorTextView；禁止在 updateNSView 中回写整篇正文。

@@ -1,5 +1,6 @@
 import AppKit
 import Testing
+@testable import MuseKit
 
 /// 渲染层契约：只写属性不改字符；marker 隐藏/回显规则；中文/emoji 区间正确性。
 @Suite @MainActor struct RendererTests {

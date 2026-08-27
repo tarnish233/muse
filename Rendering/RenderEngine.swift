@@ -7,21 +7,32 @@ import AppKit
 /// - `render`：整篇全量应用（首次装载/基准测试；同步）。
 /// - `applyDirty`：只重置+重排受影响行的属性（输入热路径；配合后台解析见 RenderCoordinator）。
 /// 行级粒度与线式 tokenizer 一致（行内语法以行为界），是"变化块增量"的第一版近似。
-struct RenderEngine {
+public struct RenderEngine {
     /// 后台解析产物：纯值、Sendable，可跨线程（v0.2 RenderSnapshot 的第一版形态）。
-    nonisolated struct Package: Sendable {
-        let tokens: [Token]
-        let index: SourceIndex
+    public nonisolated struct Package: Sendable {
+        public let tokens: [Token]
+        public let index: SourceIndex
         /// 每行起点的 UTF-8 字节偏移。
-        let lineStarts: [Int]
+        public let lineStarts: [Int]
+
+        public init(tokens: [Token], index: SourceIndex, lineStarts: [Int]) {
+            self.tokens = tokens
+            self.index = index
+            self.lineStarts = lineStarts
+        }
     }
 
-    struct Stats {
-        let tokenCount: Int
+    public struct Stats {
+        public let tokenCount: Int
+
+        public init(tokenCount: Int) {
+            self.tokenCount = tokenCount
+        }
     }
 
-    private let scanner = TokenScanner()
     private let theme = Theme.standard
+
+    public init() {}
 
     /// 表驱动行内样式合并：需要"在既有字体上叠特征"的 token 类型。
     private enum FontMerge {
@@ -31,7 +42,8 @@ struct RenderEngine {
 
     // MARK: - 输入（后台）
 
-    nonisolated func prepare(_ source: String) -> Package {
+    public nonisolated func prepare(_ source: String) -> Package {
+        let scanner = TokenScanner()
         // AST 先于扫描器：链接语法给出行内扫描的保护区间（URL 区域不做强调配对），
         // 同时提供块结构的行级事实（尤其是深层列表/引用的缩进）。
         // 先做一次极轻量的候选行检查，普通纯文本不必为链接/块语义付全文档解析成本；
@@ -67,6 +79,7 @@ struct RenderEngine {
     /// 链接仍沿用原有的 `[` 快速路径；普通的 ≤3 空格块由扫描器直接定位，
     /// 只有可能超出扫描器简化规则的深层/Tab 缩进才需要 AST 介入。
     private nonisolated func needsMarkdownSemantics(_ source: String) -> Bool {
+        let scanner = TokenScanner()
         if source.contains("[") {
             return true
         }
@@ -116,7 +129,7 @@ struct RenderEngine {
 
     // MARK: - 全量渲染（首次装载/基准）
 
-    func render(package: Package, selection: NSRange?, into storage: NSTextStorage) -> Stats {
+    public func render(package: Package, selection: NSRange?, into storage: NSTextStorage) -> Stats {
         let full = NSRange(location: 0, length: storage.length)
 
         storage.beginEditing()
@@ -139,7 +152,7 @@ struct RenderEngine {
     /// - 旧/新 package 中与脏区相接的围栏整块：开/闭栏符增删会改变后续多行语义；
     /// - 脏区邻近的引用归属变化行。
     @discardableResult
-    func applyDirty(
+    public func applyDirty(
         package: Package,
         previousPackage: Package?,
         utf16Range: NSRange,
@@ -219,22 +232,22 @@ struct RenderEngine {
     /// - `.hidden`：折叠隐藏（近零宽 + 透明），行内标记与引用/围栏/分隔线标记用；
     /// - `.ghost`：保留宽度的隐形（列表/任务标记）——内容位置不变，
     ///   图形符号（圆点/序号/复选框）由 MuseLayoutFragment 在同一位置绘制。
-    enum MarkerState: Equatable {
+    public enum MarkerState: Equatable {
         case revealed
         case hidden
         case ghost
     }
 
-    struct VisibilityEntry {
-        let line: Int
+    public struct VisibilityEntry {
+        public let line: Int
         /// marker 起点相对所在行起点的字节偏移（稳定身份：插入字符不改变它）。
-        let markerRelOffset: Int
-        let markerNS: NSRange
-        let state: MarkerState
+        public let markerRelOffset: Int
+        public let markerNS: NSRange
+        public let state: MarkerState
     }
 
     /// 纯函数：给定 package 与选区，计算所有 marker 的显隐状态。不触碰 storage。
-    func computedVisibility(package: Package, selection: NSRange?) -> [VisibilityEntry] {
+    public func computedVisibility(package: Package, selection: NSRange?) -> [VisibilityEntry] {
         func makeEntries(_ token: Token, state: MarkerState) -> [VisibilityEntry] {
             token.allMarkerRanges.map { range in
                 VisibilityEntry(
@@ -287,11 +300,11 @@ struct RenderEngine {
     }
 
     /// 显隐相关属性表（协调器 diff 后写入）。
-    static func markerVisibilityAttributes(revealed: Bool) -> [NSAttributedString.Key: Any] {
+    public static func markerVisibilityAttributes(revealed: Bool) -> [NSAttributedString.Key: Any] {
         markerVisibilityAttributes(state: revealed ? .revealed : .hidden)
     }
 
-    static func markerVisibilityAttributes(state: MarkerState) -> [NSAttributedString.Key: Any] {
+    public static func markerVisibilityAttributes(state: MarkerState) -> [NSAttributedString.Key: Any] {
         let theme = Theme.standard
         switch state {
         case .revealed:

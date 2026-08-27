@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+@testable import MuseKit
 
 /// P0 风险项：UTF-8 字节偏移 ↔ UTF-16 偏移的转换正确性。
 /// 覆盖中文、emoji、ZWJ 序列、组合字符、CRLF 与边界情况。

@@ -3,7 +3,7 @@ import AppKit
 /// 块级视觉标记：渲染引擎把它作为自定义属性写入整行/整块范围，
 /// 布局层的 MuseLayoutFragment 据此决定绘制内容（引用竖线、通宽背景、分隔线横线）。
 /// 与样式状态严格一致（随属性应用写、随脏带重置清）。
-enum BlockVisual: String {
+public enum BlockVisual: String {
     case quote
     case codeFence
     case rule
@@ -14,7 +14,7 @@ enum BlockVisual: String {
 extension NSAttributedString.Key {
     /// nonisolated：块视觉的 fragment（MuseLayoutFragment）在 nonisolated 的
     /// 度量路径（renderingSurfaceBounds）里也要读它。Key 本身是 Sendable。
-    nonisolated static let museBlock = NSAttributedString.Key("museBlock")
+    public nonisolated static let museBlock = NSAttributedString.Key("museBlock")
 }
 
 /// 主题：字体与配色。亮/暗跟随系统外观（动态 NSColor）。
@@ -22,20 +22,20 @@ extension NSAttributedString.Key {
 /// nonisolated + Sendable：块视觉在 `NSTextLayoutFragment` 的 nonisolated
 /// 绘制/度量接口里取用主题。NSColor / NSFont 都是不可变且线程安全的，
 /// 主题本身只读，跨隔离域读取无竞争。
-nonisolated struct Theme: @unchecked Sendable {
-    let text: NSColor
-    let mutedText: NSColor
-    let codeText: NSColor
-    let codeBackground: NSColor
-    let linkColor: NSColor
-    let quoteText: NSColor
-    let quoteBackground: NSColor
-    let markerText: NSColor
-    let borderColor: NSColor
+public nonisolated struct Theme: @unchecked Sendable {
+    public let text: NSColor
+    public let mutedText: NSColor
+    public let codeText: NSColor
+    public let codeBackground: NSColor
+    public let linkColor: NSColor
+    public let quoteText: NSColor
+    public let quoteBackground: NSColor
+    public let markerText: NSColor
+    public let borderColor: NSColor
 
-    let baseSize: CGFloat = 16
+    public let baseSize: CGFloat = 16
 
-    static let standard = Theme(
+    public static let standard = Theme(
         text: adaptive(light: NSColor(calibratedWhite: 0.13, alpha: 1),
                        dark: NSColor(calibratedWhite: 0.93, alpha: 1)),
         mutedText: adaptive(light: NSColor(calibratedWhite: 0.42, alpha: 1),
@@ -58,14 +58,14 @@ nonisolated struct Theme: @unchecked Sendable {
 
     // MARK: - 字体
 
-    func baseFont() -> NSFont { NSFont.systemFont(ofSize: baseSize) }
-    func boldFont() -> NSFont { NSFont.systemFont(ofSize: baseSize, weight: .semibold) }
+    public func baseFont() -> NSFont { NSFont.systemFont(ofSize: baseSize) }
+    public func boldFont() -> NSFont { NSFont.systemFont(ofSize: baseSize, weight: .semibold) }
 
     /// 在既有字体上合并字形特征（如强调嵌套在粗体内时应得到粗斜体，而不是覆盖成斜体）。
     /// NSFontManager.convert 只能可靠地从"基础 face"出发一次性加特征（从中间态再 convert
     /// 会静默丢失特征，如 RegularItalic→加粗 仍返回 RegularItalic），
     /// 因此先剥离粗/斜特征归一化，再一次性加上目标组合。
-    func derivedFont(from base: NSFont, adding trait: NSFontTraitMask) -> NSFont {
+    public func derivedFont(from base: NSFont, adding trait: NSFontTraitMask) -> NSFont {
         let manager = NSFontManager.shared
         // 目标组合从原始字体计算；归一化后再一次性应用（从中间态 convert 会静默丢特征）。
         let desired = manager.traits(of: base).union(trait)
@@ -75,45 +75,45 @@ nonisolated struct Theme: @unchecked Sendable {
         )
         return manager.convert(normalized, toHaveTrait: desired)
     }
-    func italicFont() -> NSFont {
+    public func italicFont() -> NSFont {
         let base = NSFont.systemFont(ofSize: baseSize)
         let descriptor = base.fontDescriptor.withSymbolicTraits(.italic)
         return NSFont(descriptor: descriptor, size: baseSize) ?? base
     }
-    func titleFont(level: Int) -> NSFont {
+    public func titleFont(level: Int) -> NSFont {
         let sizeByLevel: [CGFloat] = [28, 24, 20, 18, 16.5, 16]
         let size = sizeByLevel[max(0, min(level - 1, 5))]
         return NSFont.systemFont(ofSize: size, weight: .bold)
     }
-    func codeFont() -> NSFont { NSFont.monospacedSystemFont(ofSize: baseSize - 1, weight: .regular) }
+    public func codeFont() -> NSFont { NSFont.monospacedSystemFont(ofSize: baseSize - 1, weight: .regular) }
     /// marker 隐藏用：近零宽 + 透明。M0 验证项：观察是否产生可见留白。
-    func hiddenMarkerFont() -> NSFont { NSFont.monospacedSystemFont(ofSize: 0.1, weight: .regular) }
-    func revealedMarkerFont() -> NSFont { NSFont.monospacedSystemFont(ofSize: baseSize - 1, weight: .regular) }
+    public func hiddenMarkerFont() -> NSFont { NSFont.monospacedSystemFont(ofSize: 0.1, weight: .regular) }
+    public func revealedMarkerFont() -> NSFont { NSFont.monospacedSystemFont(ofSize: baseSize - 1, weight: .regular) }
 
     // MARK: - 段落
 
-    func baseParagraph() -> NSMutableParagraphStyle {
+    public func baseParagraph() -> NSMutableParagraphStyle {
         let p = NSMutableParagraphStyle()
         p.lineHeightMultiple = 1.3
         p.paragraphSpacing = 6
         return p
     }
 
-    func headingParagraph(level: Int) -> NSMutableParagraphStyle {
+    public func headingParagraph(level: Int) -> NSMutableParagraphStyle {
         let p = baseParagraph()
         p.paragraphSpacingBefore = level <= 2 ? 12 : 6
         p.paragraphSpacing = 4
         return p
     }
 
-    func quoteParagraph() -> NSMutableParagraphStyle {
+    public func quoteParagraph() -> NSMutableParagraphStyle {
         let p = baseParagraph()
         p.firstLineHeadIndent = 18
         p.headIndent = 18
         return p
     }
 
-    func listParagraph() -> NSMutableParagraphStyle {
+    public func listParagraph() -> NSMutableParagraphStyle {
         let p = baseParagraph()
         p.paragraphSpacing = 3
         // 悬挂缩进（Typora 视觉）：marker 在行首，换行对齐内容列。
@@ -123,7 +123,7 @@ nonisolated struct Theme: @unchecked Sendable {
         return p
     }
 
-    func ruleParagraph() -> NSMutableParagraphStyle {
+    public func ruleParagraph() -> NSMutableParagraphStyle {
         let p = baseParagraph()
         p.paragraphSpacingBefore = 10
         p.paragraphSpacing = 10
@@ -145,19 +145,19 @@ nonisolated struct Theme: @unchecked Sendable {
 /// `NSTextLayoutFragment` 的绘制回调不保证建立了正确的
 /// `NSAppearance.current`，而 TextKit 还可能缓存并复用 fragment。颜色不能在
 /// fragment 内直接从动态 `NSColor` 取 `cgColor`，否则外观切换后可能静默回落亮色。
-nonisolated struct BlockVisualPaletteSnapshot: @unchecked Sendable {
-    let quoteBackground: CGColor
-    let codeBackground: CGColor
-    let marker: CGColor
-    let border: CGColor
+public nonisolated struct BlockVisualPaletteSnapshot: @unchecked Sendable {
+    public let quoteBackground: CGColor
+    public let codeBackground: CGColor
+    public let marker: CGColor
+    public let border: CGColor
 }
 
 /// 块视觉调色板的唯一共享实例。
 ///
 /// fragment 的接口是 nonisolated，读写不能依赖 MainActor；外观变化时替换快照
 /// 内容，所有存活 fragment 都会在下一次绘制时读取当前外观的颜色。
-nonisolated final class BlockVisualPalette: @unchecked Sendable {
-    static let shared = BlockVisualPalette()
+public nonisolated final class BlockVisualPalette: @unchecked Sendable {
+    public static let shared = BlockVisualPalette()
 
     private let lock = NSLock()
     private var current: BlockVisualPaletteSnapshot
@@ -167,13 +167,13 @@ nonisolated final class BlockVisualPalette: @unchecked Sendable {
         current = Self.snapshot(for: appearance)
     }
 
-    func snapshot() -> BlockVisualPaletteSnapshot {
+    public func snapshot() -> BlockVisualPaletteSnapshot {
         lock.lock()
         defer { lock.unlock() }
         return current
     }
 
-    func update(for appearance: NSAppearance) {
+    public func update(for appearance: NSAppearance) {
         let next = Self.snapshot(for: appearance)
         lock.lock()
         current = next

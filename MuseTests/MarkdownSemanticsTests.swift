@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+@testable import MuseKit
 
 /// M2：swift-markdown 语义层 —— 链接锚点与 scanner↔AST 行级块分类的差异测试。
 @Suite struct MarkdownSemanticsTests {

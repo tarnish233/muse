@@ -3,8 +3,8 @@ import Foundation
 /// 源码 token。所有范围均为 UTF-8 字节偏移（与 swift-markdown/cmark 同一坐标系），
 /// 输出端经 SourceIndex 转成 UTF-16 NSRange 后才交给 AppKit。
 /// nonisolated：token 在后台解析（v0.2 并发与性能）与主线程渲染之间传递。
-nonisolated struct Token: Equatable, Sendable {
-    enum Kind: Equatable, Sendable {
+public nonisolated struct Token: Equatable, Sendable {
+    public enum Kind: Equatable, Sendable {
         case heading(level: Int)
         case unorderedListItem
         case orderedListItem
@@ -19,27 +19,43 @@ nonisolated struct Token: Equatable, Sendable {
         case rule
     }
 
-    let kind: Kind
+    public let kind: Kind
     /// 起始标记字符的字节区间（`**`、`# `、`- ` …）。
-    let markerRange: Range<Int>
+    public let markerRange: Range<Int>
     /// 闭合标记区间，仅行内 token（`**`、`*`、`` ` ``、`~~` 的收尾分隔符）有值。
     /// 链接的闭合标记为 `](` 到 `)` 的整段（隐藏目的地）。
-    let closingMarkerRange: Range<Int>?
+    public let closingMarkerRange: Range<Int>?
     /// 内容区间。块级 token 为整行内容；行内 token 为两个分隔符之间。空 token 为 nil。
-    let contentRange: Range<Int>?
+    public let contentRange: Range<Int>?
     /// 链接目的地字节区间（仅 .link）。
-    var linkDestination: Range<Int>? = nil
+    public var linkDestination: Range<Int>? = nil
     /// 所属行（0-based，按 \n 分隔）。
-    let line: Int
+    public let line: Int
+
+    public init(
+        kind: Kind,
+        markerRange: Range<Int>,
+        closingMarkerRange: Range<Int>? = nil,
+        contentRange: Range<Int>? = nil,
+        linkDestination: Range<Int>? = nil,
+        line: Int
+    ) {
+        self.kind = kind
+        self.markerRange = markerRange
+        self.closingMarkerRange = closingMarkerRange
+        self.contentRange = contentRange
+        self.linkDestination = linkDestination
+        self.line = line
+    }
 
     /// 两个标记区间的总览（块级只有一个）。
-    var allMarkerRanges: [Range<Int>] {
+    public var allMarkerRanges: [Range<Int>] {
         if let closingMarkerRange { return [markerRange, closingMarkerRange] }
         return [markerRange]
     }
 
     /// marker 是否属于块级（其显隐由"光标是否在本行/块内"决定，而非选区相交）。
-    var isBlockMarker: Bool {
+    public var isBlockMarker: Bool {
         switch kind {
         case .heading, .unorderedListItem, .orderedListItem, .taskListItem, .blockquote, .codeFence, .rule:
             return true

@@ -10,13 +10,17 @@ import Combine
 /// 属性修改全程包在 undo 抑制中（v0.2 4.5：渲染属性不进入撤销栈，
 /// 文本撤销后由编辑回调自动重算渲染）。
 @MainActor
-final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageDelegate {
-    @Published private(set) var statusText = "尚未渲染"
+public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageDelegate {
+    @Published public private(set) var statusText = "尚未渲染"
+
+    public override init() {
+        super.init()
+    }
 
     private let engine = RenderEngine()
     private var revision = 0
     private var parseTask: Task<Void, Never>?
-    private(set) var lastPackage: RenderEngine.Package?
+    public private(set) var lastPackage: RenderEngine.Package?
     private var isApplyingAttributes = false
     /// 自上一次属性应用以来累计的字符编辑数。
     /// 为 0 时 lastPackage 与正文一致，光标流可安全使用；>0 时包已过期，只做增量。
@@ -25,18 +29,18 @@ final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageDelegate
     private let clock = ContinuousClock()
 
     /// 最近一次已应用渲染对应的文本 revision（测试与状态展示用）。
-    private(set) var appliedRevision = 0
+    public private(set) var appliedRevision = 0
     /// 最近一次显隐 reconcile 实际写入的 marker 数（测试插桩：验证"只写翻转项"）。
-    private(set) var lastReconcileWriteCount = 0
+    public private(set) var lastReconcileWriteCount = 0
 
     /// 编辑面（弱引用，用于读取选区与 marked text 状态）。
-    weak var textView: NSTextView?
+    public weak var textView: NSTextView?
     /// 唯一正文存储（弱引用；由文档装配）。
-    private(set) weak var textStorage: NSTextStorage?
+    public private(set) weak var textStorage: NSTextStorage?
     /// 文本被编辑后回调（文档层用它 updateChangeCount）。
-    var onTextEdited: (() -> Void)?
+    public var onTextEdited: (() -> Void)?
 
-    func attach(storage: NSTextStorage) {
+    public func attach(storage: NSTextStorage) {
         textStorage = storage
         // 生产路径由 MuseDocument 设置；这里兜底保证管线挂上（测试与文档装配都走 attach）。
         storage.delegate = self
@@ -53,7 +57,7 @@ final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageDelegate
 
     /// 字符编辑后：登记脏区并调度后台解析；属性变更（editedAttributes）不重入；
     /// 组合输入（marked text）期间跳过，上屏后的下一次编辑会触发。
-    func textStorage(
+    public func textStorage(
         _ textStorage: NSTextStorage,
         didProcessEditing editedMask: NSTextStorageEditActions,
         range editedRange: NSRange,
@@ -126,7 +130,7 @@ final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageDelegate
     /// 选区变化时调用：只写入显隐状态实际翻转的 marker，不重解析。
     /// 字符编辑后、后台解析应用前，lastPackage 对应旧文本（复审 P1-2）——
     /// 此时跳过光标流，避免用旧区间向新存储写属性；应用落地时已按最新选区重算。
-    func updateMarkerVisibility(selection: NSRange?, into storage: NSTextStorage) {
+    public func updateMarkerVisibility(selection: NSRange?, into storage: NSTextStorage) {
         guard !isApplyingAttributes, editsSinceApply == 0 else { return }
         guard let package = lastPackage else { return }
         suppressUndo {
@@ -136,7 +140,7 @@ final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageDelegate
     }
 
     /// 编辑视图挂接后调用：用真实选区补齐首次显隐（初始渲染发生在 textView 存在之前）。
-    func refreshMarkerVisibility(into storage: NSTextStorage) {
+    public func refreshMarkerVisibility(into storage: NSTextStorage) {
         guard !isApplyingAttributes, editsSinceApply == 0 else { return }
         guard let package = lastPackage else { return }
         suppressUndo {
@@ -146,7 +150,7 @@ final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageDelegate
     }
 
     /// 供测试直接注入已解析的 package（正常路径由编辑流自动写入）。
-    func adoptPackage(_ package: RenderEngine.Package) {
+    public func adoptPackage(_ package: RenderEngine.Package) {
         lastPackage = package
     }
 

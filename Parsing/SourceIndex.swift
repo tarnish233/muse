@@ -8,17 +8,17 @@ import Foundation
 /// 非标量边界（落在多字节字符中间、或 surrogate 对中间）的查询按"向下取整到所在标量起点"处理，
 /// 由调用方保证 token 边界落在标量边界（tokenizer 只识别 ASCII 标记，天然满足）。
 /// nonisolated：在后台解析任务中构建与查询。
-nonisolated struct SourceIndex: Sendable {
+public nonisolated struct SourceIndex: Sendable {
     private struct Entry: Sendable {
         let utf8: Int
         let utf16: Int
     }
 
     private let entries: [Entry]
-    let utf8Length: Int
-    let utf16Length: Int
+    public let utf8Length: Int
+    public let utf16Length: Int
 
-    init(_ string: String) {
+    public init(_ string: String) {
         let bytes = Array(string.utf8)
         var entries: [Entry] = []
         entries.reserveCapacity(bytes.count / 2 + 2)
@@ -51,13 +51,13 @@ nonisolated struct SourceIndex: Sendable {
     // MARK: - UTF-8 → UTF-16
 
     /// 字节偏移 → UTF-16 偏移。非边界位置向下取整到所在标量起点；越界钳制到两端。
-    func utf16Offset(_ utf8: Int) -> Int {
+    public func utf16Offset(_ utf8: Int) -> Int {
         let clamped = min(max(utf8, 0), utf8Length)
         // 向下取整到所在标量起点（落在多字节字符中间时归属该字符）。
         return floorEntry(byUTF8: clamped).utf16
     }
 
-    func nsRange(_ utf8Range: Range<Int>) -> NSRange {
+    public func nsRange(_ utf8Range: Range<Int>) -> NSRange {
         let lower = utf16Offset(utf8Range.lowerBound)
         let upper = utf16Offset(utf8Range.upperBound)
         return NSRange(location: lower, length: upper - lower)
@@ -66,12 +66,12 @@ nonisolated struct SourceIndex: Sendable {
     // MARK: - UTF-16 → UTF-8
 
     /// UTF-16 偏移 → 字节偏移。落在 surrogate 对中间时向下取整到该标量起点。
-    func utf8Offset(_ utf16: Int) -> Int {
+    public func utf8Offset(_ utf16: Int) -> Int {
         let clamped = min(max(utf16, 0), utf16Length)
         return floorEntry(byUTF16: clamped).utf8
     }
 
-    func utf8Range(_ nsRange: NSRange) -> Range<Int> {
+    public func utf8Range(_ nsRange: NSRange) -> Range<Int> {
         let lower = utf8Offset(nsRange.location)
         let upper = utf8Offset(nsRange.location + nsRange.length)
         return lower..<upper

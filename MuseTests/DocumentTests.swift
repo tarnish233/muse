@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+@testable import MuseKit
 
 /// M1：NSDocument 序列化与数据所有权。
 @Suite struct DocumentTests {

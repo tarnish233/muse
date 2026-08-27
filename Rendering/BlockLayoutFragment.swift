@@ -15,14 +15,14 @@ import AppKit
 ///
 /// 隔离：基类的绘制/度量接口是 nonisolated（AppKit 只在主线程调用它们），
 /// 主题为此声明 nonisolated —— 见 Theme。
-nonisolated final class MuseLayoutFragment: NSTextLayoutFragment {
-    override func draw(at point: CGPoint, in context: CGContext) {
+public nonisolated final class MuseLayoutFragment: NSTextLayoutFragment {
+    public override func draw(at point: CGPoint, in context: CGContext) {
         drawBlockVisuals(at: point, in: context)
         super.draw(at: point, in: context)
     }
 
     /// 通宽背景/竖线会超出字形包围盒，必须先把渲染面扩到容器宽度，否则被裁掉。
-    override var renderingSurfaceBounds: CGRect {
+    public override var renderingSurfaceBounds: CGRect {
         let base = super.renderingSurfaceBounds
         guard blockKind != nil, let width = textLayoutManager?.textContainer?.size.width else {
             return base
@@ -33,7 +33,7 @@ nonisolated final class MuseLayoutFragment: NSTextLayoutFragment {
 
     /// 只画块视觉、不画字形。生产路径由 `draw(at:in:)` 调用；
     /// 测试用它把「块视觉是否落墨」和字形像素分开断言。
-    func drawBlockVisuals(at point: CGPoint, in context: CGContext) {
+    public func drawBlockVisuals(at point: CGPoint, in context: CGContext) {
         guard let kind = blockKind else { return }
         drawDecoration(kind: kind, at: point, in: context)
     }
@@ -44,7 +44,7 @@ nonisolated final class MuseLayoutFragment: NSTextLayoutFragment {
         (textElement as? NSTextParagraph)?.attributedString
     }
 
-    var blockKind: String? {
+    public var blockKind: String? {
         guard let string = elementString, string.length > 0 else { return nil }
         return string.attribute(.museBlock, at: 0, effectiveRange: nil) as? String
     }
@@ -144,8 +144,12 @@ nonisolated final class MuseLayoutFragment: NSTextLayoutFragment {
 }
 
 /// 供 NSTextLayoutManager 生产自定义 fragment（编辑视图装配时挂上）。
-nonisolated final class MuseLayoutFragmentProvider: NSObject, NSTextLayoutManagerDelegate {
-    func textLayoutManager(
+public nonisolated final class MuseLayoutFragmentProvider: NSObject, NSTextLayoutManagerDelegate {
+    public override init() {
+        super.init()
+    }
+
+    public func textLayoutManager(
         _ textLayoutManager: NSTextLayoutManager,
         textLayoutFragmentFor location: NSTextLocation,
         in textElement: NSTextElement

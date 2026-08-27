@@ -2,7 +2,7 @@
 
 - 日期：2026-08-27
 - 范围：v0.3 方案 §06 中 M1「骨架」的退出条件
-- 结论：**通过（PASS）**，两项遗留债务记入 §5
+- 结论：**通过（PASS）**，M1-1 与 M1-2 已完成
 
 M1 的退出条件是：Xcode 工程；`NSDocument → EditorBuffer → NSTextStorage` 单一所有权；open/save/autosave；SwiftUI 外壳。
 
@@ -20,7 +20,7 @@ M1 的退出条件是：Xcode 工程；`NSDocument → EditorBuffer → NSTextSt
 | TextKit 2 编辑面 | `Editor/EditorTextView.swift` | 55 | ✅ |
 | SwiftUI ↔ AppKit 桥 | `Editor/EditorView.swift` | 65 | ✅ |
 | SwiftUI 外壳 | `Editor/EditorShellView.swift` | 30 | ✅ |
-| 文档往返测试 | `MuseTests/DocumentTests.swift` | 41 | ✅ 4 项 |
+| 文档往返与生命周期测试 | `MuseTests/DocumentTests.swift` | — | ✅ 8 项 |
 
 ## 2. 单一所有权：达标
 
@@ -39,6 +39,10 @@ M1 的退出条件是：Xcode 工程；`NSDocument → EditorBuffer → NSTextSt
 | `readReplacesWholeContent` | 打开文件整体覆盖 |
 | `nonUTF8IsRejected` | 非 UTF-8 抛 `fileReadCorruptFile` |
 | `renderNeverChangesDocumentSource` | 渲染后 `storage.string` 与源码相等 |
+| `autosaveWritesToDisk` | autosave 完成回调后磁盘内容含编辑结果 |
+| `reopenRestoresContent` | 新文档从同一 URL 读取后恢复编辑内容 |
+| `renderingDoesNotMarkDocumentDirty` | 只应用渲染属性不产生文档脏状态 |
+| `textEditMarksDocumentDirty` | 字符编辑产生文档脏状态 |
 
 ## 3. TextKit 2 手工栈：达标
 
@@ -56,20 +60,20 @@ M1 的退出条件是：Xcode 工程；`NSDocument → EditorBuffer → NSTextSt
 
 M1 当时无法预知这一点（M1 范围内没有块级视觉），但**这类「宿主环境约束」应当在骨架里程碑就记录下来**，因为它会约束后续所有渲染实现。v0.3 方案 §02 与 §4.8 已补入。
 
-## 5. 遗留债务
+## 5. 补齐记录
 
-### 5.1 autosave 与 reopen 未被测试覆盖（P1）
+### 5.1 autosave、reopen 与脏状态（M1-1，✅ 已解决）
 
-M1 的退出条件写的是「open/save/autosave」。前两项有测试（`readReplacesWholeContent`、`roundTripPreservesSource`），**autosave 与 reopen 没有**。
+M1-1 已用临时目录和 AppKit autosave 完成回调覆盖「编辑 → autosave → 磁盘」以及「同一 URL reopen」。
 
-`MuseDocument` 声明了 `autosavesInPlace = true`，但没有任何测试或人工验收记录证明：
+新增测试证明：
 
 - autosave 真的触发；
 - autosave 后 reopen 能恢复内容；
 - `updateChangeCount` 的调用时机正确（启动示例文档调了 `.changeCleared`，编辑时由 `RenderCoordinator.onTextEdited` 调 `.changeDone`，但渲染属性写入被包在 undo 抑制里，需确认不会误标脏）；
-- 崩溃恢复可用。
+- 渲染属性不会误标脏，字符编辑会标脏。
 
-严格来说 M1 的退出条件只满足了三分之二。这几项列入 M6「稳定与发布准备」，但**应当在 M3 之前补一次人工验收**——文档生命周期出错的代价是用户丢数据，不该留到最后一个里程碑。
+4 项测试均通过；本轮没有发现渲染误标脏缺陷。崩溃恢复的系统级人工验证仍属于 M0-3 清单范围，不由这组单元测试替代。
 
 ### 5.2 测试目标不 import 产品模块，Release 下构建失败（P1，已由 M1-2 解决）
 
@@ -92,26 +96,24 @@ M1-2 已按首选方案把 `Document/`、`Parsing/`、`Rendering/` 抽成 `MuseK
 
 M1 达成了它最重要的目标：**把「唯一可变正文」这条所有权边界做成了结构性保证，而不是纪律性约定。** `EditorBuffer` 只暴露只读 `string`、`updateNSView` 空实现、序列化直读 storage——想违反这条边界需要改结构，不是一时手误就能破坏的。这是 M1 最有价值的产出。
 
-不足在于对退出条件的执行不完整：autosave/reopen 写进了条件但没验；测试基础设施的已知债务从 M0 带到 M1 又原样带到 M2，直到它开始阻塞性能测量才暴露成本。
+M1 补齐了原先遗漏的 autosave/reopen 验收，并用共享框架恢复了 Release 测量链路。剩余的崩溃恢复人工观感与系统级验收属于 M0-3 手工清单。
 
 **给后续里程碑的两条要求：**
 
-1. 退出条件里的每一项都要有对应的测试或人工验收记录；只做了三分之二就不能记「通过」（本报告因此把 §5.1 显式列为债务而非忽略）。
-2. 上一个里程碑标注为「视情况处理」的债务，在下一个里程碑开始时要么处理、要么明确降级并写下理由——不能默认顺延。
+1. 退出条件里的每一项都要有对应的测试或人工验收记录。
+2. 渲染属性与字符编辑必须分别验证文档脏状态，避免 autosave 与显示状态互相污染。
 
 ---
 
-## 7. 接下来要做什么（M1 补齐）
+## 7. M1 补齐任务
 
-两项债务，都是工程性工作，Codex 可独立完成。**全局约束见《M0 评价报告》§9.1，必须先读。**
+两项补齐任务均已完成。**全局约束见《M0 评价报告》§9.1，必须先读。**
 
-建议顺序：先做 M1-2（它解锁 Release 性能测量，而 M2 的架构决策依赖那个数字），再做 M1-1。
+### 7.1 任务 M1-1：autosave / reopen / 崩溃恢复的测试覆盖（✅ 已完成）
 
-### 7.1 任务 M1-1：autosave / reopen / 崩溃恢复的测试覆盖
+**完成结果**：`MuseDocument` 的 `autosavesInPlace` 通过临时文件路径和 completion handler 得到实际验证；新文档通过 URL 初始化并恢复内容；属性渲染与字符编辑的脏状态分别得到验证。
 
-**现状**：M1 退出条件写的是「open/save/autosave」。`MuseDocument` 声明了 `autosavesInPlace = true`，但 `MuseTests/DocumentTests.swift` 的 4 项只覆盖 open/save/往返/渲染不改源码，**autosave 与 reopen 完全没有测试**。
-
-**要做**：在 `MuseTests/DocumentTests.swift` 增加以下测试。
+**新增测试**：
 
 | 测试名 | 断言 |
 |---|---|
@@ -120,13 +122,13 @@ M1 达成了它最重要的目标：**把「唯一可变正文」这条所有权
 | `renderingDoesNotMarkDocumentDirty` | 只应用渲染属性（不改字符）→ `isDocumentEdited == false` |
 | `textEditMarksDocumentDirty` | 改一个字符 → `isDocumentEdited == true` |
 
-第 3 项是重点：渲染属性写入被包在 `disableUndoRegistration` 里，但 `RenderCoordinator.onTextEdited` 挂的是 `updateChangeCount(.changeDone)`。需要确认**渲染不会误标脏**——否则文档会无端进入未保存状态，autosave 反复写盘。
+第 3 项是重点：渲染属性写入被包在 `disableUndoRegistration` 里，但 `RenderCoordinator.onTextEdited` 挂的是 `updateChangeCount(.changeDone)`。测试已确认**渲染不会误标脏**，文档不会因显示属性变化而进入未保存状态。
 
 若第 3 项发现确实误标脏，那是一个真实缺陷：`textStorage(_:didProcessEditing:...)` 里的 `guard editedMask.contains(.editedCharacters), !isApplyingAttributes else { return }` 已有防护，需实测确认它是否足够。
 
 **注意**：AppKit 的 autosave 是异步的。测试里不要靠 `sleep` 等待，用 `autosave(withImplicitCancellability:completionHandler:)` 的回调，或直接调 `save(to:ofType:for:completionHandler:)` 走确定性路径。
 
-**验收**：4 项测试存在且通过；总测试数从 78 增至 82。若发现渲染误标脏，在本报告 §5.1 记录缺陷与修法。
+**验收**：4 项测试存在且通过。本分支在 M0-1/M0-2/M2-6/M2-7/M2-8 已增加 7 项回归测试，因此总测试数由 85 增至 **89**；本任务未发现渲染误标脏缺陷。
 
 ### 7.2 任务 M1-2：测试目标框架化，修复 Release 构建（✅ 已完成）
 
@@ -158,7 +160,7 @@ xcodebuild test -project Muse.xcodeproj -scheme Muse \
 
 **验收**（三项均满足）：
 
-1. Debug 下当前 85 项（M1-1 完成后再增加 4 项）测试全绿；
+1. Debug 下当前 **89 项**测试全绿；
 2. **Release 下测试构建成功且全绿**——这是本任务的核心目标；
 3. 已在 Release 下重跑 `PerformanceTests`，并将 200KB `RenderEngine.prepare`、`applyDirty`、协调器端到端耗时填入 §8。最终 AST 语义层的解析数字在 M2-1 完成后补记；若 200KB 全量 AST 仍 < 150ms，在《M2 评价报告》§5.4 记录「全量 AST 方案确认可行，块级增量不必做」。
 

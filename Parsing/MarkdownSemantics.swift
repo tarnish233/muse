@@ -1,9 +1,9 @@
 import Foundation
 import Markdown
 
-/// swift-markdown 语义层（v0.2 §4.1）：AST 回答"这段内容是什么"，
-/// TokenScanner 回答"精确的标记字符在哪"。在后台解析任务中构建，
-/// 只提取 Sendable 的纯值信息；本层不触碰 AppKit/存储。
+/// swift-markdown 语义层（v0.2 §4.1）：AST 同时回答"这段内容是什么"与
+/// "精确的标记字符在哪"。在后台解析任务中构建，只提取 Sendable 的纯值信息；
+/// 本层不触碰 AppKit/存储。
 public nonisolated struct MarkdownSemantics: Sendable {
     /// AST 推导出的行内标记。marker 由节点自身与首/末子节点的源码区间相减得到。
     public struct InlineMarker: Sendable, Equatable {
@@ -44,17 +44,30 @@ public nonisolated struct MarkdownSemantics: Sendable {
             case taskList(depth: Int, checked: Bool)
             case blockquote(depth: Int)
             case codeFence(language: String?)
+            case rule
         }
 
         public let kind: Kind
         public let line: Int
-        /// 行首到内容起点的 marker 区间（含缩进后的标记字符与其后空格）。
+        /// 语法 marker 到内容起点的区间（不含列表/块的前导缩进）。
         public let marker: Range<Int>
+        /// 块正文区间；围栏块为开栏行之后至闭栏行之前。
+        public let content: Range<Int>?
+        /// 围栏块的闭栏 marker；其他块为 nil。
+        public let closingMarker: Range<Int>?
 
-        public init(kind: Kind, line: Int, marker: Range<Int>) {
+        public init(
+            kind: Kind,
+            line: Int,
+            marker: Range<Int>,
+            content: Range<Int>? = nil,
+            closingMarker: Range<Int>? = nil
+        ) {
             self.kind = kind
             self.line = line
             self.marker = marker
+            self.content = content
+            self.closingMarker = closingMarker
         }
     }
 
@@ -86,6 +99,8 @@ public nonisolated struct MarkdownSemantics: Sendable {
         public let tail: Range<Int>
         /// 目的地（tail 内部）
         public let destination: Range<Int>
+        /// 所属行（0-based）。
+        public let line: Int
         /// 行内扫描的保护区间（tail）——强调分隔符不进入 URL 区域配对
         public var inertRanges: [Range<Int>] { [tail] }
 
@@ -93,12 +108,14 @@ public nonisolated struct MarkdownSemantics: Sendable {
             openBracket: Range<Int>,
             label: Range<Int>,
             tail: Range<Int>,
-            destination: Range<Int>
+            destination: Range<Int>,
+            line: Int = 0
         ) {
             self.openBracket = openBracket
             self.label = label
             self.tail = tail
             self.destination = destination
+            self.line = line
         }
     }
 
@@ -114,12 +131,70 @@ public nonisolated struct MarkdownSemantics: Sendable {
     public let quoteLines: Set<Int>
     public let fenceLines: Set<Int>
 
+    /// 把 AST 已确认的 marker/结构转换成渲染 token。
+    ///
+    /// 这是唯一的转换层；TokenScanner 的 `scan` 仅为旧调用方保留同一结果的
+    /// 兼容入口，不再另行实现 Markdown 匹配规则。
+    public var tokens: [Token] {
+        var result = blocks.map { block -> Token in
+            switch block.kind {
+            case let .heading(level):
+                return Token(kind: .heading(level: level), markerRange: block.marker,
+                             contentRange: block.content, line: block.line)
+            case let .unorderedList(depth):
+                return Token(kind: .unorderedListItem(depth: depth), markerRange: block.marker,
+                             contentRange: block.content, line: block.line)
+            case let .orderedList(depth, number):
+                return Token(kind: .orderedListItem(depth: depth, number: number),
+                             markerRange: block.marker, contentRange: block.content, line: block.line)
+            case let .taskList(depth, checked):
+                return Token(kind: .taskListItem(depth: depth, checked: checked),
+                             markerRange: block.marker, contentRange: block.content, line: block.line)
+            case let .blockquote(depth):
+                return Token(kind: .blockquote(depth: depth), markerRange: block.marker,
+                             contentRange: block.content, line: block.line)
+            case .codeFence:
+                return Token(kind: .codeFence, markerRange: block.marker,
+                             closingMarkerRange: block.closingMarker, contentRange: block.content,
+                             line: block.line)
+            case .rule:
+                return Token(kind: .rule, markerRange: block.marker, line: block.line)
+            }
+        }
+        result.append(contentsOf: inlineMarkers.map { marker in
+            let kind: Token.Kind
+            switch marker.kind {
+            case .strong: kind = .strong
+            case .emphasis: kind = .emphasis
+            case .inlineCode: kind = .inlineCode
+            case .strikethrough: kind = .strikethrough
+            }
+            return Token(kind: kind, markerRange: marker.openMarker,
+                         closingMarkerRange: marker.closeMarker, contentRange: marker.content,
+                         line: marker.line)
+        })
+        result.append(contentsOf: links.map { link in
+            Token(kind: .link, markerRange: link.openBracket, closingMarkerRange: link.tail,
+                  contentRange: link.label, linkDestination: link.destination, line: link.line)
+        })
+        return result.sorted { lhs, rhs in
+            if lhs.markerRange.lowerBound != rhs.markerRange.lowerBound {
+                return lhs.markerRange.lowerBound < rhs.markerRange.lowerBound
+            }
+            return lhs.markerRange.upperBound > rhs.markerRange.upperBound
+        }
+    }
+
     public init(_ source: String) {
-        self.init(source, lines: TokenScanner().lines(source))
+        let bytes = Array(source.utf8)
+        self.init(source, bytes: bytes, lines: TokenScanner().lines(bytes))
     }
 
     init(_ source: String, lines sourceLines: [TokenScanner.Line]) {
-        let bytes = Array(source.utf8)
+        self.init(source, bytes: Array(source.utf8), lines: sourceLines)
+    }
+
+    init(_ source: String, bytes: [UInt8], lines sourceLines: [TokenScanner.Line]) {
         let lineStarts = sourceLines.map(\.start)
         let document = Document(parsing: source, options: [.disableSmartOpts])
 
@@ -207,6 +282,10 @@ public nonisolated struct MarkdownSemantics: Sendable {
             appendCodeBlock(codeBlock)
         }
 
+        mutating func visitThematicBreak(_ thematicBreak: ThematicBreak) {
+            appendThematicBreak(thematicBreak)
+        }
+
         mutating func visitStrong(_ strong: Strong) {
             appendInline(.strong, markup: strong)
             descendInto(strong)
@@ -230,7 +309,9 @@ public nonisolated struct MarkdownSemantics: Sendable {
             if link.destination != nil,
                let range = byteRange(link),
                let syntax = MarkdownSemantics.parseBounds(range, bytes: bytes) {
-                links.append(syntax)
+                links.append(.init(openBracket: syntax.openBracket, label: syntax.label,
+                                   tail: syntax.tail, destination: syntax.destination,
+                                   line: sourceLine(of: link) ?? 0))
             }
             descendInto(link)
         }
@@ -242,8 +323,11 @@ public nonisolated struct MarkdownSemantics: Sendable {
         private mutating func appendHeading(_ heading: Heading) {
             guard let range = byteRange(heading), let line = sourceLine(of: heading) else { return }
             let contentStart = firstChildStart(heading) ?? min(range.upperBound, lines[line].end)
-            let marker = lineStarts[line]..<min(max(contentStart, lineStarts[line]), lines[line].end)
-            blocks.append(.init(kind: .heading(level: heading.level), line: line, marker: marker))
+            let markerStart = syntaxStart(on: line)
+            let marker = markerStart..<min(max(contentStart, markerStart), lines[line].end)
+            let content = marker.upperBound..<lines[line].end
+            blocks.append(.init(kind: .heading(level: heading.level), line: line, marker: marker,
+                                content: content))
         }
 
         private mutating func appendListItem(_ listItem: ListItem) {
@@ -268,8 +352,10 @@ public nonisolated struct MarkdownSemantics: Sendable {
             }
 
             let contentStart = firstChildStart(listItem) ?? min(range.upperBound, lines[line].end)
-            let markerUpper = min(max(contentStart, lineStarts[line]), lines[line].end)
-            blocks.append(.init(kind: kind, line: line, marker: lineStarts[line]..<markerUpper))
+            let markerStart = syntaxStart(on: line)
+            let markerUpper = min(max(contentStart, markerStart), lines[line].end)
+            blocks.append(.init(kind: kind, line: line, marker: markerStart..<markerUpper,
+                                content: markerUpper..<lines[line].end))
             listItemLines.insert(line)
         }
 
@@ -277,17 +363,88 @@ public nonisolated struct MarkdownSemantics: Sendable {
             guard let range = byteRange(blockQuote), let line = sourceLine(of: blockQuote) else { return }
             let depth = quoteDepth(from: blockQuote)
             let contentStart = firstChildStart(blockQuote) ?? min(range.upperBound, lines[line].end)
-            let markerUpper = min(max(contentStart, lineStarts[line]), lines[line].end)
+            let markerStart = syntaxStart(on: line)
+            let markerUpper = min(max(contentStart, markerStart), lines[line].end)
             blocks.append(.init(kind: .blockquote(depth: depth), line: line,
-                                marker: lineStarts[line]..<markerUpper))
+                                marker: markerStart..<markerUpper,
+                                content: markerUpper..<lines[line].end))
             markAllLines(range, into: &quoteLines)
         }
 
         private mutating func appendCodeBlock(_ codeBlock: CodeBlock) {
             guard let range = byteRange(codeBlock), let line = sourceLine(of: codeBlock) else { return }
-            blocks.append(.init(kind: .codeFence(language: codeBlock.language), line: line,
-                                marker: lineStarts[line]..<lines[line].end))
             markAllLines(range, into: &fenceLines)
+
+            guard let opening = delimiterRun(on: lines[line]) else { return }
+            // The AST source range already bounds this code block. Use that
+            // range directly instead of searching the accumulated fence-line
+            // set from the beginning of the document for every block.
+            let sourceEndLine = codeBlock.range?.upperBound.line ?? line + 1
+            let endLine = min(lines.count - 1, max(line, sourceEndLine - 1))
+            var closingLine: TokenScanner.Line?
+            if line < endLine {
+                for index in (line + 1)...endLine {
+                    let candidate = lines[index]
+                    if isClosingFence(candidate, matching: opening) {
+                        closingLine = candidate
+                        break
+                    }
+                }
+            }
+            let bodyStart = lines[line].next
+            let bodyEnd = closingLine?.start ?? bytes.count
+            let closingMarker = closingLine.flatMap { delimiterRun(on: $0) }
+            blocks.append(.init(
+                kind: .codeFence(language: codeBlock.language),
+                line: line,
+                marker: opening.lowerBound..<lines[line].end,
+                content: bodyStart..<max(bodyStart, bodyEnd),
+                closingMarker: closingMarker
+            ))
+        }
+
+        private mutating func appendThematicBreak(_ thematicBreak: ThematicBreak) {
+            guard let range = byteRange(thematicBreak), let line = sourceLine(of: thematicBreak) else {
+                return
+            }
+            let start = max(lineStarts[line], range.lowerBound)
+            let end = min(lines[line].end, max(start, range.upperBound))
+            blocks.append(.init(kind: .rule, line: line,
+                                marker: start..<end))
+        }
+
+        private func syntaxStart(on line: Int) -> Int {
+            var start = lineStarts[line]
+            while start < lines[line].end, bytes[start] == 0x20 || bytes[start] == 0x09 {
+                start += 1
+            }
+            return start
+        }
+
+        /// Extract a delimiter run only after the AST has identified the code
+        /// block. This recovers the exact source span; it does not decide
+        /// whether a line opens or closes a block.
+        private func delimiterRun(on line: TokenScanner.Line) -> Range<Int>? {
+            var start = line.start
+            while start < line.end, bytes[start] == 0x20 || bytes[start] == 0x09 {
+                start += 1
+            }
+            guard start < line.end, bytes[start] == 0x60 || bytes[start] == 0x7E else { return nil }
+            let delimiter = bytes[start]
+            var end = start
+            while end < line.end, bytes[end] == delimiter { end += 1 }
+            guard end - start >= 3 else { return nil }
+            return start..<end
+        }
+
+        private func isClosingFence(
+            _ line: TokenScanner.Line,
+            matching opening: Range<Int>?
+        ) -> Bool {
+            guard let opening, let closing = delimiterRun(on: line),
+                  bytes[opening.lowerBound] == bytes[closing.lowerBound],
+                  closing.count >= opening.count else { return false }
+            return bytes[closing.upperBound..<line.end].allSatisfy { $0 == 0x20 || $0 == 0x09 }
         }
 
         private mutating func appendInline(_ kind: InlineMarker.Kind, markup: Markup) {
@@ -344,10 +501,19 @@ public nonisolated struct MarkdownSemantics: Sendable {
                   range.lowerBound < first.lowerBound,
                   last.upperBound < range.upperBound else { return }
 
+            let openMarker = range.lowerBound..<first.lowerBound
+            var closeMarker = last.upperBound..<range.upperBound
+            // cmark's source range includes the unused second star in
+            // `*foo**`, although the emphasis node consumes one delimiter.
+            // Keep the AST decision and normalize only this source-location
+            // overhang so the token range describes the actual marker.
+            if kind == .emphasis, openMarker.count == 1, closeMarker.count > 1 {
+                closeMarker = closeMarker.lowerBound..<(closeMarker.lowerBound + 1)
+            }
             inlineMarkers.append(.init(
                 kind: kind,
-                openMarker: range.lowerBound..<first.lowerBound,
-                closeMarker: last.upperBound..<range.upperBound,
+                openMarker: openMarker,
+                closeMarker: closeMarker,
                 content: first.lowerBound..<last.upperBound,
                 line: line
             ))

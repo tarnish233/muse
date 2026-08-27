@@ -19,7 +19,11 @@ public nonisolated struct SourceIndex: Sendable {
     public let utf16Length: Int
 
     public init(_ string: String) {
-        let bytes = Array(string.utf8)
+        self.init(utf8: Array(string.utf8))
+    }
+
+    /// 从已建立的不可变 UTF-8 快照建索引，供渲染准备阶段复用缓冲区。
+    nonisolated init(utf8 bytes: [UInt8]) {
         var entries: [Entry] = []
         entries.reserveCapacity(bytes.count / 2 + 2)
 

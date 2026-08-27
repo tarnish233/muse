@@ -41,7 +41,7 @@ import Testing
         // 编辑 1：文档开头插入粗体
         storage.replaceCharacters(in: NSRange(location: 0, length: 0), with: "**X**")
         // 编辑 2（立即）：中部某行行首插入粗体——第一次解析尚未应用即被取消。
-        // 注意插在行首（紧随换行）：词内星号（英文单词中间）按 CommonMark 是字面量。
+        // 注意插在行首（紧随换行）：两处编辑都必须走同一 AST 语义管线。
         let half = storage.length / 2
         let beforeNewline = (storage.string as NSString)
             .range(of: "\n", options: .backwards, range: NSRange(location: 0, length: half))

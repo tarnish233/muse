@@ -164,6 +164,15 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
         into storage: NSTextStorage,
         forceLines: ClosedRange<Int>?
     ) {
+        // With no attached text view there is no caret-derived reveal state:
+        // every marker is hidden. Avoid materializing UTF-16 ranges for the
+        // entire document on every background package application; only a
+        // forced line or a cache transition needs a storage write.
+        if selection == nil {
+            reconcileHiddenVisibility(package: package, into: storage, forceLines: forceLines)
+            return
+        }
+
         let entries = engine.computedVisibility(package: package, selection: selection)
         var newCache: [RevealKey: RenderEngine.MarkerState] = [:]
         var firstWrite = true
@@ -184,6 +193,43 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
             }
             newCache[key] = entry.state
         }
+        if !firstWrite {
+            storage.endEditing()
+        }
+        lastReconcileWriteCount = writeCount
+        revealCache = newCache
+    }
+
+    private func reconcileHiddenVisibility(
+        package: RenderEngine.Package,
+        into storage: NSTextStorage,
+        forceLines: ClosedRange<Int>?
+    ) {
+        let hiddenAttributes = RenderEngine.markerVisibilityAttributes(state: .hidden)
+        var newCache: [RevealKey: RenderEngine.MarkerState] = [:]
+        newCache.reserveCapacity(package.tokens.count)
+        var firstWrite = true
+        var writeCount = 0
+
+        for token in package.tokens {
+            let forced = forceLines?.contains(token.line) == true
+            for range in token.allMarkerRanges {
+                let key = RevealKey(
+                    line: token.line,
+                    relOffset: range.lowerBound - package.lineStarts[token.line]
+                )
+                if forced || revealCache[key] != .hidden {
+                    if firstWrite {
+                        storage.beginEditing()
+                        firstWrite = false
+                    }
+                    storage.addAttributes(hiddenAttributes, range: package.index.nsRange(range))
+                    writeCount += 1
+                }
+                newCache[key] = .hidden
+            }
+        }
+
         if !firstWrite {
             storage.endEditing()
         }

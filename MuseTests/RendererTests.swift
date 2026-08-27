@@ -110,7 +110,7 @@ import Testing
     }
 
     @Test func chinesePositionsInRenderedStorage() {
-        // CJK 按标点类参与 flanking（有意偏离 CommonMark 词内限制），紧贴汉字可加粗
+        // CJK 的成对语义由 AST 提供，紧贴汉字的 marker 仍能精确定位。
         let source = "你好**世界**"
         let storage = NSTextStorage(string: source)
         let package = engine.prepare(source)
@@ -694,8 +694,7 @@ import Testing
         #expect(hasTrait(b, .boldFontMask))
         #expect(hasTrait(b, .italicFontMask))
 
-        // 反向（斜体包粗体）依赖扫描器能做 delimiter-run 分析（M2 明确项），
-        // 当前 *a **b** c* 解析为三段单星强调，见 TokenScannerTests.singleStarEmphasisDoesNotSeeThroughStrong。
+        // 反向（斜体包粗体）由 AST 的嵌套结构提供，避免渲染层复制 delimiter 匹配。
     }
 
     @Test func dirtyApplyRestylesOnlyChangedLines() {

@@ -8,16 +8,6 @@ import AppKit
 /// - `applyDirty`：只重置+重排受影响行的属性（输入热路径；配合后台解析见 RenderCoordinator）。
 /// 行级粒度与线式 tokenizer 一致（行内语法以行为界），是"变化块增量"的第一版近似。
 public struct RenderEngine {
-    private final class ScanResult: @unchecked Sendable {
-        let semaphore = DispatchSemaphore(value: 0)
-        nonisolated(unsafe) var tokens: [Token] = []
-    }
-
-    private final class IndexResult: @unchecked Sendable {
-        let semaphore = DispatchSemaphore(value: 0)
-        nonisolated(unsafe) var index: SourceIndex?
-    }
-
     /// 后台解析产物：纯值、Sendable，可跨线程（v0.2 RenderSnapshot 的第一版形态）。
     public nonisolated struct Package: Sendable {
         public let tokens: [Token]
@@ -54,134 +44,14 @@ public struct RenderEngine {
 
     public nonisolated func prepare(_ source: String) -> Package {
         let scanner = TokenScanner()
-        let speculativeScan = ScanResult()
-        let speculativeIndex = IndexResult()
-        DispatchQueue.global(qos: .userInitiated).async {
-            speculativeScan.tokens = TokenScanner().scan(source)
-            speculativeScan.semaphore.signal()
-        }
-        DispatchQueue.global(qos: .userInitiated).async {
-            speculativeIndex.index = SourceIndex(source)
-            speculativeIndex.semaphore.signal()
-        }
-        let sourceLines = scanner.lines(source)
+        let bytes = Array(source.utf8)
+        let sourceLines = scanner.lines(bytes)
         let lineStarts = sourceLines.map(\.start)
 
         // AST 是语义与源码定位的唯一来源。即使文档没有链接或深层缩进，也必须
-        // 构建语义层，避免候选行短路让同一 Markdown 在不同输入形态下走两套规则。
-        let semantics = MarkdownSemantics(source, lines: sourceLines)
-        speculativeScan.semaphore.wait()
-        var tokens = speculativeScan.tokens
-
-        // 普通行的 scanner 结果与 AST 的块结论一致时直接复用并行结果；链接保护区
-        // 或 AST 确认的扩展缩进存在时再用完整语义参数重扫，保证这些边界不靠猜测。
-        if !semantics.links.isEmpty || requiresSemanticRescan(source, semantics: semantics, lines: sourceLines) {
-            tokens = scanner.scan(
-                source,
-                excludingRanges: semantics.links.flatMap(\.inertRanges),
-                semanticListLines: semantics.listItemLines,
-                semanticQuoteLines: semantics.quoteLines,
-                semanticFenceLines: semantics.fenceLines
-            )
-        }
-        speculativeIndex.semaphore.wait()
-
-        var unorderedDepthByLine: [Int: Int] = [:]
-        var orderedInfoByLine: [Int: (depth: Int, number: Int)] = [:]
-        var taskInfoByLine: [Int: (depth: Int, checked: Bool)] = [:]
-        var quoteDepthByLine: [Int: Int] = [:]
-        for block in semantics.blocks {
-            switch block.kind {
-            case let .unorderedList(depth):
-                unorderedDepthByLine[block.line] = depth
-            case let .orderedList(depth, number):
-                orderedInfoByLine[block.line] = (depth, number)
-            case let .taskList(depth, checked):
-                taskInfoByLine[block.line] = (depth, checked)
-            case let .blockquote(depth):
-                quoteDepthByLine[block.line] = depth
-            case .heading, .codeFence:
-                break
-            }
-        }
-        tokens = tokens.map { token in
-            switch token.kind {
-            case .unorderedListItem:
-                guard let depth = unorderedDepthByLine[token.line] else { return token }
-                return replacing(token, kind: .unorderedListItem(depth: depth))
-            case .orderedListItem:
-                guard let info = orderedInfoByLine[token.line] else { return token }
-                return replacing(token, kind: .orderedListItem(depth: info.depth, number: info.number))
-            case .taskListItem:
-                guard let info = taskInfoByLine[token.line] else { return token }
-                return replacing(token, kind: .taskListItem(depth: info.depth, checked: info.checked))
-            case .blockquote:
-                guard let depth = quoteDepthByLine[token.line] else { return token }
-                return replacing(token, kind: .blockquote(depth: depth))
-            default:
-                return token
-            }
-        }
-
-        for link in semantics.links {
-            tokens.append(Token(
-                kind: .link,
-                markerRange: link.openBracket,
-                closingMarkerRange: link.tail,
-                contentRange: link.label,
-                linkDestination: link.destination,
-                line: lineIndex(ofByte: link.label.lowerBound, lineStarts: lineStarts)
-            ))
-        }
-        tokens.sort { $0.markerRange.lowerBound < $1.markerRange.lowerBound }
-
-        return Package(tokens: tokens, index: speculativeIndex.index!, lineStarts: lineStarts)
-    }
-
-    private nonisolated func replacing(_ token: Token, kind: Token.Kind) -> Token {
-        Token(
-            kind: kind,
-            markerRange: token.markerRange,
-            closingMarkerRange: token.closingMarkerRange,
-            contentRange: token.contentRange,
-            linkDestination: token.linkDestination,
-            line: token.line
-        )
-    }
-
-    private nonisolated func requiresSemanticRescan(
-        _ source: String,
-        semantics: MarkdownSemantics,
-        lines: [TokenScanner.Line]
-    ) -> Bool {
-        guard !semantics.blocks.isEmpty else { return false }
-        let bytes = Array(source.utf8)
-        for block in semantics.blocks {
-            guard block.line < lines.count else { continue }
-            let line = lines[block.line]
-            var index = line.start
-            while index < line.end, bytes[index] == 0x20 || bytes[index] == 0x09 {
-                index += 1
-            }
-            if index - line.start > 3 || bytes[line.start..<index].contains(0x09) {
-                return true
-            }
-        }
-        return false
-    }
-
-    private nonisolated func lineIndex(ofByte offset: Int, lineStarts: [Int]) -> Int {
-        var lo = 0
-        var hi = lineStarts.count - 1
-        while lo < hi {
-            let mid = (lo + hi + 1) / 2
-            if lineStarts[mid] <= offset {
-                lo = mid
-            } else {
-                hi = mid - 1
-            }
-        }
-        return lo
+        // 构建语义层，避免同一 Markdown 在不同输入形态下走两套规则。
+        let semantics = MarkdownSemantics(source, bytes: bytes, lines: sourceLines)
+        return Package(tokens: semantics.tokens, index: SourceIndex(utf8: bytes), lineStarts: lineStarts)
     }
 
     // MARK: - 全量渲染（首次装载/基准）

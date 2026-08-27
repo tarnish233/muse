@@ -100,6 +100,14 @@ import Testing
         #expect(em?.contentRange == 5..<6)
     }
 
+    @Test func intraWordEmphasisUsesASTSemantics() throws {
+        // M2-4：修正 v0.2 扫描器的语义分叉，a*b*c 与 cmark/AST 对齐。
+        let emphasis = try #require(scanner.scan("a*b*c").first { $0.kind == .emphasis })
+        #expect(emphasis.markerRange == 1..<2)
+        #expect(emphasis.contentRange == 2..<3)
+        #expect(emphasis.closingMarkerRange == 3..<4)
+    }
+
     @Test func unclosedSyntaxYieldsNoToken() {
         #expect(scanner.scan("**未闭合").isEmpty)
         #expect(scanner.scan("`未闭合").isEmpty)
@@ -141,7 +149,7 @@ import Testing
 
     @Test func emojiInLineDoesNotShiftMarkers() {
         // 字节偏移不会因 emoji 偏移：😀 前有 "图"（3 字节）
-        // CJK/符号按"标点类"参与 flanking（有意偏离 CommonMark 词内限制，见 TokenScanner 注释）
+        // marker 由 AST 的 UTF-8 source range 推导，CJK/emoji 不会改变字节坐标。
         let tokens = scanner.scan("图😀**粗**")
         let strong = tokens.first { $0.kind == .strong }
         #expect(strong?.markerRange == 7..<9) // 3 + 4 = 7
@@ -199,7 +207,7 @@ import Testing
     }
 
     @Test func strongInsideEmphasisParses() {
-        // M2 起（分隔符 run 算法）：*a **b** c* 应解析为"斜体包粗体"
+        // AST 直接保留 *a **b** c* 的嵌套结构：斜体包粗体。
         let tokens = scanner.scan("*a **b** c*")
         let emphasis = tokens.first { $0.kind == .emphasis }
         let strong = tokens.first { $0.kind == .strong }

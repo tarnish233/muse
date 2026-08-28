@@ -8,6 +8,12 @@ import AppKit
 /// - `applyDirty`：只重置+重排受影响行的属性（输入热路径；配合后台解析见 RenderCoordinator）。
 /// 行级粒度与线式 tokenizer 一致（行内语法以行为界），是"变化块增量"的第一版近似。
 public struct RenderEngine {
+    /// 编辑器的两种呈现方式。源码模式仍使用同一份 NSTextStorage，只改变派生属性。
+    public enum PresentationMode: Sendable, Equatable {
+        case rendered
+        case source
+    }
+
     /// 后台解析产物：纯值、Sendable，可跨线程（v0.2 RenderSnapshot 的第一版形态）。
     public nonisolated struct Package: Sendable {
         public let tokens: [Token]
@@ -56,15 +62,22 @@ public struct RenderEngine {
 
     // MARK: - 全量渲染（首次装载/基准）
 
-    public func render(package: Package, selection: NSRange?, into storage: NSTextStorage) -> Stats {
+    public func render(
+        package: Package,
+        selection: NSRange?,
+        mode: PresentationMode = .rendered,
+        into storage: NSTextStorage
+    ) -> Stats {
         let full = NSRange(location: 0, length: storage.length)
 
         storage.beginEditing()
-        storage.setAttributes(baseAttributes(), range: full)
-        for token in package.tokens {
-            applyStyle(token, package: package, into: storage)
+        storage.setAttributes(mode == .source ? sourceAttributes() : baseAttributes(), range: full)
+        if mode == .rendered {
+            for token in package.tokens {
+                applyStyle(token, package: package, into: storage)
+            }
+            applyVisibility(package: package, selection: selection, into: storage, forceAll: true)
         }
-        applyVisibility(package: package, selection: selection, into: storage, forceAll: true)
         storage.endEditing()
 
         return Stats(tokenCount: package.tokens.count)
@@ -83,6 +96,7 @@ public struct RenderEngine {
         package: Package,
         previousPackage: Package?,
         utf16Range: NSRange,
+        mode: PresentationMode = .rendered,
         into storage: NSTextStorage
     ) -> ClosedRange<Int> {
         var dirtyLines = lineSpan(containing: utf16Range, package: package)
@@ -99,9 +113,11 @@ public struct RenderEngine {
         let span = NSRange(location: spanStart, length: spanEnd - spanStart)
 
         storage.beginEditing()
-        storage.setAttributes(baseAttributes(), range: span)
-        for token in package.tokens where tokenLineRange(token, package: package).overlaps(dirtyLines) {
-            applyStyle(token, package: package, into: storage)
+        storage.setAttributes(mode == .source ? sourceAttributes() : baseAttributes(), range: span)
+        if mode == .rendered {
+            for token in package.tokens where tokenLineRange(token, package: package).overlaps(dirtyLines) {
+                applyStyle(token, package: package, into: storage)
+            }
         }
         storage.endEditing()
 
@@ -175,7 +191,11 @@ public struct RenderEngine {
     }
 
     /// 纯函数：给定 package 与选区，计算所有 marker 的显隐状态。不触碰 storage。
-    public func computedVisibility(package: Package, selection: NSRange?) -> [VisibilityEntry] {
+    public func computedVisibility(
+        package: Package,
+        selection: NSRange?,
+        mode: PresentationMode = .rendered
+    ) -> [VisibilityEntry] {
         func makeEntries(_ token: Token, state: MarkerState) -> [VisibilityEntry] {
             token.allMarkerRanges.map { range in
                 VisibilityEntry(
@@ -191,6 +211,10 @@ public struct RenderEngine {
             .hidden
         }
 
+        guard mode == .rendered else {
+            return package.tokens.flatMap { makeEntries($0, state: .revealed) }
+        }
+
         guard let selection else {
             // 无选区（textView 未挂接的初始渲染窗口）：块级标记先按"未回显"写，
             // 挂接后由 refreshMarkerVisibility 按真实光标修正。
@@ -202,7 +226,11 @@ public struct RenderEngine {
             let state: MarkerState
             if token.isBlockMarker {
                 let onCaret: Bool
-                if token.kind == .codeFence {
+                if selection.length > 0 {
+                    // 跨行拖选时，所有与选区相交的块标记都应回显，而不是只看
+                    // selection.location 所在行。命中与拖选仍完全交给 NSTextView。
+                    onCaret = touches(blockRange(token, package: package), selection: selection)
+                } else if token.kind == .codeFence {
                     onCaret = tokenLineRange(token, package: package).contains(caretLine) // 光标在围栏块任意行
                 } else {
                     onCaret = token.line == caretLine
@@ -249,6 +277,14 @@ public struct RenderEngine {
     private func baseAttributes() -> [NSAttributedString.Key: Any] {
         [
             .font: theme.baseFont(),
+            .foregroundColor: theme.text,
+            .paragraphStyle: theme.baseParagraph(),
+        ]
+    }
+
+    private func sourceAttributes() -> [NSAttributedString.Key: Any] {
+        [
+            .font: theme.codeFont(),
             .foregroundColor: theme.text,
             .paragraphStyle: theme.baseParagraph(),
         ]
@@ -411,6 +447,13 @@ public struct RenderEngine {
             return token.line...closeLine
         }
         return token.line...token.line
+    }
+
+    private func blockRange(_ token: Token, package: Package) -> NSRange {
+        let lines = tokenLineRange(token, package: package)
+        let lower = package.lineStarts[lines.lowerBound]
+        let upper = lineEndUTF8(lines.upperBound, package: package)
+        return package.index.nsRange(lower..<upper)
     }
 
     private func lineSpan(containing utf16Range: NSRange, package: Package) -> ClosedRange<Int> {

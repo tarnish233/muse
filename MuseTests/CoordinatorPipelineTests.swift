@@ -40,6 +40,28 @@ import Testing
         #expect(!coordinator.statusText.contains("tokens"))
     }
 
+    @Test func editsRemainLiteralWhileSourceModeIsActive() async {
+        let source = "# title\nplain"
+        let storage = NSTextStorage(string: source)
+        let coordinator = RenderCoordinator()
+        coordinator.attach(storage: storage)
+        coordinator.onTextEdited = {}
+
+        storage.replaceCharacters(in: NSRange(location: 0, length: storage.length), with: source)
+        #expect(await waitForApplied(coordinator, atLeast: 1))
+        coordinator.setPresentationMode(.source)
+
+        let insertion = "\n- literal"
+        storage.replaceCharacters(in: NSRange(location: storage.length, length: 0), with: insertion)
+        #expect(await waitForApplied(coordinator, atLeast: 2))
+
+        let marker = (storage.string as NSString).range(of: "- literal").location
+        #expect(coordinator.presentationMode == .source)
+        #expect(storage.attribute(.font, at: marker, effectiveRange: nil) as? NSFont == Theme.standard.codeFont())
+        #expect(storage.attribute(.museBlock, at: marker, effectiveRange: nil) == nil)
+        #expect(storage.string == source + insertion)
+    }
+
     /// 快速连续编辑（第二次编辑在第一次的解析落地前到达）：脏区必须合并/回退，
     /// 第一次修改的行也必须在同一次应用中被重排（复审 P1-1）。
     @Test func rapidEditsCoalesceDirtyRanges() async {

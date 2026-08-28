@@ -89,7 +89,11 @@ struct EditorShellView: View {
             )
             .frame(height: EditorChromeMetrics.titlebarHeight)
 
-            EditorDetailView(document: document, renderer: renderer)
+            EditorDetailView(
+                document: document,
+                isSourceMode: chromeState.isSourceMode,
+                renderer: renderer
+            )
                 .frame(minWidth: 400, maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(EditorSurface.main)

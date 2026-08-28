@@ -3,10 +3,11 @@ import SwiftUI
 
 struct EditorDetailView: View {
     let document: MuseDocument
+    let isSourceMode: Bool
     @ObservedObject var renderer: RenderCoordinator
 
     var body: some View {
-        EditorView(document: document)
+        EditorView(document: document, isSourceMode: isSourceMode)
             .id(ObjectIdentifier(document))
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .overlay(alignment: .bottomTrailing) {

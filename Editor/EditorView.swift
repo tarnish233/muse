@@ -6,6 +6,7 @@ import MuseKit
 /// 编辑面仍是 EditorTextView；禁止在 updateNSView 中回写整篇正文。
 struct EditorView: NSViewRepresentable {
     let document: MuseDocument
+    let isSourceMode: Bool
 
     func makeCoordinator() -> Coordinator {
         Coordinator(document: document)
@@ -29,6 +30,7 @@ struct EditorView: NSViewRepresentable {
 
         textView.delegate = context.coordinator
         document.renderer.textView = textView
+        document.renderer.setPresentationMode(isSourceMode ? .source : .rendered)
         // 初次渲染发生在 textView 挂接之前（selection 为空），挂接后补齐显隐。
         document.renderer.refreshMarkerVisibility(into: document.buffer.textStorage)
 
@@ -36,7 +38,8 @@ struct EditorView: NSViewRepresentable {
     }
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
-        // M1：无状态回写。渲染由 textStorage 编辑回调驱动。
+        // 只同步派生的呈现模式；正文仍由 NSTextStorage 独占，禁止从 SwiftUI 回写。
+        document.renderer.setPresentationMode(isSourceMode ? .source : .rendered)
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
@@ -50,6 +53,7 @@ struct EditorView: NSViewRepresentable {
             guard let document else { return }
             guard let textView = notification.object as? NSTextView else { return }
             guard !textView.hasMarkedText() else { return } // 组合输入期间不做显隐更新
+            document.renderer.refreshPresentationMode()
             document.renderer.updateMarkerVisibility(
                 selection: textView.selectedRange(),
                 into: document.buffer.textStorage

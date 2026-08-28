@@ -12,6 +12,7 @@ import Combine
 @MainActor
 public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageDelegate {
     @Published public private(set) var statusText = "尚未渲染"
+    @Published public private(set) var presentationMode: RenderEngine.PresentationMode = .rendered
     /// 文档大纲（heading 层级），供侧边栏导航使用；随每次渲染应用刷新。
     @Published public private(set) var outline: [OutlineHeading] = []
 
@@ -38,6 +39,9 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
     /// 为 0 时 lastPackage 与正文一致，光标流可安全使用；>0 时包已过期，只做增量。
     private var editsSinceApply = 0
     private var revealCache: [RevealKey: RenderEngine.MarkerState] = [:]
+    /// 已经写入 NSTextStorage 的呈现模式。与 `presentationMode` 分开记录，
+    /// 这样在输入法 marked text 期间收到切换请求时，可以延后到组合输入结束再应用。
+    private var appliedPresentationMode: RenderEngine.PresentationMode = .rendered
     private let clock = ContinuousClock()
 
     /// 最近一次已应用渲染对应的文本 revision（测试与状态展示用）。
@@ -123,9 +127,15 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
         suppressUndo {
             let previousPackage = lastPackage // 结构变更的陈旧样式判定需要旧 package
             let dirtyLines = engine.applyDirty(package: package, previousPackage: previousPackage,
-                                               utf16Range: dirtyNS, into: storage)
-            reconcileVisibility(package: package, selection: textView?.selectedRange(),
-                                into: storage, forceLines: dirtyLines)
+                                               utf16Range: dirtyNS, mode: presentationMode, into: storage)
+            if presentationMode == .rendered {
+                reconcileVisibility(package: package, selection: textView?.selectedRange(),
+                                    into: storage, forceLines: dirtyLines)
+            } else {
+                revealCache.removeAll(keepingCapacity: true)
+                lastReconcileWriteCount = 0
+            }
+            appliedPresentationMode = presentationMode
             textView?.needsDisplay = true
         }
         isApplyingAttributes = false
@@ -182,7 +192,7 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
     /// 字符编辑后、后台解析应用前，lastPackage 对应旧文本（复审 P1-2）——
     /// 此时跳过光标流，避免用旧区间向新存储写属性；应用落地时已按最新选区重算。
     public func updateMarkerVisibility(selection: NSRange?, into storage: NSTextStorage) {
-        guard !isApplyingAttributes, editsSinceApply == 0 else { return }
+        guard presentationMode == .rendered, !isApplyingAttributes, editsSinceApply == 0 else { return }
         guard let package = lastPackage else { return }
         suppressUndo {
             reconcileVisibility(package: package, selection: selection, into: storage, forceLines: nil)
@@ -192,7 +202,7 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
 
     /// 编辑视图挂接后调用：用真实选区补齐首次显隐（初始渲染发生在 textView 存在之前）。
     public func refreshMarkerVisibility(into storage: NSTextStorage) {
-        guard !isApplyingAttributes, editsSinceApply == 0 else { return }
+        guard presentationMode == .rendered, !isApplyingAttributes, editsSinceApply == 0 else { return }
         guard let package = lastPackage else { return }
         suppressUndo {
             reconcileVisibility(package: package, selection: textView?.selectedRange(), into: storage, forceLines: nil)
@@ -203,6 +213,46 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
     /// 供测试直接注入已解析的 package（正常路径由编辑流自动写入）。
     public func adoptPackage(_ package: RenderEngine.Package) {
         lastPackage = package
+    }
+
+    /// 在即时渲染与源码模式之间切换。两种模式共享同一份正文，切换只重建
+    /// 可丢弃属性，不进入 undo 栈，也不创建第二份 String。
+    public func setPresentationMode(_ mode: RenderEngine.PresentationMode) {
+        if presentationMode != mode {
+            presentationMode = mode
+            revealCache.removeAll(keepingCapacity: true)
+            lastReconcileWriteCount = 0
+        }
+        applyPresentationModeIfPossible()
+    }
+
+    /// 组合输入结束时由编辑视图重试尚未落地的模式切换。
+    /// NSTextView 的 marked text 仍由系统独占，不在候选态上改写属性。
+    public func refreshPresentationMode() {
+        applyPresentationModeIfPossible()
+    }
+
+    private func applyPresentationModeIfPossible() {
+        guard appliedPresentationMode != presentationMode,
+              textView?.hasMarkedText() != true,
+              !isApplyingAttributes,
+              editsSinceApply == 0,
+              let package = lastPackage,
+              let storage = textStorage
+        else { return }
+
+        isApplyingAttributes = true
+        suppressUndo {
+            _ = engine.render(
+                package: package,
+                selection: textView?.selectedRange(),
+                mode: presentationMode,
+                into: storage
+            )
+            textView?.needsDisplay = true
+        }
+        isApplyingAttributes = false
+        appliedPresentationMode = presentationMode
     }
 
     /// 侧边栏点击 heading 时调用：把选区放到标题行首并滚动可见。

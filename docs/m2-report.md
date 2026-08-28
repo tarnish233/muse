@@ -1,13 +1,26 @@
 # M2 评价报告
 
-- 日期：2026-08-27
+- 日期：2026-08-27（2026-08-28 更新阶段审计）
 - 范围：v0.3 方案 §06 中 M2「解析与渲染」的退出条件
 - 结论：**通过（PASS）**
-  - M2-1～M2-9 的功能与定性验收全部完成；历史收口为 103 项测试 / 7 套件，本轮追加回归后最新为 **109 项 / 7 套件**。
+  - M2-1～M2-9 的功能与定性验收全部完成；历史收口为 103 项测试 / 7 套件，当前最新为 **115 项 / 8 套件**。
   - 期间存在一个 P0 缺陷（块级视觉完全不可见）与一个 P0 测试缺陷（假绿），**已于 2026-08-27 修复**。
   - AST 唯一语义来源已收口；`TokenScanner.swift` 从 595 行缩至 76 行，`a*b*c` 语义分叉已消除。
 
 M2 的退出条件（v0.3 修订后）：`SourceIndex`、AST 语义层、后台 revision 管线；标题、强调、代码、链接；块级视觉绘制地基（自定义 fragment）；单元测试覆盖 Unicode 与未闭合语法。
+
+## 0. 2026-08-28 当前审计
+
+M2 结论保持 **通过**。当前代码重新执行 Debug 与 Release 全量测试，均为 **115 tests / 8 suites 全绿**；新增的第 8 个套件是后续工作区测试，不改变 M2 的解析/渲染边界。
+
+| 当前性能 | Debug | Release | 判定 |
+|---|---:|---:|---|
+| 200KB `RenderEngine.prepare` | 160.716ms | 67.907ms | Release 低于 150ms 样式落地目标 |
+| 200KB 脏行应用 | 3.384ms | 0.977ms | 低于 16ms 主线程预算 |
+| 200KB 协调器单键路径 | 175.332ms | 71.256ms | Release 达标；Debug 仅使用 200ms 粗防线 |
+| 1MB 全管线 | 2427.097ms | 1671.015ms | 低于现有 3000ms 明显退化防线 |
+
+本次数据取自一次全量冷构建运行，适合作为回归证据，不替代 M6 的固定机器、预热、多次采样与 P95 验收。M2 的功能边界仍不包含 checkbox 点击、图片预览、表格可视化或代码高亮。
 
 ---
 
@@ -25,7 +38,7 @@ M2 的退出条件（v0.3 修订后）：`SourceIndex`、AST 语义层、后台 
 | 渲染协调器 | `Document/RenderCoordinator.swift` | 246 | 8 项 |
 | 性能基准 | `MuseTests/PerformanceTests.swift` | 137 | 5 项 |
 
-历史 M2 收口为 103 项测试 / 7 套件全绿（Swift Testing）。本轮新增 6 项渲染回归后，最新 Debug 全量为 **109 项 / 7 套件**，其中 `RendererTests` 为 **33 项**。产品代码 2497 行为历史收口统计。
+历史 M2 收口为 103 项测试 / 7 套件全绿（Swift Testing）。2026-08-27 新增 6 项渲染回归后，Debug 全量为 **109 项 / 7 套件**，其中 `RendererTests` 为 **33 项**。当前结果见 §0；产品代码 2497 行为历史收口统计。
 
 ## 2. 达成的部分
 
@@ -95,7 +108,7 @@ layer-backed 的 TextKit 2 `NSTextView` 把字形渲染进各 fragment 自己的
 3. 块归属直接读 `NSTextParagraph.attributedString` 首字符的 `.museBlock`——原实现那套「元素偏移回查 storage + 手写缓存（`museBlockCache` / `museBlockSignature` / `ObjectIdentifier` 追踪 / `hasBlockMarkup` 全文档扫描）」整块删掉了，净减 100+ 行。
 4. `draw(at:in:)` 的 `point` 实测恒为 `(0,0)`；容器左边缘 = `point.x - layoutFragmentFrame.minX`；绘制文本需要 `flipped: true` 的 `NSGraphicsContext`。
 
-初次 fragment 修复后的截图曾确认序号 `1.` `2.`、圆点 `•`、复选框 `☑` `☐`、引用通宽背景 + 左竖线、代码块通宽背景（含开闭栏行）、分隔线横线可见；2026-08-27 后续截图复查发现列表 marker 的首行锚定、二级空心形态、垂直基线与水平槽位仍有缺陷，详见 §3.1，故“全部正常”的初次结论已被本轮复查取代。此前 103 项测试的历史结果仍保留；最新回归为 109 项 / 7 套件。
+初次 fragment 修复后的截图曾确认序号 `1.` `2.`、圆点 `•`、复选框 `☑` `☐`、引用通宽背景 + 左竖线、代码块通宽背景（含开闭栏行）、分隔线横线可见；2026-08-27 后续截图复查发现列表 marker 的首行锚定、二级空心形态、垂直基线与水平槽位仍有缺陷，详见 §3.1，故“全部正常”的初次结论已被本轮复查取代。此前 103 项测试的历史结果仍保留；该轮回归为 109 项 / 7 套件。
 
 ### 3.1 2026-08-27 列表与任务 marker 视觉复查（已修复）
 
@@ -108,7 +121,7 @@ layer-backed 的 TextKit 2 `NSTextView` 把字形渲染进各 fragment 自己的
 
 任务 checkbox 的 checked marker 使用系统 accent 色，unchecked marker 使用外观感知的 `secondaryLabelColor`，浅色/深色都通过共享调色板解析。本轮只完成颜色与绘制，不实现点击切换；checkbox 点击切换 `[ ]`/`[x]`、标准文本编辑路径和一次撤销明确留到 M4。
 
-本轮新增 6 项测试：`listMarkersAlignWithFirstVisualLineMetrics`、`unorderedMarkerGlyphsUseSemanticDepth`、`unorderedMarkerPixelsDistinguishFilledAndHollow`、`taskMarkersUseAccentAndContrastingColors`、`orderedMarkersUseStableLaneAndFitLargeNumbers`、`orderedAndUnorderedMarkersShareDepthLaneWithoutMovingContent`。它们经真实 TextKit 2 fragment/位图路径验证首行锚定、垂直对齐、层级符号、checkbox 颜色，以及同层有序/无序固定槽位、`1.`/`2.` 可见左边界和多位序号不侵入正文；最新 Debug 全量证据为 **109 项 / 7 套件**，其中 `RendererTests` 为 **33 项**。独立 bundle Debug App 的视觉人工复查已通过：长列表 marker 位于第一视觉行、同层有序/无序 marker 左边界一致且正文列不动、二级 marker 明确为空心、checked checkbox 为蓝色强调且 unchecked checkbox 为灰色轮廓。M2/M0 的 IME、VoiceOver、零宽 marker 与完整外观热切换清单仍需按验收清单逐项执行；本节不把自动化或人工外观证据写成已完成的 checkbox 点击交互。
+本轮新增 6 项测试：`listMarkersAlignWithFirstVisualLineMetrics`、`unorderedMarkerGlyphsUseSemanticDepth`、`unorderedMarkerPixelsDistinguishFilledAndHollow`、`taskMarkersUseAccentAndContrastingColors`、`orderedMarkersUseStableLaneAndFitLargeNumbers`、`orderedAndUnorderedMarkersShareDepthLaneWithoutMovingContent`。它们经真实 TextKit 2 fragment/位图路径验证首行锚定、垂直对齐、层级符号、checkbox 颜色，以及同层有序/无序固定槽位、`1.`/`2.` 可见左边界和多位序号不侵入正文；截至 2026-08-27 的 Debug 全量证据为 **109 项 / 7 套件**，其中 `RendererTests` 为 **33 项**。独立 bundle Debug App 的视觉人工复查已通过：长列表 marker 位于第一视觉行、同层有序/无序 marker 左边界一致且正文列不动、二级 marker 明确为空心、checked checkbox 为蓝色强调且 unchecked checkbox 为灰色轮廓。M2/M0 的 IME、VoiceOver、零宽 marker 与完整外观热切换清单仍需按验收清单逐项执行；本节不把自动化或人工外观证据写成已完成的 checkbox 点击交互。当前自动化结果见 §0。
 
 ## 4. P0 测试缺陷：假绿（已修复）
 
@@ -700,8 +713,8 @@ NSAppearance.current = nil       → [0.96, 0.97, 0.98, 1.0]
 `TokenScanner.swift` 为 76 行且不含旧 CommonMark 匹配逻辑，`RenderEngine.prepare` 无
 `needsMarkdownSemantics` 短路；初次真机截图确认嵌套列表阶梯缩进、浅深色外观热切换和块视觉，
 Debug/Release 当时均为 103 项 / 7 套件全绿。后续截图复查发现并修复了 §3.1 的四个列表
-marker 缺陷，并补充了任务 checkbox 颜色；最新 Debug 全量为 **109 项 / 7 套件**，其中
-`RendererTests` 为 **33 项**。checkbox 点击切换仍未实现，明确留到 M4。
+marker 缺陷，并补充了任务 checkbox 颜色；截至 2026-08-27 的 Debug 全量为 **109 项 / 7 套件**，其中
+`RendererTests` 为 **33 项**。2026-08-28 当前 Debug/Release 均为 **115 项 / 8 套件**；checkbox 点击切换仍未实现，明确留到 M4。
 
 ### 9.11 交付要求
 

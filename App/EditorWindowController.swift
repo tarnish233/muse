@@ -12,6 +12,8 @@ final class EditorWindowController: NSWindowController {
     private var pendingOpenURL: URL?
     private var isCheckingCurrentDocument = false
 
+    var isSourceMode: Bool { chromeState.isSourceMode }
+
     init(document: MuseDocument) {
         let chromeState = EditorChromeState()
         let navigation = EditorDocumentNavigation()
@@ -123,5 +125,9 @@ final class EditorWindowController: NSWindowController {
             return
         }
         NSApp.presentError(error, modalFor: window, delegate: nil, didPresent: nil, contextInfo: nil)
+    }
+
+    func toggleSourceMode() {
+        chromeState.isSourceMode.toggle()
     }
 }

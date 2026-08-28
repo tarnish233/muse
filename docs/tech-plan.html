@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Muse 技术方案 v0.3</title>
+<title>Muse 技术方案 v0.6</title>
 <style>
   :root {
     color-scheme: light dark;
@@ -97,13 +97,20 @@
 <body>
 <main>
   <header>
-    <p class="eyebrow">技术提案 · v0.3 · 2026-08-27</p>
+    <p class="eyebrow">技术提案 · v0.6 · 2026-08-28</p>
     <h1><span>#</span> Muse 技术方案</h1>
-    <p class="lede">一款极简即时渲染 Markdown 编辑器（对标 Typora），纯 macOS 原生实现。v0.3 在既有架构上补齐了 TextKit 2 fragment 绘制、列表 marker 几何与外观感知的任务 checkbox 颜色，并保留源码单一所有权。</p>
+    <p class="lede">一款极简即时渲染 Markdown 编辑器（对标 Typora），纯 macOS 原生实现。v0.6 已收口 M3 光标交互：保留 NSTextView 原生方向键、鼠标与选区语义，并在同一正文上加入安全的源码模式。</p>
     <div class="meta">
       <span>macOS 14+</span><span>Swift 6</span><span>AppKit · TextKit 2</span><span>SwiftUI</span><span>swift-markdown</span>
     </div>
   </header>
+
+  <section class="callout">
+    <h2><span class="num">M3</span>光标交互收口（2026-08-28）</h2>
+    <p>方向键、鼠标命中和选区继续由系统 <code>NSTextView</code> 负责；Muse 只读取系统选区并更新 marker 派生属性。跨行选择会回显所有相交块的源码 marker。</p>
+    <p>新增“显示 → 源码模式”与 <code>⌘/</code>。模式切换复用唯一 <code>NSTextStorage</code>，不改字符、不标脏、不进入 undo；输入法 marked text 期间延后属性应用。</p>
+    <p>Debug、Release 均为 <strong>120 tests / 8 suites</strong> 全绿；真实窗口已验证方向键穿越 marker、鼠标命中、跨行选区、源码编辑与撤销。M0-3 的完整中文 IME 与 VoiceOver 人工 gate 仍需继续关闭。</p>
+  </section>
 
   <section class="callout">
     <h2><span class="num">00</span>本轮视觉复查（2026-08-27）</h2>
@@ -289,7 +296,7 @@
           <tr><td>M0 技术验证</td><td>3～5 天</td><td>TextKit 2 启用；Unicode 区间正确；marker、选区、换行、IME、undo、VoiceOver 可接受；块级视觉在真机窗口中可见；20KB/200KB 有基准数据</td></tr>
           <tr><td>M1 骨架</td><td>1 周</td><td>单一 text storage 所有权；open/save/autosave；SwiftUI 外壳</td></tr>
           <tr><td>M2 解析与渲染</td><td>1.5～2 周</td><td>SourceIndex、AST、revision 管线；Unicode 与未闭合语法测试；块级视觉 fragment 绘制</td></tr>
-          <tr><td>M3 光标交互</td><td>1.5～2 周</td><td>marker 回显、方向键、鼠标、跨行选区、源码模式；无 TextKit 1 fallback</td></tr>
+          <tr><td>M3 光标交互 · ✅ 通过</td><td>1.5～2 周</td><td>marker 回显、系统原生方向键/鼠标、跨行选区、同一正文源码模式；无 TextKit 1 fallback</td></tr>
           <tr><td>M4 块行为</td><td>1 周</td><td>列表/标题行为；任务 checkbox 点击将源码 <code>[ ]</code>/<code>[x]</code> 标准替换；自动配对；复合操作一次撤销</td></tr>
           <tr><td>M5 收尾功能</td><td>1 周</td><td>图片预览、查找替换、源码模式打磨、（候选）表格渲染</td></tr>
           <tr><td>M6 稳定与发布准备</td><td>1～2 周</td><td>IME、autosave/reopen、恢复、性能、VoiceOver、主题与回归测试</td></tr>
@@ -363,7 +370,7 @@
   </section>
 
   <footer>
-    <strong>下一步：</strong>在已收口的 AST/fragment 管线上继续打磨 M3 marker 回显、方向键、鼠标命中与跨行选区；随后在 M4 实现 checkbox 图形命中、源码 <code>[ ]</code>/<code>[x]</code> 标准文本替换和一次撤销。当前最新 Debug 证据为 109 tests / 7 suites（RendererTests 33 项）。
+    <strong>下一步：</strong>进入 M4，实现列表续行/退出、标题行为、checkbox 图形命中、源码 <code>[ ]</code>/<code>[x]</code> 标准文本替换、自动配对和一次撤销；同时继续关闭 M0-3 的中文 IME 与 VoiceOver 人工 gate。当前 Debug、Release 均为 120 tests / 8 suites。
   </footer>
 </main>
 </body>

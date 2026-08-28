@@ -4,7 +4,7 @@ import MuseKit
 
 /// NSDocument 生命周期应用（M1）：不手动建窗口，开存由 NSDocumentController 管理。
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     func applicationWillFinishLaunching(_ notification: Notification) {
         AppPreferences.applyAppearance()
         MuseDocument.windowControllerFactory = { document in
@@ -67,7 +67,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         editMenu.addItem(withTitle: "全选", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         editMenuItem.submenu = editMenu
 
+        let viewMenuItem = NSMenuItem()
+        mainMenu.addItem(viewMenuItem)
+        let viewMenu = NSMenu(title: "显示")
+        let sourceModeItem = NSMenuItem(
+            title: "源码模式",
+            action: #selector(toggleSourceMode(_:)),
+            keyEquivalent: "/"
+        )
+        sourceModeItem.target = self
+        viewMenu.addItem(sourceModeItem)
+        viewMenuItem.submenu = viewMenu
+
         return mainMenu
+    }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        guard menuItem.action == #selector(toggleSourceMode(_:)) else { return true }
+        guard let controller = NSApp.keyWindow?.windowController as? EditorWindowController else {
+            menuItem.state = .off
+            return false
+        }
+        menuItem.state = controller.isSourceMode ? .on : .off
+        return true
+    }
+
+    @objc private func toggleSourceMode(_ sender: Any?) {
+        guard let controller = NSApp.keyWindow?.windowController as? EditorWindowController else { return }
+        controller.toggleSourceMode()
     }
 
     @objc private func showSettings(_ sender: Any?) {

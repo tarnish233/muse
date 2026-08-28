@@ -1,10 +1,23 @@
 # M0 技术验证报告
 
-- 日期：2026-08-26（2026-08-27 补充 §8 gate 复盘）
+- 日期：2026-08-26（2026-08-28 更新阶段审计）
 - 范围：v0.2 方案 §06 中 M0 的 go/no-go gate
-- 结论：**通过（属性层）+ gate 定义有缺口（绘制层）**
-  - 自动化验证全绿；零宽 marker 的视觉、IME、VoiceOver 三项需人工验收，见 §6。
-  - 2026-08-27 追加：本次 gate 的十项验收全部围绕**属性层**，没有一项检查**绘制层**（块级视觉能否在真机画出来）。该缺口在 M2 期间导致一个 P0 缺陷长期不可见。详见 §8。技术路线本身的 go 判断不变。
+- 结论：**有条件通过（工程实现完成，正式人工 gate 未闭合）**
+  - 2026-08-28 当前 Debug 与 Release 均为 **115 tests / 8 suites 全绿**，属性层和真实 fragment 绘制层已有自动化证据。
+  - M0-1、M0-2 已完成；M0-3 的零宽留白、中文 IME、撤销手感、VoiceOver 等人工项仍未完整执行并回填。
+  - 技术路线的 go 判断不变，但在 M0-3 关闭前不得再把 M0 标成无条件“通过”。
+
+## 0. 2026-08-28 当前审计
+
+| 维度 | 当前判断 | 证据/缺口 |
+|---|---|---|
+| TextKit 2 与区间层 | ✅ 完成 | 显式手工栈；Unicode/CRLF/emoji/ZWJ 测试通过 |
+| 属性层与源码不变式 | ✅ 完成 | marker 显隐、渲染不改字符、undo 隔离均有测试 |
+| 块级绘制地基 | ✅ 完成 | 真实 `NSTextLayoutFragment` 与位图回归覆盖各块类型及外观 |
+| 当前自动化 | ✅ 完成 | Debug、Release 均为 115 tests / 8 suites |
+| 人工 gate | ⏳ 未完成 | §6 与 §9.4 尚未完整回填，关键项为 1/2/7/9 |
+
+M0 当前不存在阻止 M1/M2 代码成立的已知技术缺陷；它的未完成项是**正式验收缺口**。完整跨阶段结论见《M0–M2 阶段完成情况报告》。
 
 ## 1. 交付物
 
@@ -19,7 +32,7 @@
 | 性能基准 | `MuseTests/PerformanceTests.swift` | ✅ 4 项 |
 | 文档往返（NSDocument 序列化） | `MuseTests/DocumentTests.swift` | ✅ 4 项 |
 
-M0 初始回归为 **50 项测试全绿**（Swift Testing）。这是历史基线；截至 2026-08-27 本轮修复后的最新 Debug 全量回归为 **109 项 / 7 套件**，其中 `RendererTests` 为 **33 项**。
+M0 初始回归为 **50 项测试全绿**（Swift Testing）。这是历史基线；截至 2026-08-27 列表修复后的 Debug 全量回归为 **109 项 / 7 套件**，其中 `RendererTests` 为 **33 项**。当前结果已更新在 §0。
 
 ## 2. 性能基准（Debug 构建，Apple Silicon）
 
@@ -151,7 +164,7 @@ M0 的代码部分已完成。剩下的是**验收动作**，分两类：可自�
 2. **禁止访问 TextKit 1 的 `layoutManager`。** 只用 `textLayoutManager`。
 3. **渲染测试必须走框架真实产出的对象。** 不允许「自己造 `NSGraphicsContext` + 直接调绘制函数」然后断言像素——这正是 M2 那个假绿缺陷的成因（见《M2 评价报告》§4）。块视觉的断言必须经由 `layoutManager.enumerateTextLayoutFragments` 拿到的 fragment。
 4. **属性写入不得进入撤销栈。** 保持包在 `disableUndoRegistration` 内。
-5. 每个任务完成后跑全量测试：`xcodebuild test -project Muse.xcodeproj -scheme Muse -destination 'platform=macOS,arch=arm64' -derivedDataPath build`。开工基线为 **78 项 / 7 套件全绿**；此前 M2 收口为 103 项，本轮最新回归为 **109 项 / 7 套件全绿**，不允许变红。
+5. 每个任务完成后跑全量测试：`xcodebuild test -project Muse.xcodeproj -scheme Muse -destination 'platform=macOS,arch=arm64' -derivedDataPath build`。开工基线为 **78 项 / 7 套件全绿**；此前 M2 收口为 103 项，当前回归基线为 **115 项 / 8 套件全绿**，不允许变红。
 
 ### 9.2 任务 M0-1：块级视觉的自动化回归（Codex，✅ 已完成）
 
@@ -169,7 +182,7 @@ M0 的代码部分已完成。剩下的是**验收动作**，分两类：可自�
 **完成记录（2026-08-27）**：已完成。`blockVisualsRenderForEachBlockKind` 通过真实
 `textLayoutManager.enumerateTextLayoutFragments` 获取 `MuseLayoutFragment`，分别验证列表、
 引用、代码围栏和分隔线落墨；与既有 `blockVisualsComeFromLayoutFragments` 一并纳入此前
-103 项全量回归。本轮最新全量回归为 109 项 / 7 套件。
+103 项全量回归；2026-08-27 该任务完成时为 109 项 / 7 套件，当前结果见 §0。
 
 ### 9.3 任务 M0-2：暗色模式块视觉自动化断言（Codex，✅ 已完成）
 
@@ -233,4 +246,4 @@ Codex 可以做的准备工作：把 §6 表格加一列「实测结果」并留
 
 任务 checkbox 的 checked marker 现使用系统 accent 色，unchecked marker 使用外观感知的 `secondaryLabelColor`，浅色/深色均由共享调色板解析。本轮只完成颜色与绘制；checkbox 点击切换 `[ ]`/`[x]`、标准文本编辑路径和一次撤销明确留到 M4，不能据此宣称 M0/M2 或当前已有点击交互。
 
-本轮新增 6 项测试：`listMarkersAlignWithFirstVisualLineMetrics`、`unorderedMarkerGlyphsUseSemanticDepth`、`unorderedMarkerPixelsDistinguishFilledAndHollow`、`taskMarkersUseAccentAndContrastingColors`、`orderedMarkersUseStableLaneAndFitLargeNumbers`、`orderedAndUnorderedMarkersShareDepthLaneWithoutMovingContent`。它们经真实 TextKit 2 fragment/位图路径验证首行锚定、垂直对齐、层级符号、checkbox 颜色，以及同层有序/无序固定槽位、`1.`/`2.` 可见左边界和多位序号不侵入正文；最新 Debug 全量证据为 **109 项 / 7 套件**，其中 `RendererTests` 为 **33 项**。独立 bundle Debug App 的视觉人工复查已通过：长列表 marker 位于第一视觉行、同层有序/无序 marker 左边界一致且正文列不动、二级 marker 为空心、checked checkbox 为蓝色强调且 unchecked checkbox 为灰色轮廓。M0-3 表中的人工 IME、VoiceOver、零宽 marker 和完整外观热切换清单仍需逐项执行，本节不替代该验收。
+本轮新增 6 项测试：`listMarkersAlignWithFirstVisualLineMetrics`、`unorderedMarkerGlyphsUseSemanticDepth`、`unorderedMarkerPixelsDistinguishFilledAndHollow`、`taskMarkersUseAccentAndContrastingColors`、`orderedMarkersUseStableLaneAndFitLargeNumbers`、`orderedAndUnorderedMarkersShareDepthLaneWithoutMovingContent`。它们经真实 TextKit 2 fragment/位图路径验证首行锚定、垂直对齐、层级符号、checkbox 颜色，以及同层有序/无序固定槽位、`1.`/`2.` 可见左边界和多位序号不侵入正文；截至 2026-08-27 的 Debug 全量证据为 **109 项 / 7 套件**，其中 `RendererTests` 为 **33 项**。独立 bundle Debug App 的视觉人工复查已通过：长列表 marker 位于第一视觉行、同层有序/无序 marker 左边界一致且正文列不动、二级 marker 为空心、checked checkbox 为蓝色强调且 unchecked checkbox 为灰色轮廓。M0-3 表中的人工 IME、VoiceOver、零宽 marker 和完整外观热切换清单仍需逐项执行，本节不替代该验收；当前自动化结果见 §0。

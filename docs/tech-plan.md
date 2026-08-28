@@ -2,7 +2,7 @@
 
 一款极简即时渲染 Markdown 编辑器（对标 Typora），纯 macOS 原生实现。
 
-- 版本：v0.4 · 2026-08-27
+- 版本：v0.6 · 2026-08-28
 - 目标平台：macOS 14+
 - 技术栈：Swift 6 · AppKit（TextKit 2）· SwiftUI · swift-markdown
 
@@ -15,6 +15,10 @@
 > 详见 §2.1、§4.1、§4.2、§4.8 与《M2 评价报告》。
 
 > **v0.4 工作区修订说明**：SwiftUI 外壳不再展示“假项目 + 当前文稿”静态列表，改为 Codex 风格的真实目录工作区。三列布局、侧栏表面、宽度、分隔线与开合状态均由 Muse 自己控制，不使用 `NavigationSplitView`、系统 sidebar `List` 或 `.inspector`；左侧项目可展开为文件树，并支持新建项目、打开项目、在项目或任意文件夹中新建文件/文件夹。文件与文档生命周期仍优先使用 macOS 官方 API，详见《工作区与侧栏重构报告》及 §3.1。
+
+> **v0.5 阶段审计说明**：2026-08-28 按当前代码重新核对 M0–M2。Debug 与 Release 均为 **115 tests / 8 suites 全绿**；Release 200KB 协调器单键路径为 71.256ms，低于 150ms 样式落地目标。M1、M2 正式通过；M0 的工程实现和自动化已完成，但 M0-3 的 IME、VoiceOver、零宽 marker 等人工 gate 尚未完整回填，因此正式状态修正为“有条件通过”。详见《M0–M2 阶段完成情况报告》。
+
+> **v0.6 M3 收口说明**：M3 光标交互已完成。方向键、鼠标命中和选区继续由系统 `NSTextView` 处理，Muse 只根据系统选区更新 marker 派生属性；跨行选择现在会回显所有相交块的源码 marker。新增同一 `NSTextStorage` 上的源码模式，可通过“显示 → 源码模式”或 `⌘/` 切换，切换不改字符、不标脏、不进入 undo，并在输入法 marked text 期间延后属性更新。Debug、Release 均为 **120 tests / 8 suites 全绿**；真实窗口已验证方向键穿越 marker、鼠标命中、跨行选择、源码编辑与撤销。详见《M3 光标交互报告》。
 
 ---
 
@@ -29,7 +33,7 @@
 
 任务 checkbox 的 checked marker 使用系统 accent 色，unchecked marker 使用 `secondaryLabelColor`，两者都按浅色/深色外观解析。本轮只完成颜色与绘制，不实现点击切换；checkbox 点击将留到 M4，并通过标准文本编辑把 `[ ]`/`[x]` 替换为一次可撤销的源码操作。
 
-本轮新增 6 项真实 TextKit 2/位图回归测试；最新 Debug 全量证据为 **109 tests / 7 suites**，其中 `RendererTests` 为 **33 项**。这组证据验证了首行锚定、无序 marker 的 x-height 对齐、有序 marker 的 baseline 与固定槽位、`1.`/`2.` 的可见墨迹左边界、`98.`/`99.`/`100.` 不侵入正文、一级实心与二级空心的实际 fragment 像素，以及任务 checkbox 的外观颜色。
+本轮新增 6 项真实 TextKit 2/位图回归测试；该轮 Debug 全量证据为 **109 tests / 7 suites**，其中 `RendererTests` 为 **33 项**。这组证据验证了首行锚定、无序 marker 的 x-height 对齐、有序 marker 的 baseline 与固定槽位、`1.`/`2.` 的可见墨迹左边界、`98.`/`99.`/`100.` 不侵入正文、一级实心与二级空心的实际 fragment 像素，以及任务 checkbox 的外观颜色。当前全量结果见 v0.5 阶段审计说明。
 
 根任务以独立 bundle 启动 Debug App 做了视觉人工复查，已确认长列表 marker 位于第一视觉行、无序 marker 与正文 x-height 居中、有序序号与正文基线一致、二级 marker 明确为空心、checked checkbox 使用蓝色强调而 unchecked checkbox 使用灰色轮廓。本结果只覆盖本轮列表/checkbox 外观，不等同于 M0-3 的 IME、VoiceOver、零宽 marker、完整外观热切换等清单已全部完成。
 
@@ -55,7 +59,7 @@
 | 方案 | 手感 / 输入法 | 开发量 | 结论 |
 |---|---|---|---|
 | A · 原生 `NSTextView` + TextKit 2 | 系统原生编辑、IME、滚动和辅助功能基础最好 | 编辑语义与块级绘制需要自研 | ✅ 推荐（选定，M0–M2 已验证） |
-| B · 原生壳 + `WKWebView` + CodeMirror 6 / Milkdown | 开发快，但输入、字体与系统服务隔着 WebKit | 数周可形成可用原型 | ⚠️ 已不再需要（M0 gate 通过） |
+| B · 原生壳 + `WKWebView` + CodeMirror 6 / Milkdown | 开发快，但输入、字体与系统服务隔着 WebKit | 数周可形成可用原型 | ⚠️ 已不再需要（M0 技术路线 go 判断已成立） |
 | C · SwiftUI `TextEditor` + `AttributedString` | 原生输入，但拿不到排版层 | 表面最省 | ❌ 排除（见 §2.1，实测三处硬阻塞） |
 | D · 自研排版引擎（不用 TextKit） | 需自建 IME / 选区 / 无障碍 | 极大 | ❌ 排除（见 §2.1） |
 
@@ -305,7 +309,7 @@ marker 字符始终存在，只改变视觉属性。光标或选区进入对应 
 | `revealed` | 正常字号 + 弱化色 | 光标所在行/块 |
 | `hidden` | 近零宽字体（0.1pt）+ 透明 | 行内、列表/任务、引用/围栏/分隔线标记；列表图形由绘制层在段落 marker 带画出 |
 
-M0 已验证近零宽方案在中文、emoji、组合字符、跨行选择、自动换行、鼠标点击、方向键下工作正常。降级路径（marker 改弱化色 + 小字号）保留但未启用。
+自动化与局部真机检查已验证近零宽方案在中文、emoji、组合字符、跨行选择、自动换行、鼠标点击、方向键下的基础行为；M0-3 的完整人工观感、IME 与 VoiceOver gate 仍待回填。降级路径（marker 改弱化色 + 小字号）保留但未启用。
 
 > v0.2 把「自定义 `NSTextLayoutFragment`」列为本节的第三级降级选项。这是分类错误：marker 隐藏（属性层）与块级视觉（绘制层）是两件正交的事，fragment 属于后者且不可绕过。见 §4.8。
 
@@ -375,7 +379,7 @@ M0 已验证近零宽方案在中文、emoji、组合字符、跨行选择、自
 | 20KB | 9.350 ms | 3.565 ms |
 | 200KB | 97.765 ms | 36.665 ms |
 
-M1-2 已恢复 Release 测量链路；历史 Release 全量测试为 103 项 / 7 套件全绿。作为历史对比，v0.2 的手写字节扫描器在 200KB 上是 8.0 ms，但当前全量 AST 仍落在后台与 150ms 样式落地目标内，因此不需要维护第二套 CommonMark 实现。最新 Debug 回归（含本轮 6 项渲染测试）为 109 项 / 7 套件全绿。
+M1-2 已恢复 Release 测量链路；历史 Release 全量测试为 103 项 / 7 套件全绿。作为历史对比，v0.2 的手写字节扫描器在 200KB 上是 8.0 ms，但当前全量 AST 仍落在后台与 150ms 样式落地目标内，因此不需要维护第二套 CommonMark 实现。截至 2026-08-27 的 Debug 回归（含该轮 6 项渲染测试）为 109 项 / 7 套件全绿；2026-08-28 当前证据为 Debug/Release 115 项 / 8 套件全绿。
 
 因此顺序是：**先用全量 AST 解析，把架构简化下来**；只有当样式落地延迟实测不达标时，才引入块级脏区重解析——即定位变化所在的顶层块，只对该块调用 `Document(parsing:)`，而不是维护第二套 CommonMark 实现。swift-markdown 与 cmark-gfm 都不提供增量解析 API。
 
@@ -473,10 +477,10 @@ NSAppearance.current = nil       → [0.96, 0.97, 0.98, 1.0]   ← 静默回落�
 
 | 阶段 | 工期 | 内容与退出条件 | 状态 |
 |---|---|---|---|
-| M0 技术验证 | 3～5 天 | TextKit 2 明确启用；中英文/emoji 下区间正确；marker 隐藏、选区、换行、IME、undo、VoiceOver 可接受；**块级视觉在真机窗口中可见**；20KB/200KB 基准有数据 | ✅ 通过（绘制层验收后补，见 M0 报告 §8） |
-| M1 骨架 | 1 周 | Xcode 工程；`NSDocument → EditorBuffer → NSTextStorage` 单一所有权；open/save/autosave；SwiftUI 外壳 | ✅ 通过 |
-| M2 解析与渲染 | 1.5～2 周 | `SourceIndex`、AST 语义层、后台 revision 管线；标题、强调、代码、链接；**块级视觉绘制地基（自定义 fragment）**；单元测试覆盖 Unicode 与未闭合语法 | ✅ 通过（M2-1～M2-9 已收口，见 M2 报告 §9.10） |
-| M3 光标交互 | 1.5～2 周 | marker 回显、方向键、鼠标命中、跨行选区、源码模式；无 TextKit 1 fallback | 未开始 |
+| M0 技术验证 | 3～5 天 | TextKit 2 明确启用；中英文/emoji 下区间正确；marker 隐藏、选区、换行、IME、undo、VoiceOver 可接受；**块级视觉在真机窗口中可见**；20KB/200KB 基准有数据 | ⚠️ 有条件通过：实现与自动化完成，M0-3 人工 gate 待回填 |
+| M1 骨架 | 1 周 | Xcode 工程；`NSDocument → EditorBuffer → NSTextStorage` 单一所有权；open/save/autosave；SwiftUI 外壳 | ✅ 通过（当前 Debug/Release 回归均通过） |
+| M2 解析与渲染 | 1.5～2 周 | `SourceIndex`、AST 语义层、后台 revision 管线；标题、强调、代码、链接；**块级视觉绘制地基（自定义 fragment）**；单元测试覆盖 Unicode 与未闭合语法 | ✅ 通过（M2-1～M2-9 已收口；当前 Release 性能达标） |
+| M3 光标交互 | 1.5～2 周 | marker 回显、方向键、鼠标命中、跨行选区、源码模式；无 TextKit 1 fallback | ✅ 通过（系统原生输入/命中；源码模式不改字符） |
 | M4 块行为 | 1 周 | 列表续行/退出、标题行为、任务 checkbox 点击将源码 `[ ]`/`[x]` 标准替换、自动配对；复合操作一次撤销 | 未开始 |
 | M5 收尾功能 | 1 周 | 图片预览、查找替换、源码模式打磨、（候选）表格渲染 | 未开始 |
 | M6 稳定与发布准备 | 1～2 周 | IME 矩阵、autosave/reopen、崩溃恢复、性能、VoiceOver、主题和回归测试 | 未开始 |
@@ -486,7 +490,7 @@ NSAppearance.current = nil       → [0.96, 0.97, 0.98, 1.0]   ← 静默回落�
 1. **块级视觉从 M5 前移到 M2/M3。** v0.2 把「代码围栏、引用、分隔线」放在 M5「收尾功能」，但它们依赖 §4.8 的绘制地基。把地基放在最后一个功能里程碑等于把最大的架构风险留到最后；实际也已经发生——这些功能在 M2 期间被提前实现，但因地基缺失全部不可见。M5 相应改为图片预览与打磨。
 2. **M0 gate 补入绘制层验收。** v0.2 版 M0 的十项人工验收全部围绕属性层，没有一项检查块级视觉能否画出来，导致假绿测试存活。
 
-M0 仍是 go/no-go gate。
+M0 仍是 go/no-go gate。工程开发可以在已验证的技术路线上继续，但在宣称“M0–M2 全部正式通过”或进入发布准备前，必须完成并回填 M0-3 人工验收。
 
 ## 07 风险
 
@@ -495,7 +499,7 @@ M0 仍是 go/no-go gate。
 | UTF-8 `SourceRange` 与 UTF-16 `NSRange` 错位 | P0 | 独立 `SourceIndex`；中文、emoji、组合字符和多行 golden tests |
 | 视图级绘制在 layer-backed TextKit 2 上无效 | P0 | 块级视觉一律走自定义 `NSTextLayoutFragment`；测试断言必须经由 `layoutManager` 真实生产的 fragment（§4.8） |
 | 双层解析实现产生语义分叉 | P0 | AST 是唯一语义与定位来源；扫描器职责严格限于未闭合语法；对 AST 做差异测试（§4.1） |
-| 零宽 marker 破坏换行、命中或辅助功能 | P0 | M0 已验证通过；降级路径（弱化显示）保留 |
+| 零宽 marker 破坏换行、命中或辅助功能 | P0 | 自动化与局部真机证据已覆盖基础行为；M0-3 完整人工 gate 待回填；降级路径（弱化显示）保留 |
 | IME 与异步渲染互相干扰 | P0 | 跳过 marked range；后台快照 + revision；中文输入矩阵 |
 | 文档模型与 text view 出现双重真相 | P0 | `EditorBuffer.textStorage` 是唯一可变正文；SwiftUI 不回写整篇字符串 |
 | 测试绕过真实渲染路径产生假绿 | P1 | 渲染测试必须走 `NSTextLayoutManager` / `NSTextStorage` 真实路径；禁止直接调用绘制函数断言像素 |
@@ -547,7 +551,7 @@ M0 仍是 go/no-go gate。
 
 ---
 
-**下一步：**进入 M3 光标交互：在已收口的 AST/fragment 管线上继续打磨 marker 回显、方向键、鼠标命中与跨行选区；随后在 M4 实现 checkbox 图形命中、源码 `[ ]`/`[x]` 标准文本替换和一次撤销。M2 的历史验收与本轮复查证据见《M2 评价报告》§9.10。
+**下一步：**进入 M4 块行为：列表续行/退出、标题行为、checkbox 图形命中、源码 `[ ]`/`[x]` 标准文本替换、自动配对，并保证复合操作一次撤销。同时继续关闭 M0-3 的中文 IME 与 VoiceOver 完整人工 gate；M3 的交互收口证据见《M3 光标交互报告》，M0–M2 的阶段审计见《M0–M2 阶段完成情况报告》。
 
 ## 参考资料
 

@@ -119,6 +119,22 @@ import Testing
         #expect(document.isDocumentEdited == false)
     }
 
+    @Test func sourceModeToggleDoesNotChangeOrDirtyDocument() throws {
+        let document = MuseDocument()
+        let source = "# 标题\n\n- 列表\n\n**粗体**"
+        try load(source, into: document)
+        let package = RenderEngine().prepare(source)
+        document.renderer.adoptPackage(package)
+
+        document.renderer.setPresentationMode(.source)
+        #expect(document.buffer.string == source)
+        #expect(!document.isDocumentEdited)
+
+        document.renderer.setPresentationMode(.rendered)
+        #expect(document.buffer.string == source)
+        #expect(!document.isDocumentEdited)
+    }
+
     @Test func textEditMarksDocumentDirty() throws {
         let document = MuseDocument()
         try load("正文", into: document)

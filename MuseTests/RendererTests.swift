@@ -109,6 +109,55 @@ import Testing
         #expect(storage.string == source)
     }
 
+    @Test func crossLineSelectionRevealsEverySelectedBlockMarker() {
+        let source = "- first\n> quote\nplain\n1. outside"
+        let storage = NSTextStorage(string: source)
+        let package = engine.prepare(source)
+        let start = (source as NSString).range(of: "first").location
+        let endRange = (source as NSString).range(of: "quote")
+        let selection = NSRange(location: start, length: endRange.location + endRange.length - start)
+
+        _ = engine.render(package: package, selection: selection, into: storage)
+
+        #expect(!isHidden((source as NSString).range(of: "- ").location, in: storage))
+        #expect(!isHidden((source as NSString).range(of: "> ").location, in: storage))
+        #expect(isHidden((source as NSString).range(of: "1. ").location, in: storage))
+        #expect(storage.string == source)
+    }
+
+    @Test func sourceModeShowsLiteralMarkdownWithoutBlockDecorations() {
+        let source = "# Title\n- item\n**bold**"
+        let storage = NSTextStorage(string: source)
+        let package = engine.prepare(source)
+
+        _ = engine.render(
+            package: package,
+            selection: NSRange(location: storage.length, length: 0),
+            mode: .source,
+            into: storage
+        )
+
+        #expect(storage.string == source)
+        #expect(font(at: 0, in: storage) == theme.codeFont())
+        #expect(font(at: (source as NSString).range(of: "bold").location, in: storage) == theme.codeFont())
+        #expect(storage.attribute(.museBlock, at: (source as NSString).range(of: "- ").location, effectiveRange: nil) == nil)
+    }
+
+    @Test func renderedModeRestoresPreviewAfterSourceMode() {
+        let source = "正文\n- item"
+        let storage = NSTextStorage(string: source)
+        let package = engine.prepare(source)
+        let selection = NSRange(location: 0, length: 0)
+
+        _ = engine.render(package: package, selection: selection, mode: .source, into: storage)
+        _ = engine.render(package: package, selection: selection, mode: .rendered, into: storage)
+
+        let marker = (source as NSString).range(of: "- ").location
+        #expect(isHidden(marker, in: storage))
+        #expect(storage.attribute(.museBlock, at: marker, effectiveRange: nil) as? String == BlockVisual.list.rawValue + ":u")
+        #expect(storage.string == source)
+    }
+
     @Test func chinesePositionsInRenderedStorage() {
         // CJK 的成对语义由 AST 提供，紧贴汉字的 marker 仍能精确定位。
         let source = "你好**世界**"

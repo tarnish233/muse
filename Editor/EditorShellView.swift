@@ -85,6 +85,7 @@ struct EditorShellView: View {
         VStack(spacing: 0) {
             CodexDocumentTitlebar(
                 document: document,
+                windowControls: chromeState.windowControls,
                 reservesWindowControls: !chromeState.isProjectSidebarPresented
             )
             .frame(height: EditorChromeMetrics.titlebarHeight)
@@ -116,6 +117,9 @@ struct EditorShellView: View {
         .allowsHitTesting(chromeState.isOutlinePresented)
     }
 
+    /// Floats over both sidebars and the editor column, on the traffic lights'
+    /// own centerline. Centering these in the band instead put them 7pt below the
+    /// window buttons a few points to their left.
     private var titlebarControls: some View {
         HStack(spacing: 0) {
             CodexTitlebarButton(
@@ -126,7 +130,7 @@ struct EditorShellView: View {
             ) {
                 chromeState.isProjectSidebarPresented.toggle()
             }
-            .padding(.leading, EditorChromeMetrics.leadingControlInset)
+            .padding(.leading, chromeState.windowControls.leadingControlInset)
 
             Spacer(minLength: 0)
 
@@ -140,7 +144,8 @@ struct EditorShellView: View {
             }
             .padding(.trailing, EditorChromeMetrics.trailingControlInset)
         }
-        .frame(height: EditorChromeMetrics.titlebarHeight)
+        .frame(height: EditorChromeMetrics.titlebarControlSize)
+        .padding(.top, chromeState.windowControls.controlTopInset)
         .frame(maxWidth: .infinity)
     }
 

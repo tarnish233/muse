@@ -50,6 +50,32 @@ final class EditorWindowController: NSWindowController {
         window.isMovableByWindowBackground = true
         window.isReleasedWhenClosed = false
         window.makeKeyAndOrderFront(nil)
+
+        // 标题栏控件要和红绿灯同一条中心线，所以几何必须从窗口读、不能写死。
+        // 只在进出全屏时重测：中心线与组右缘都贴着窗口左上角，缩放窗口不会改变它们
+        // （已实测 1pt 高与 760pt 高的内容区都给出同一个 16.00pt）。
+        for name in [NSWindow.didEnterFullScreenNotification, NSWindow.didExitFullScreenNotification] {
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(windowControlsGeometryDidChange),
+                name: name,
+                object: window
+            )
+        }
+        refreshWindowControlsGeometry()
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    @objc private func windowControlsGeometryDidChange() {
+        refreshWindowControlsGeometry()
+    }
+
+    private func refreshWindowControlsGeometry() {
+        guard let window else { return }
+        chromeState.windowControls = WindowControlsGeometry.measured(in: window) ?? .unavailable
     }
 
     @available(*, unavailable)

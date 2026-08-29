@@ -1,12 +1,12 @@
 import Foundation
 
-struct WorkspaceEntryMetadata {
+nonisolated struct WorkspaceEntryMetadata: Sendable {
     let isDirectory: Bool
     let isRegularFile: Bool
     let isPackage: Bool
 }
 
-struct WorkspaceFileSystem {
+nonisolated struct WorkspaceFileSystem: @unchecked Sendable {
     let contentsOfDirectory: (URL) throws -> [URL]
     let metadata: (URL) throws -> WorkspaceEntryMetadata
 

@@ -572,6 +572,51 @@ import Testing
         #expect(storage.string == "| B | C | A |\n| :---: | ---: | --- |\n| 2 | 3 | 1 |")
     }
 
+    @Test func structuralEditKeepsTableInsideBlockQuote() throws {
+        let source = "> | A | B |\n> |---|---|\n> | 1 | 2 |"
+        let storage = NSTextStorage(string: source)
+        let package = engine.prepare(source)
+        _ = engine.render(package: package, selection: nil, into: storage)
+        let table = try #require(package.tables.first)
+        #expect(table.containerPrefix == "> ")
+
+        let textView = EditorTextView.make(textStorage: storage)
+        let coordinator = RenderCoordinator()
+        coordinator.attach(storage: storage)
+        coordinator.textView = textView
+        coordinator.adoptPackage(package)
+
+        #expect(coordinator.moveTableColumn(tableID: table.headerLine, from: 0, to: 1))
+        #expect(storage.string == "> | B | A |\n> | --- | --- |\n> | 2 | 1 |")
+
+        let reparsed = engine.prepare(storage.string)
+        #expect(reparsed.tables.count == 1)
+        #expect(reparsed.tables.first?.containerPrefix == "> ")
+    }
+
+    @Test func returnAtLastCellAppendsQuotedTableRow() throws {
+        let source = "> | A | B |\n> |---|---|\n> | 1 | 2 |"
+        let storage = NSTextStorage(string: source)
+        let package = engine.prepare(source)
+        _ = engine.render(package: package, selection: nil, into: storage)
+        let table = try #require(package.tables.first)
+        let lastCell = try #require(table.rows.last?.cells.last)
+
+        let textView = EditorTextView.make(textStorage: storage)
+        textView.setSelectedRange(NSRange(location: package.index.nsRange(lastCell.ink).upperBound, length: 0))
+        let coordinator = RenderCoordinator()
+        coordinator.attach(storage: storage)
+        coordinator.textView = textView
+        coordinator.adoptPackage(package)
+
+        #expect(coordinator.insertTableRowOnReturn())
+        #expect(storage.string == source + "\n> |  |  |")
+
+        let reparsed = engine.prepare(storage.string)
+        #expect(reparsed.tables.first?.rows.count == 3)
+        #expect(reparsed.tables.first?.containerPrefix == "> ")
+    }
+
     @Test func cancellingTableDragOnlyClearsTransientPresentation() throws {
         let source = "| A | B |\n|---|---|\n| 1 | 2 |"
         let storage = NSTextStorage(string: source)

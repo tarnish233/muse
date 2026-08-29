@@ -62,11 +62,11 @@ public final class MuseDocument: NSDocument {
     nonisolated public override class var autosavesInPlace: Bool { true }
 
     nonisolated public override class var readableTypes: [String] {
-        ["net.daringfireball.markdown", "public.plain-text", "public.text"]
+        ["net.daringfireball.markdown", "public.plain-text"]
     }
 
     nonisolated public override class var writableTypes: [String] {
-        ["net.daringfireball.markdown", "public.plain-text", "public.text"]
+        ["net.daringfireball.markdown", "public.plain-text"]
     }
 
     // MARK: - 序列化
@@ -90,6 +90,53 @@ public final class MuseDocument: NSDocument {
     }
 
     private var lineEnding = LineEnding.lf
+
+    private nonisolated enum FileEncoding: Sendable {
+        case utf8
+        case utf8WithBOM
+        case utf16LittleEndian
+        case utf16BigEndian
+
+        static func decode(_ data: Data) -> (text: String, encoding: FileEncoding)? {
+            if data.starts(with: [0xEF, 0xBB, 0xBF]) {
+                return String(data: data.dropFirst(3), encoding: .utf8).map { ($0, .utf8WithBOM) }
+            }
+            if data.starts(with: [0xFF, 0xFE]) {
+                let body = data.dropFirst(2)
+                guard body.count.isMultiple(of: 2) else { return nil }
+                return String(data: body, encoding: .utf16LittleEndian)
+                    .map { ($0, .utf16LittleEndian) }
+            }
+            if data.starts(with: [0xFE, 0xFF]) {
+                let body = data.dropFirst(2)
+                guard body.count.isMultiple(of: 2) else { return nil }
+                return String(data: body, encoding: .utf16BigEndian)
+                    .map { ($0, .utf16BigEndian) }
+            }
+            return String(data: data, encoding: .utf8).map { ($0, .utf8) }
+        }
+
+        func encode(_ text: String) -> Data? {
+            switch self {
+            case .utf8:
+                return Data(text.utf8)
+            case .utf8WithBOM:
+                return Data([0xEF, 0xBB, 0xBF]) + Data(text.utf8)
+            case .utf16LittleEndian:
+                guard let body = text.data(using: .utf16LittleEndian, allowLossyConversion: false) else {
+                    return nil
+                }
+                return Data([0xFF, 0xFE]) + body
+            case .utf16BigEndian:
+                guard let body = text.data(using: .utf16BigEndian, allowLossyConversion: false) else {
+                    return nil
+                }
+                return Data([0xFE, 0xFF]) + body
+            }
+        }
+    }
+
+    private var fileEncoding = FileEncoding.utf8
 
     /// 全文扫描出每个行终止符，按出现次数取主流的那一种；平票时取最早出现的。
     ///
@@ -131,9 +178,10 @@ public final class MuseDocument: NSDocument {
     }
 
     nonisolated public override func read(from data: Data, ofType typeName: String) throws {
-        guard let text = String(data: data, encoding: .utf8) else {
+        guard let decoded = FileEncoding.decode(data) else {
             throw CocoaError(.fileReadCorruptFile)
         }
+        let text = decoded.text
         let ending = Self.dominantLineEnding(in: text)
         // 归一是无条件的：存储必须只有 LF，哪怕主流终止符本来就是 LF——混合文件
         // 里那几处 CRLF 同样要被抹平，否则编辑层会遇到它不认识的终止符。
@@ -154,21 +202,24 @@ public final class MuseDocument: NSDocument {
                 updateChangeCount(.changeCleared)
             }
             lineEnding = ending
+            fileEncoding = decoded.encoding
             let full = NSRange(location: 0, length: buffer.string.utf16.count)
             buffer.textStorage.replaceCharacters(in: full, with: body)
         }
     }
 
     nonisolated public override func data(ofType typeName: String) throws -> Data {
-        MainActor.assumeIsolated {
+        try MainActor.assumeIsolated {
             let body = buffer.textStorage.string
-            guard lineEnding != .lf else { return Data(body.utf8) }
-            let restored = body.replacingOccurrences(
+            let restored = lineEnding == .lf ? body : body.replacingOccurrences(
                 of: LineEnding.lf.string,
                 with: lineEnding.string,
                 options: .literal
             )
-            return Data(restored.utf8)
+            guard let data = fileEncoding.encode(restored) else {
+                throw CocoaError(.fileWriteInapplicableStringEncoding)
+            }
+            return data
         }
     }
 

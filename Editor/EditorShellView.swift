@@ -57,8 +57,13 @@ struct EditorShellView: View {
         .animation(sidebarAnimation, value: chromeState.isProjectSidebarPresented)
         .animation(sidebarAnimation, value: chromeState.isOutlinePresented)
         .onChange(of: selectedHeadingID, revealSelectedHeading)
-        .onChange(of: location.fileURL) { _, _ in
-            workspace.refreshAll()
+        .onChange(of: location.fileURL) { oldURL, newURL in
+            if let oldURL {
+                workspace.refreshProject(containing: oldURL)
+            }
+            if let newURL, newURL != oldURL {
+                workspace.refreshProject(containing: newURL)
+            }
         }
     }
 

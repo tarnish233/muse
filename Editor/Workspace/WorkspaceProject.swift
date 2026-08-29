@@ -1,6 +1,6 @@
 import Foundation
 
-struct WorkspaceProject: Identifiable, Hashable {
+nonisolated struct WorkspaceProject: Identifiable, Hashable, Sendable {
     let rootURL: URL
 
     var id: URL { rootURL }

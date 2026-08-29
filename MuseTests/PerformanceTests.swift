@@ -123,9 +123,13 @@ import Testing
         let latency = ms(start.duration(to: clock.now))
         print("[PERF] 200KB 协调器单键路径(编辑→样式落地): \(latency) ms, 显隐写入 marker: \(coordinator.lastReconcileWriteCount)")
         #expect(coordinator.appliedRevision >= 2)
-        // Debug builds of swift-markdown vary substantially with compiler instrumentation.
-        // Keep this as a gross-regression guard; the 150ms product target is verified in Release.
-        #expect(latency < 200)
+        // Debug builds of swift-markdown carry compiler/coverage instrumentation, so they only
+        // enforce a gross-regression guard. The product latency budget is asserted in Release.
+        #if DEBUG
+        #expect(latency < 300)
+        #else
+        #expect(latency < 150)
+        #endif
     }
 
     /// 缺陷 18：200KB 上同一轮连续输入不得再次把 dirty 请求退化成整篇。

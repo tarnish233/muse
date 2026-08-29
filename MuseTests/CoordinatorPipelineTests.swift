@@ -519,10 +519,70 @@ import Testing
         #expect(storage.string.contains("姓名!"))
     }
 
+    @Test func repeatedTableTabsQueueWhileParserIsBehind() async throws {
+        let source = "| A | B | C |\n|---|---|---|\n| 1 | 2 | 3 |"
+        let storage = NSTextStorage(string: source)
+        let coordinator = RenderCoordinator()
+        coordinator.attach(storage: storage)
+        coordinator.onTextEdited = {}
+        let textView = EditorTextView.make(textStorage: storage)
+        coordinator.textView = textView
+        textView.tableNavigationHandler = { coordinator.navigateTable(backward: $0) }
+
+        storage.replaceCharacters(in: NSRange(location: 0, length: 0), with: "")
+        #expect(await waitForApplied(coordinator, atLeast: 1))
+        let initialPackage = try #require(coordinator.lastPackage)
+        let first = try #require(initialPackage.tables.first?.rows.first?.cells.first)
+        textView.setSelectedRange(NSRange(location: initialPackage.index.nsRange(first.ink).upperBound, length: 0))
+
+        let revision = coordinator.appliedRevision
+        textView.insertText("!", replacementRange: NSRange(location: NSNotFound, length: 0))
+        textView.insertTab(nil)
+        textView.insertTab(nil)
+        #expect(storage.string.contains("\t") == false)
+
+        #expect(await waitForApplied(coordinator, atLeast: revision + 1))
+        let freshPackage = try #require(coordinator.lastPackage)
+        let third = try #require(freshPackage.tables.first?.rows.first?.cells.last)
+        #expect(textView.selectedRange() == freshPackage.index.nsRange(third.ink))
+    }
+
+    @Test func realisticTypingCadenceKeepsWholeDocumentParsingSingleFlight() async {
+        let source = PerformanceTests.corpus(kb: 200)
+        let storage = NSTextStorage(string: source)
+        let coordinator = RenderCoordinator()
+        coordinator.attach(storage: storage)
+        coordinator.onTextEdited = {}
+
+        storage.replaceCharacters(in: NSRange(location: 0, length: storage.length), with: source)
+        #expect(await waitForApplied(coordinator, atLeast: 1, timeoutMs: 30_000))
+
+        let startRevision = coordinator.appliedRevision
+        let startPreparationCount = coordinator.parsePreparationCount
+        var insertion = storage.length / 2
+        let typed = "singleflight"
+        for character in typed {
+            storage.replaceCharacters(
+                in: NSRange(location: insertion, length: 0),
+                with: String(character)
+            )
+            insertion += 1
+            try? await Task.sleep(for: .milliseconds(30))
+        }
+
+        #expect(await waitForApplied(
+            coordinator,
+            atLeast: startRevision + typed.count,
+            timeoutMs: 60_000
+        ))
+        #expect(coordinator.maxConcurrentParsePreparationCount == 1)
+        #expect(coordinator.parsePreparationCount - startPreparationCount < typed.count)
+    }
+
     // MARK: - 真实管线下的列表续行（缺陷 17）
     //
     // TypingBehaviorsTests 里的用例都用同步预渲染或干脆不渲染来构造两种极端。
-    // 这一条挂真实 RenderCoordinator、走真实的 Task.detached 解析与主线程应用，
+    // 这一条挂真实 RenderCoordinator、走真实的单航班后台解析与主线程应用，
     // 断言「渲染有没有追上都必须能续行」——这正是手动验收本来要看的东西，
     // 而且可重复。
 

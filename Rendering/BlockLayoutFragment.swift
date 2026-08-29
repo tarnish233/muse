@@ -857,7 +857,6 @@ public nonisolated final class MuseLayoutFragment: NSTextLayoutFragment {
         let accent = NSColor.controlAccentColor
         let axis = tableDragAxis
         let source = tableDragSource
-        let destination = tableDragDestination
         let row = tableRowIndex
         let rowFrame = tableRowFrame(at: point)
         let boundaries = tableColumnBoundaries
@@ -886,7 +885,7 @@ public nonisolated final class MuseLayoutFragment: NSTextLayoutFragment {
             context.fill(CGRect(x: rect.maxX - border, y: rect.minY, width: border, height: rect.height))
         }
 
-        if let axis, let source, let destination, let rowFrame {
+        if let axis, let source, tableDragDestination != nil, let rowFrame {
             switch axis {
             case .row:
                 if row == source {
@@ -967,7 +966,8 @@ public nonisolated final class MuseLayoutFragment: NSTextLayoutFragment {
             height: size.height
         )
 
-        if let path = imagePath, let image = ImageResolver.loadLocalImage(url: URL(fileURLWithPath: path)) {
+        if let path = imagePath,
+           let image = ImageResolver.cachedLocalImage(url: URL(fileURLWithPath: path)) {
             NSGraphicsContext.saveGraphicsState()
             NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: true)
             image.draw(in: box, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)

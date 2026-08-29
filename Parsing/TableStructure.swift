@@ -65,6 +65,11 @@ public nonisolated struct TableStructure: Sendable, Equatable {
 
     /// 表头行（0-based）。
     public let headerLine: Int
+    /// 表格所在 Markdown 容器在每一行前面的源码前缀。
+    ///
+    /// 顶层表格为空；引用块里通常是 `"> "`，列表续行里通常是缩进空格。
+    /// 结构化编辑重写整张表时必须把它重新写回，否则表格会从父容器中脱落。
+    public let containerPrefix: String
     /// 分隔行（`|---|---|`）恒为表头行 +1，不参与 `rows`。
     public let delimiterLine: Int
     /// 表格末行（0-based）。
@@ -75,12 +80,14 @@ public nonisolated struct TableStructure: Sendable, Equatable {
 
     public init(
         headerLine: Int,
+        containerPrefix: String = "",
         delimiterLine: Int,
         lastLine: Int,
         alignments: [ColumnAlignment],
         rows: [Row]
     ) {
         self.headerLine = headerLine
+        self.containerPrefix = containerPrefix
         self.delimiterLine = delimiterLine
         self.lastLine = lastLine
         self.alignments = alignments

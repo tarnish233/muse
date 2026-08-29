@@ -392,6 +392,7 @@ import Testing
         let source = "![截图](\(asset.fileName))"
         let storage = NSTextStorage(string: source)
         let package = engine.prepare(source)
+        _ = ImageResolver.loadLocalImage(url: asset.url)
         _ = engine.render(package: package, selection: nil, into: storage, imageBaseURL: asset.directory)
 
         #expect(storage.string == source)

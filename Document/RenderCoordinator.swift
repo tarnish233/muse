@@ -1,6 +1,14 @@
 import AppKit
 import Combine
 
+/// swift-markdown 的同步解析运行在独立 actor 上。协调器只维护一个消费循环，新的
+/// 快照覆盖尚未开始的旧快照，因此同一文档永远不会并发执行多次整篇解析。
+private actor RenderPreparationWorker {
+    func prepare(_ source: String) -> RenderEngine.Package {
+        RenderEngine().prepare(source)
+    }
+}
+
 /// Obsidian 表格编辑器的方向导航语义。单元格内部仍由 NSTextView 正常移动，
 /// 只有到达边界时才交给 RenderCoordinator 跨格。
 public nonisolated enum TableArrowDirection: Sendable {
@@ -13,7 +21,8 @@ public nonisolated enum TableArrowDirection: Sendable {
 /// 文档级渲染协调器（v0.2 §03 两条更新流 + §4.6 并发与性能）：
 ///
 /// 编辑流：textStorage 编辑回调 → revision+1 → 主线程抓不可变 String 快照 →
-/// 后台解析（扫描+索引，可取消）→ 主线程核对 revision → 只对"脏行带"应用属性。
+/// 后台解析（扫描+索引，single-flight/latest-wins）→ 主线程核对 revision →
+/// 只对"脏行带"应用属性。
 /// 光标流：选区变化 → 现 package 上重算显隐 → 仅写入状态实际翻转的 marker。
 ///
 /// 属性修改全程包在 undo 抑制中（v0.2 4.5：渲染属性不进入撤销栈，
@@ -40,8 +49,15 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
     }
 
     private let engine = RenderEngine()
+    private let preparationWorker = RenderPreparationWorker()
     private var revision = 0
     private var parseTask: Task<Void, Never>?
+    private struct ParseRequest: Sendable {
+        let revision: Int
+        let snapshot: String
+        let dirtyRange: NSRange
+    }
+    private var latestParseRequest: ParseRequest?
     public private(set) var lastPackage: RenderEngine.Package?
     private var isApplyingAttributes = false
     /// 尚未由 `lastPackage` 覆盖的字符编辑范围，始终维护在**当前正文的 UTF-16 坐标系**。
@@ -49,9 +65,12 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
     private var pendingDirtyRange: NSRange?
     private var revealCache: [RevealKey: RenderEngine.MarkerState] = [:]
     private var needsImageRefresh = false
-    /// 渲染尚未追上输入时收到的表格 Tab。等最新 AST 落地后再执行，避免用旧的
-    /// UTF-16 区间跳到错误单元格；命令本身仍被消费，不会把制表符写进 Markdown。
-    private var pendingTableNavigation: TableNavigationDirection?
+    private var imagePreparationTask: Task<Void, Never>?
+    private var imagePreparationGeneration = 0
+    /// 渲染尚未追上输入时收到的表格导航命令。等最新 AST 落地后按顺序执行，避免
+    /// 用旧的 UTF-16 区间跳到错误单元格；命令本身仍被消费，不会写进 Markdown。
+    /// 若某条命令新增了表格行，剩余命令会继续等待下一份 AST，绝不复用旧坐标。
+    private var pendingTableNavigations: [TableNavigationDirection] = []
     private struct ActiveTableSelection: Equatable {
         let tableID: Int
         let anchorRow: Int
@@ -104,8 +123,11 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
     /// 这是输入热路径的范围插桩；结构扩张后的行带由 `lastAppliedDirtyLines` 记录。
     public private(set) var lastAppliedDirtyRange: NSRange?
     public private(set) var lastAppliedDirtyLines: ClosedRange<Int>?
-    /// 实际进入 `RenderEngine.prepare` 的次数；被输入 burst 在 debounce 内取消的任务不计入。
+    /// 实际进入 `RenderEngine.prepare` 的次数；尚未开始的旧快照被新输入覆盖，不计入。
     public private(set) var parsePreparationCount = 0
+    /// 同一文档同时执行的整篇解析峰值；回归测试保证 single-flight 契约。
+    public private(set) var maxConcurrentParsePreparationCount = 0
+    private var activeParsePreparationCount = 0
 
     /// 编辑面（弱引用，用于读取选区与 marked text 状态）。
     public weak var textView: NSTextView?
@@ -116,8 +138,12 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
     public var imageBaseURL: URL? {
         didSet {
             guard imageBaseURL != oldValue else { return }
+            imagePreparationTask?.cancel()
             needsImageRefresh = true
             applyImageRefreshIfPossible()
+            if let package = lastPackage {
+                scheduleBlockImagePreparation(package: package, revision: revision)
+            }
         }
     }
     /// 唯一正文存储（弱引用；由文档装配）。
@@ -164,34 +190,56 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
 
     private func scheduleParse(storage: NSTextStorage) {
         revision += 1
-        let rev = revision
-        parseTask?.cancel()
+        imagePreparationTask?.cancel()
 
         // `pendingDirtyRange` 已经随每次编辑重基到当前坐标系；本轮快照与范围属于同一 revision。
-        // 旧任务即使在取消前完成，也会由 revision guard 丢弃，不能清空这份 pending 状态。
+        // 旧解析即使在新输入之后完成，也会由 revision guard 丢弃，不能清空这份 pending 状态。
         guard let dirtyNS = pendingDirtyRange else { return }
+        latestParseRequest = ParseRequest(
+            revision: revision,
+            snapshot: storage.string,
+            dirtyRange: dirtyNS
+        )
+        startParseLoopIfNeeded()
+    }
 
-        // 不可变快照（v0.2：解析运行在不可变字符串上）；闭包只传递 Sendable 值。
-        let snapshot = storage.string
-        let engine = self.engine
-
-        // swift-markdown 的同步 prepare 不合作检查 Task cancellation。若每个按键立即启动
-        // detached 解析，连续输入会留下多个已取消但仍占 CPU 的整篇解析。先等待一个很短的
-        // 输入 burst 窗口：被后续按键取消的任务在真正进入 prepare 前退出，只解析最新快照。
+    private func startParseLoopIfNeeded() {
+        guard parseTask == nil, latestParseRequest != nil else { return }
         parseTask = Task(priority: .high) { [weak self] in
-            do {
-                try await Task.sleep(for: .milliseconds(8))
-            } catch {
-                return
-            }
+            await self?.runParseLoop()
+        }
+    }
 
-            guard let self, !Task.isCancelled, rev == self.revision else { return }
-            self.parsePreparationCount += 1
-            let package = await Task.detached(priority: .high) {
-                engine.prepare(snapshot)
-            }.value
+    private func runParseLoop() async {
+        defer {
+            parseTask = nil
+            startParseLoopIfNeeded()
+        }
+
+        while !Task.isCancelled {
+            // Yield once so edits delivered in the same main-run-loop turn collapse into one
+            // snapshot. A fixed debounce adds guaranteed latency to every keystroke; newer
+            // snapshots already replace queued work while the single preparation actor is busy.
+            await Task.yield()
+            guard let request = latestParseRequest else { return }
+            latestParseRequest = nil
+
+            parsePreparationCount += 1
+            activeParsePreparationCount += 1
+            maxConcurrentParsePreparationCount = max(
+                maxConcurrentParsePreparationCount,
+                activeParsePreparationCount
+            )
+            let package = await preparationWorker.prepare(request.snapshot)
+            activeParsePreparationCount -= 1
+
             guard !Task.isCancelled else { return }
-            self.applyParsed(package: package, rev: rev, dirtyNS: dirtyNS)
+            applyParsed(
+                package: package,
+                rev: request.revision,
+                dirtyNS: request.dirtyRange
+            )
+            guard latestParseRequest != nil else { return }
         }
     }
 
@@ -257,13 +305,51 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
         let elapsed = start.duration(to: clock.now)
         let ms = Double(elapsed.components.seconds) * 1000 + Double(elapsed.components.attoseconds) / 1e15
         let formattedMilliseconds = ms.formatted(.number.precision(.fractionLength(1)))
-        statusText = "字符: \(storage.string.count)  渲染: \(formattedMilliseconds)ms"
+        // The package computed grapheme count off the main actor together with the immutable
+        // source snapshot, so emoji/combining sequences stay correct without a UI-thread scan.
+        statusText = "字符: \(package.characterCount)  渲染: \(formattedMilliseconds)ms"
 
-        if presentationMode == .rendered, let direction = pendingTableNavigation {
-            pendingTableNavigation = nil
-            _ = performTableNavigation(direction, package: package)
-        } else if presentationMode != .rendered {
-            pendingTableNavigation = nil
+        if presentationMode == .rendered {
+            drainPendingTableNavigations(package: package)
+        } else {
+            pendingTableNavigations.removeAll(keepingCapacity: true)
+        }
+        scheduleBlockImagePreparation(package: package, revision: rev)
+    }
+
+    private func scheduleBlockImagePreparation(
+        package: RenderEngine.Package,
+        revision requestedRevision: Int
+    ) {
+        let urls = Set(package.blockImageDestinations.compactMap { destination -> URL? in
+            guard let url = ImageResolver.resolvedURL(destination: destination, baseURL: imageBaseURL),
+                  url.isFileURL
+            else { return nil }
+            return url.standardizedFileURL
+        })
+
+        imagePreparationTask?.cancel()
+        imagePreparationGeneration += 1
+        let generation = imagePreparationGeneration
+        guard !urls.isEmpty else {
+            imagePreparationTask = nil
+            return
+        }
+
+        imagePreparationTask = Task(priority: .utility) { [weak self] in
+            var cacheChanged = false
+            for url in urls {
+                guard !Task.isCancelled else { return }
+                cacheChanged = await ImageResolver.prepareLocalImage(url: url) || cacheChanged
+            }
+            guard !Task.isCancelled, let self,
+                  self.imagePreparationGeneration == generation,
+                  self.revision == requestedRevision
+            else { return }
+            self.imagePreparationTask = nil
+            guard cacheChanged else { return }
+            self.needsImageRefresh = true
+            self.applyImageRefreshIfPossible()
         }
     }
 
@@ -291,7 +377,7 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
             guard selectionIsInRenderedTable(textView.selectedRange(), storage: storage) else {
                 return false
             }
-            pendingTableNavigation = direction
+            pendingTableNavigations.append(direction)
             return true
         }
         guard let package = lastPackage else { return false }
@@ -312,7 +398,7 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
             guard selectionIsInRenderedTable(textView.selectedRange(), storage: storage) else {
                 return false
             }
-            pendingTableNavigation = .returnKey
+            pendingTableNavigations.append(.returnKey)
             return true
         }
         guard let package = lastPackage else { return false }
@@ -1104,7 +1190,11 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
         guard let range = tableSourceRange(table, package: package, storage: storage),
               !rows.isEmpty
         else { return false }
-        let serialized = serializeTable(rows: rows, alignments: alignments)
+        let serialized = serializeTable(
+            rows: rows,
+            alignments: alignments,
+            containerPrefix: table.containerPrefix
+        )
         let original = (storage.string as NSString).substring(with: range)
         textView.breakUndoCoalescing()
         let manager = textView.undoManager
@@ -1220,7 +1310,8 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
 
     private func serializeTable(
         rows: [[String]],
-        alignments: [TableStructure.ColumnAlignment]
+        alignments: [TableStructure.ColumnAlignment],
+        containerPrefix: String = ""
     ) -> SerializedTable {
         let columnCount = rows.map(\.count).max() ?? 0
         var text = ""
@@ -1228,7 +1319,7 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
 
         func appendRow(_ cells: [String]) -> [NSRange] {
             var result: [NSRange] = []
-            text += "|"
+            text += containerPrefix + "|"
             for column in 0..<columnCount {
                 let cell = column < cells.count ? cells[column] : ""
                 text += " "
@@ -1241,7 +1332,7 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
         }
 
         ranges.append(appendRow(rows[0]))
-        text += "\n|"
+        text += "\n" + containerPrefix + "|"
         for column in 0..<columnCount {
             let alignment = column < alignments.count ? alignments[column] : .leading
             switch alignment {
@@ -1343,6 +1434,13 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
         return false
     }
 
+    private func drainPendingTableNavigations(package: RenderEngine.Package) {
+        while pendingDirtyRange == nil, !pendingTableNavigations.isEmpty {
+            let direction = pendingTableNavigations.removeFirst()
+            _ = performTableNavigation(direction, package: package)
+        }
+    }
+
     private func editableTableCell(
         at selection: NSRange?,
         package: RenderEngine.Package
@@ -1409,12 +1507,16 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
             contentEnd -= 1
         }
         let hasTerminator = contentEnd < NSMaxRange(lineRange)
-        let row = "|" + Array(repeating: "  ", count: table.columnCount).joined(separator: "|") + "|"
+        let row = table.containerPrefix
+            + "|"
+            + Array(repeating: "  ", count: table.columnCount).joined(separator: "|")
+            + "|"
         let insertion = hasTerminator ? NSMaxRange(lineRange) : contentEnd
         let replacement = hasTerminator ? row + "\n" : "\n" + row
         let rowStart = insertion + (hasTerminator ? 0 : 1)
         let column = min(max(0, targetColumn), table.columnCount - 1)
-        let targetCellCaret = NSRange(location: rowStart + 2 + column * 3, length: 0)
+        let prefixLength = (table.containerPrefix as NSString).length
+        let targetCellCaret = NSRange(location: rowStart + prefixLength + 2 + column * 3, length: 0)
 
         guard textView.shouldChangeText(
             in: NSRange(location: insertion, length: 0),
@@ -1657,7 +1759,9 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
             presentationMode = mode
             revealCache.removeAll(keepingCapacity: true)
             lastReconcileWriteCount = 0
-            if mode != .rendered { pendingTableNavigation = nil }
+            if mode != .rendered {
+                pendingTableNavigations.removeAll(keepingCapacity: true)
+            }
         }
         applyPresentationModeIfPossible()
     }
@@ -1780,46 +1884,51 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
         forceLines: ClosedRange<Int>?
     ) {
         let hiddenAttributes = RenderEngine.markerVisibilityAttributes(state: .hidden)
-        var newCache: [RevealKey: RenderEngine.MarkerState] = [:]
-        newCache.reserveCapacity(package.tokens.count)
+        // With no caret every marker has the same state. `applyDirty` only resets the forced
+        // lines, so walking and rebuilding identities for the rest of a large document is pure
+        // overhead. Keep no reveal cache in this mode; when a text view is attached, the normal
+        // reconciliation path will populate it from the actual selection.
+        revealCache.removeAll(keepingCapacity: true)
+        guard let forceLines else {
+            lastReconcileWriteCount = 0
+            return
+        }
         var firstWrite = true
         var writeCount = 0
 
-        for token in package.tokens {
+        for tokenIndex in package.tokenIndices(overlapping: forceLines) {
+            let token = package.tokens[tokenIndex]
+            guard package.tokenLineRanges[tokenIndex].overlaps(forceLines) else { continue }
             // `markerVisibilityRanges`（而不是 allMarkerRanges）：块图片整段折叠，
             // 只隐藏 `![` 与 `](目的地)` 会把标签留在正文里。
             for range in token.markerVisibilityRanges {
                 let identity = engine.markerIdentity(for: range, package: package)
-                let forced = forceLines?.contains(identity.line) == true
-                let key = RevealKey(line: identity.line, relOffset: identity.relOffset)
-                if forced || revealCache[key] != .hidden {
-                    if firstWrite {
-                        storage.beginEditing()
-                        firstWrite = false
-                    }
-                    let markerNS = package.index.nsRange(range)
-                    if token.inlineImageRange != nil {
-                        engine.applyInlineImageVisibility(
-                            state: .hidden,
-                            span: markerNS,
-                            markerSubRange: package.index.nsRange(token.markerRange),
-                            closingSubRange: token.closingMarkerRange.map(package.index.nsRange),
-                            imageBaseURL: imageBaseURL,
-                            into: storage
-                        )
-                    } else if let listDepth = token.listDepth {
-                        engine.applyMarkerVisibility(
-                            state: .hidden,
-                            markerNS: markerNS,
-                            listDepth: listDepth,
-                            into: storage
-                        )
-                    } else {
-                        storage.addAttributes(hiddenAttributes, range: markerNS)
-                    }
-                    writeCount += 1
+                guard forceLines.contains(identity.line) else { continue }
+                if firstWrite {
+                    storage.beginEditing()
+                    firstWrite = false
                 }
-                newCache[key] = .hidden
+                let markerNS = package.index.nsRange(range)
+                if token.inlineImageRange != nil {
+                    engine.applyInlineImageVisibility(
+                        state: .hidden,
+                        span: markerNS,
+                        markerSubRange: package.index.nsRange(token.markerRange),
+                        closingSubRange: token.closingMarkerRange.map(package.index.nsRange),
+                        imageBaseURL: imageBaseURL,
+                        into: storage
+                    )
+                } else if let listDepth = token.listDepth {
+                    engine.applyMarkerVisibility(
+                        state: .hidden,
+                        markerNS: markerNS,
+                        listDepth: listDepth,
+                        into: storage
+                    )
+                } else {
+                    storage.addAttributes(hiddenAttributes, range: markerNS)
+                }
+                writeCount += 1
             }
         }
 
@@ -1827,7 +1936,6 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
             storage.endEditing()
         }
         lastReconcileWriteCount = writeCount
-        revealCache = newCache
     }
 
     private func suppressUndo(_ body: () -> Void) {

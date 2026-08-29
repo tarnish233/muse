@@ -18,36 +18,40 @@ public nonisolated enum ImageResolver {
         }
     }
 
-    /// NSCache 的单次操作线程安全；这里额外用锁覆盖 stat → load → stat → set
-    /// 复合事务，避免较旧的并发加载最后覆盖较新的文件版本。
     private final class ImageCache: @unchecked Sendable {
         private let storage = NSCache<NSString, CacheEntry>()
-        private let lock = NSLock()
 
         init() {
             storage.countLimit = 128
             storage.totalCostLimit = 256 * 1024 * 1024
         }
 
-        func image(at url: URL) -> NSImage? {
+        func cachedImage(at url: URL) -> NSImage? {
+            storage.object(forKey: url.standardizedFileURL.path as NSString)?.image
+        }
+
+        /// 刷新磁盘版本，返回内存缓存是否发生变化。调用方负责把它放在后台执行；
+        /// NSCache 自身线程安全，因此磁盘 I/O 与解码不需要占用全局锁。
+        @discardableResult
+        func refresh(at url: URL) -> Bool {
             let standardizedURL = url.standardizedFileURL
             let key = standardizedURL.path as NSString
-            lock.lock()
-            defer { lock.unlock() }
 
             for _ in 0..<2 {
                 guard let before = Self.fingerprint(at: standardizedURL) else {
+                    let changed = storage.object(forKey: key) != nil
                     storage.removeObject(forKey: key)
-                    return nil
+                    return changed
                 }
                 if let cached = storage.object(forKey: key), cached.fingerprint == before {
-                    return cached.image
+                    return false
                 }
                 guard let image = NSImage(contentsOf: standardizedURL),
                       let after = Self.fingerprint(at: standardizedURL)
                 else {
+                    let changed = storage.object(forKey: key) != nil
                     storage.removeObject(forKey: key)
-                    return nil
+                    return changed
                 }
                 guard before == after else { continue }
 
@@ -56,11 +60,12 @@ public nonisolated enum ImageResolver {
                     forKey: key,
                     cost: Self.cost(of: image)
                 )
-                return image
+                return true
             }
 
+            let changed = storage.object(forKey: key) != nil
             storage.removeObject(forKey: key)
-            return nil
+            return changed
         }
 
         private static func fingerprint(at url: URL) -> FileFingerprint? {
@@ -83,7 +88,20 @@ public nonisolated enum ImageResolver {
         }
     }
 
+    private actor ImageLoadWorker {
+        private let cache: ImageCache
+
+        init(cache: ImageCache) {
+            self.cache = cache
+        }
+
+        func prepare(_ url: URL) -> Bool {
+            cache.refresh(at: url)
+        }
+    }
+
     private static let cache = ImageCache()
+    private static let loadWorker = ImageLoadWorker(cache: cache)
 
     /// 解析目的地：http(s) 远程图、`~` 展开、相对文档目录、绝对路径。
     /// 本地路径只做一次 percent decode；无效 escape 保守按字面路径处理。
@@ -108,10 +126,24 @@ public nonisolated enum ImageResolver {
         return URL(fileURLWithPath: localPath)
     }
 
-    /// 同步加载本地图（带版本校验缓存）。远程图不走这里。
+    /// 仅查询内存缓存；渲染和绘制热路径必须使用它，不能访问磁盘。
+    public static func cachedLocalImage(url: URL) -> NSImage? {
+        guard url.isFileURL else { return nil }
+        return cache.cachedImage(at: url)
+    }
+
+    /// 在后台 actor 上检查文件版本并准备图片；返回缓存是否发生变化。
+    @discardableResult
+    public static func prepareLocalImage(url: URL) async -> Bool {
+        guard url.isFileURL else { return false }
+        return await loadWorker.prepare(url.standardizedFileURL)
+    }
+
+    /// 阻塞式加载仅保留给非 UI 工具和兼容调用；正文排版、绘制与预览均不走这里。
     public static func loadLocalImage(url: URL) -> NSImage? {
         guard url.isFileURL else { return nil }
-        return cache.image(at: url)
+        cache.refresh(at: url)
+        return cache.cachedImage(at: url)
     }
 
     public static func loadLocalImage(destination: String, baseURL: URL?) -> NSImage? {

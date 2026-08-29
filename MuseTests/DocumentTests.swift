@@ -116,7 +116,28 @@ import Testing
         #expect(!document.isDocumentEdited)
     }
 
-    @Test func nonUTF8IsRejected() throws {
+    @Test(arguments: ["utf8-bom", "utf16-le", "utf16-be"])
+    func commonPlainTextEncodingsRoundTripWithoutConversion(encoding: String) throws {
+        let source = "# 编码\r\n\r\n正文 😀\r\n"
+        let data: Data
+        switch encoding {
+        case "utf8-bom":
+            data = Data([0xEF, 0xBB, 0xBF]) + Data(source.utf8)
+        case "utf16-le":
+            data = Data([0xFF, 0xFE])
+                + (try #require(source.data(using: .utf16LittleEndian)))
+        default:
+            data = Data([0xFE, 0xFF])
+                + (try #require(source.data(using: .utf16BigEndian)))
+        }
+
+        let document = MuseDocument()
+        try document.read(from: data, ofType: "public.plain-text")
+        #expect(document.buffer.string == source.replacingOccurrences(of: "\r\n", with: "\n"))
+        #expect(try document.data(ofType: "public.plain-text") == data)
+    }
+
+    @Test func malformedEncodedTextIsRejected() throws {
         let document = MuseDocument()
         #expect(throws: CocoaError.self) {
             try document.read(from: Data([0xFF, 0xFE, 0x00]), ofType: "net.daringfireball.markdown")
@@ -174,6 +195,7 @@ import Testing
         #expect(MuseDocument.autosavesInPlace)
         #expect(MuseDocument.readableTypes.contains("net.daringfireball.markdown"))
         #expect(MuseDocument.writableTypes.contains("net.daringfireball.markdown"))
+        #expect(MuseDocument.readableTypes.contains("public.text") == false)
     }
 
     /// 崩溃后 reopen 不应把恢复的草稿标成脏文档（与启动时示例同理）。

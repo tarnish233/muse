@@ -65,6 +65,7 @@ nonisolated struct TableLayout {
         hiddenRanges: [Range<Int>],
         headerFont: NSFont,
         bodyFont: NSFont,
+        measureText: ((NSString, Bool) -> CGFloat)? = nil,
         cellPadding: CGFloat = Theme.tableCellPaddingX
     ) -> TableLayout {
         let columnCount = structure.columnCount
@@ -84,8 +85,9 @@ nonisolated struct TableLayout {
             let rowFont = font(forRow: rowIndex)
             var widths = [CGFloat](repeating: 0, count: row.cells.count)
             for (column, cell) in row.cells.enumerated() where column < columnCount {
-                let width = visibleText(of: cell.ink, source: source, index: index, hidden: sortedHidden)
-                    .size(withAttributes: [.font: rowFont]).width
+                let text = visibleText(of: cell.ink, source: source, index: index, hidden: sortedHidden)
+                let width = measureText?(text, rowIndex == 0)
+                    ?? text.size(withAttributes: [.font: rowFont]).width
                 widths[column] = width
                 maxInk[column] = max(maxInk[column], width)
             }

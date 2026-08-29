@@ -1,4 +1,5 @@
 import AppKit
+import ImageIO
 import MuseKit
 
 /// 图片语法（`![标签](目的地)`）的点击预览。
@@ -16,6 +17,7 @@ final class ImagePreviewController: NSViewController {
 
     /// 预览窗的最大边长；图片按比例缩放到其中。
     private static let maxPreviewSize = NSSize(width: 420, height: 320)
+    private static let maxRemoteBytes = 20 * 1024 * 1024
 
     init(destination: String, baseURL: URL?) {
         self.destination = destination
@@ -81,24 +83,53 @@ final class ImagePreviewController: NSViewController {
             return .failure("无法解析图片路径")
         }
         if url.isFileURL {
-            // 本地文件读取放进后台线程，避免大图阻塞主线程。
-            return await Task.detached(priority: .userInitiated) { () -> LoadResult in
-                guard let image = ImageResolver.loadLocalImage(url: url) else {
-                    return .failure("无法加载图片")
-                }
-                return .image(image, image.size)
-            }.value
+            _ = await ImageResolver.prepareLocalImage(url: url)
+            guard let image = ImageResolver.cachedLocalImage(url: url) else {
+                return .failure("无法加载图片")
+            }
+            return .image(image, image.size)
         }
         do {
-            let (data, response) = try await URLSession.shared.data(from: url)
+            let (bytes, response) = try await URLSession.shared.bytes(from: url)
             guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
-                  let image = NSImage(data: data) else {
+                  http.mimeType?.lowercased().hasPrefix("image/") == true,
+                  http.expectedContentLength <= 0
+                    || http.expectedContentLength <= Int64(Self.maxRemoteBytes)
+            else {
+                return .failure("无法加载图片")
+            }
+            var data = Data()
+            if http.expectedContentLength > 0 {
+                data.reserveCapacity(min(Int(http.expectedContentLength), Self.maxRemoteBytes))
+            }
+            for try await byte in bytes {
+                guard data.count < Self.maxRemoteBytes else {
+                    return .failure("图片超过 20 MB，无法预览")
+                }
+                data.append(byte)
+            }
+            guard let image = downsampledImage(data: data) else {
                 return .failure("无法加载图片")
             }
             return .image(image, image.size)
         } catch {
             return .failure("无法加载图片")
         }
+    }
+
+    private static func downsampledImage(data: Data) -> NSImage? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        let maxPixels = max(maxPreviewSize.width, maxPreviewSize.height) * 2
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: Int(maxPixels),
+            kCGImageSourceShouldCacheImmediately: true,
+        ]
+        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+            return nil
+        }
+        return NSImage(cgImage: image, size: .zero)
     }
 
     @MainActor

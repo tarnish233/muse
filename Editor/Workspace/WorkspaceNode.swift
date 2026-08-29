@@ -1,7 +1,7 @@
 import Foundation
 
-struct WorkspaceNode: Identifiable, Hashable {
-    enum Kind: Hashable {
+nonisolated struct WorkspaceNode: Identifiable, Hashable, Sendable {
+    nonisolated enum Kind: Hashable, Sendable {
         case folder
         case file
     }

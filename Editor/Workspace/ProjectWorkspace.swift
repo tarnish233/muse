@@ -10,11 +10,6 @@ final class ProjectWorkspace {
         let bookmark: Data
     }
 
-    private struct TreeLoadResult {
-        let nodes: [WorkspaceNode]
-        let errors: [Error]
-    }
-
     private enum Constants {
         static let projectsKey = "Muse.workspace.projects"
         static let readableExtensions = Set(["md", "markdown", "mdown", "mkd", "txt", "text"])
@@ -27,9 +22,11 @@ final class ProjectWorkspace {
     private let fileManager: FileManager
     private let bookmarking: WorkspaceBookmarking
     private let projectStore: WorkspaceProjectStore
-    private let fileSystem: WorkspaceFileSystem
+    private let treeLoader: WorkspaceTreeLoader
     private var bookmarksByURL: [URL: Data] = [:]
     private var securityScopedURLs: Set<URL> = []
+    private var refreshTasks: [URL: Task<Void, Never>] = [:]
+    private var refreshGenerations: [URL: Int] = [:]
 
     init(
         defaults: UserDefaults = .standard,
@@ -41,7 +38,8 @@ final class ProjectWorkspace {
         self.fileManager = fileManager
         self.bookmarking = bookmarking ?? .live()
         self.projectStore = projectStore ?? .userDefaults(defaults, key: Constants.projectsKey)
-        self.fileSystem = fileSystem ?? .live(fileManager: fileManager)
+        let resolvedFileSystem = fileSystem ?? .live(fileManager: fileManager)
+        self.treeLoader = WorkspaceTreeLoader(fileSystem: resolvedFileSystem)
         restoreProjects()
     }
 
@@ -93,6 +91,9 @@ final class ProjectWorkspace {
         projects = nextProjects
         bookmarksByURL = nextBookmarks
         trees[url] = nil
+        refreshTasks[url]?.cancel()
+        refreshTasks[url] = nil
+        refreshGenerations[url] = nil
         if securityScopedURLs.remove(url) != nil {
             url.stopAccessingSecurityScopedResource()
         }
@@ -110,13 +111,39 @@ final class ProjectWorkspace {
 
     func refreshProject(at rootURL: URL) {
         let root = rootURL.standardizedFileURL
-        do {
-            let result = try loadChildren(of: root)
-            trees[root] = result.nodes
-            report(result.errors)
-        } catch {
-            // A transient root failure must not destroy the last successful tree.
-            presentedError = error.localizedDescription
+        let generation = (refreshGenerations[root] ?? 0) + 1
+        refreshGenerations[root] = generation
+        refreshTasks[root]?.cancel()
+
+        let loader = treeLoader
+        refreshTasks[root] = Task { [weak self] in
+            let outcome = await loader.loadTree(at: root)
+            guard let self,
+                  self.refreshGenerations[root] == generation,
+                  self.projects.contains(where: { $0.rootURL == root })
+            else { return }
+
+            switch outcome {
+            case let .success(nodes, warnings):
+                self.trees[root] = nodes
+                self.report(warnings)
+            case let .failure(message):
+                // 短暂的根目录错误不能破坏上一次成功树快照。
+                self.presentedError = message
+            case .cancelled:
+                break
+            }
+            if self.refreshGenerations[root] == generation {
+                self.refreshTasks[root] = nil
+            }
+        }
+    }
+
+    /// 测试与需要强一致快照的调用方可等待当前（以及等待期间替换它的）刷新完成。
+    func waitForRefresh(at rootURL: URL) async {
+        let root = rootURL.standardizedFileURL
+        while let task = refreshTasks[root] {
+            await task.value
         }
     }
 
@@ -135,7 +162,7 @@ final class ProjectWorkspace {
             try Data().write(to: destination, options: .atomic)
         }
 
-        refreshProjectContaining(destination)
+        refreshProject(containing: destination)
         return destination
     }
 
@@ -144,13 +171,13 @@ final class ProjectWorkspace {
         let name = try validatedName(rawName, kind: node.isFolder ? .folder : .file)
         let destination = node.url.deletingLastPathComponent().appending(path: name)
         try fileManager.moveItem(at: node.url, to: destination)
-        refreshProjectContaining(destination)
+        refreshProject(containing: destination)
         return destination
     }
 
     func moveToTrash(_ node: WorkspaceNode) throws {
         _ = try fileManager.trashItem(at: node.url, resultingItemURL: nil)
-        refreshProjectContaining(node.url)
+        refreshProject(containing: node.url)
     }
 
     func canOpen(_ url: URL) -> Bool {
@@ -164,47 +191,9 @@ final class ProjectWorkspace {
             .max { $0.rootURL.path.count < $1.rootURL.path.count }
     }
 
-    private func refreshProjectContaining(_ url: URL) {
+    func refreshProject(containing url: URL) {
         guard let project = project(containing: url) else { return }
         refreshProject(at: project.rootURL)
-    }
-
-    private func loadChildren(of directoryURL: URL) throws -> TreeLoadResult {
-        let urls = try fileSystem.contentsOfDirectory(directoryURL)
-        var nodes: [WorkspaceNode] = []
-        var errors: [Error] = []
-        nodes.reserveCapacity(urls.count)
-
-        for url in urls {
-            let metadata: WorkspaceEntryMetadata
-            do {
-                metadata = try fileSystem.metadata(url)
-            } catch {
-                errors.append(error)
-                continue
-            }
-
-            if metadata.isDirectory, !metadata.isPackage {
-                do {
-                    let childResult = try loadChildren(of: url)
-                    nodes.append(WorkspaceNode(url: url, kind: .folder, children: childResult.nodes))
-                    errors.append(contentsOf: childResult.errors)
-                } catch {
-                    // Keep the folder visible even when its contents are unavailable.
-                    nodes.append(WorkspaceNode(url: url, kind: .folder, children: nil))
-                    errors.append(error)
-                }
-            } else if metadata.isRegularFile {
-                nodes.append(WorkspaceNode(url: url, kind: .file, children: nil))
-            }
-        }
-
-        return TreeLoadResult(nodes: nodes.sorted(by: Self.nodeSort), errors: errors)
-    }
-
-    private static func nodeSort(_ lhs: WorkspaceNode, _ rhs: WorkspaceNode) -> Bool {
-        if lhs.kind != rhs.kind { return lhs.isFolder }
-        return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
     }
 
     private func validatedName(_ rawName: String, kind: WorkspaceCreationRequest.Kind) throws -> String {
@@ -274,7 +263,7 @@ final class ProjectWorkspace {
                 restorationErrors.append(error)
             }
         }
-        report(restorationErrors)
+        report(restorationErrors.map(\.localizedDescription))
     }
 
     private func persistProjects() throws {
@@ -292,12 +281,12 @@ final class ProjectWorkspace {
         try projectStore.save(data)
     }
 
-    private func report(_ errors: [Error]) {
-        guard let first = errors.first else { return }
-        if errors.count == 1 {
-            presentedError = first.localizedDescription
+    private func report(_ messages: [String]) {
+        guard let first = messages.first else { return }
+        if messages.count == 1 {
+            presentedError = first
         } else {
-            presentedError = "\(first.localizedDescription)\n另有 \(errors.count - 1) 个项目条目无法读取。"
+            presentedError = "\(first)\n另有 \(messages.count - 1) 个项目条目无法读取。"
         }
     }
 

@@ -11,7 +11,7 @@ import Testing
         return (ProjectWorkspace(defaults: defaults), root, defaults, suiteName)
     }
 
-    @Test func createsProjectFolderAndMarkdownFile() throws {
+    @Test func createsProjectFolderAndMarkdownFile() async throws {
         let (workspace, root, defaults, suiteName) = try makeWorkspace()
         defer {
             try? FileManager.default.removeItem(at: root)
@@ -21,6 +21,7 @@ import Testing
         try workspace.createProject(at: root)
         let notes = try workspace.createItem(.folder, named: "Notes", in: root)
         let document = try workspace.createItem(.file, named: "First", in: notes)
+        await workspace.waitForRefresh(at: root)
 
         #expect(workspace.projects.map(\.rootURL) == [root])
         #expect(document.lastPathComponent == "First.md")
@@ -29,7 +30,7 @@ import Testing
         #expect(workspace.children(of: workspace.projects[0]).first?.name == "Notes")
     }
 
-    @Test func foldersSortBeforeFilesAndNamesUseFinderOrdering() throws {
+    @Test func foldersSortBeforeFilesAndNamesUseFinderOrdering() async throws {
         let (workspace, root, _, _) = try makeWorkspace()
         defer { try? FileManager.default.removeItem(at: root) }
 
@@ -37,6 +38,7 @@ import Testing
         _ = try workspace.createItem(.file, named: "10.md", in: root)
         _ = try workspace.createItem(.file, named: "2.md", in: root)
         _ = try workspace.createItem(.folder, named: "Archive", in: root)
+        await workspace.waitForRefresh(at: root)
 
         let names = workspace.children(of: workspace.projects[0]).map(\.name)
         #expect(names == ["Archive", "2.md", "10.md"])
@@ -54,16 +56,17 @@ import Testing
         #expect(FileManager.default.fileExists(atPath: root.path))
     }
 
-    @Test func rejectsInvalidNamesAndUnsupportedFiles() throws {
+    @Test func rejectsInvalidNamesAndUnsupportedFiles() async throws {
         let (workspace, root, _, _) = try makeWorkspace()
         defer { try? FileManager.default.removeItem(at: root) }
         try workspace.createProject(at: root)
+        await workspace.waitForRefresh(at: root)
 
         #expect(throws: WorkspaceOperationError.self) {
             try workspace.createItem(.file, named: "bad/name", in: root)
         }
         #expect(workspace.canOpen(root.appending(path: "note.md")))
-        #expect(!workspace.canOpen(root.appending(path: "image.png")))
+        #expect(workspace.canOpen(root.appending(path: "image.png")) == false)
     }
 
     @Test func staleBookmarksRestoreCompleteSnapshotWithOneWrite() throws {
@@ -192,24 +195,25 @@ import Testing
         #expect(try decodedBookmarks(store.saved[0]) == [secondBookmark])
     }
 
-    @Test func rootEnumerationFailurePreservesPreviousSnapshot() throws {
+    @Test func rootEnumerationFailurePreservesPreviousSnapshot() async throws {
         let root = try makeDirectory(named: "RootFailure")
         defer { try? FileManager.default.removeItem(at: root) }
         let file = root.appending(path: "visible.md")
         try Data().write(to: file)
         let state = FileSystemState(root: root, entries: [file])
-        let workspace = try makeInjectedWorkspace(root: root, fileSystem: state.fileSystem)
+        let workspace = try await makeInjectedWorkspace(root: root, fileSystem: state.fileSystem)
         let project = try #require(workspace.projects.first)
         #expect(workspace.children(of: project).map(\.name) == ["visible.md"])
 
         state.failRoot = true
         workspace.refreshProject(at: root)
+        await workspace.waitForRefresh(at: root)
 
         #expect(workspace.children(of: project).map(\.name) == ["visible.md"])
         #expect(workspace.presentedError != nil)
     }
 
-    @Test func childMetadataFailureSkipsOnlyThatChild() throws {
+    @Test func childMetadataFailureSkipsOnlyThatChild() async throws {
         let root = try makeDirectory(named: "MetadataFailure")
         defer { try? FileManager.default.removeItem(at: root) }
         let bad = root.appending(path: "bad.md")
@@ -217,14 +221,14 @@ import Testing
         let state = FileSystemState(root: root, entries: [bad, good])
         state.metadataFailures.insert(bad)
 
-        let workspace = try makeInjectedWorkspace(root: root, fileSystem: state.fileSystem)
+        let workspace = try await makeInjectedWorkspace(root: root, fileSystem: state.fileSystem)
         let project = try #require(workspace.projects.first)
 
         #expect(workspace.children(of: project).map(\.name) == ["good.md"])
         #expect(workspace.presentedError != nil)
     }
 
-    @Test func unreadableChildDirectoryRemainsVisibleWithSiblings() throws {
+    @Test func unreadableChildDirectoryRemainsVisibleWithSiblings() async throws {
         let root = try makeDirectory(named: "NestedFailure")
         defer { try? FileManager.default.removeItem(at: root) }
         let folder = root.appending(path: "Folder", directoryHint: .isDirectory)
@@ -233,13 +237,32 @@ import Testing
         state.directories.insert(folder)
         state.directoryFailures.insert(folder)
 
-        let workspace = try makeInjectedWorkspace(root: root, fileSystem: state.fileSystem)
+        let workspace = try await makeInjectedWorkspace(root: root, fileSystem: state.fileSystem)
         let project = try #require(workspace.projects.first)
         let nodes = workspace.children(of: project)
 
         #expect(nodes.map(\.name) == ["Folder", "visible.md"])
         #expect(nodes.first?.isFolder == true)
         #expect(nodes.first?.children == nil)
+    }
+
+    @Test func slowDirectoryRefreshDoesNotBlockMainActor() async throws {
+        let root = try makeDirectory(named: "SlowRefresh")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appending(path: "visible.md")
+        let state = FileSystemState(root: root, entries: [file])
+        let workspace = try await makeInjectedWorkspace(root: root, fileSystem: state.fileSystem)
+
+        state.enumerationDelay = 0.25
+        let clock = ContinuousClock()
+        let elapsed = clock.measure {
+            workspace.refreshProject(at: root)
+        }
+
+        let milliseconds = Double(elapsed.components.seconds) * 1_000
+            + Double(elapsed.components.attoseconds) / 1e15
+        #expect(milliseconds < 50)
+        await workspace.waitForRefresh(at: root)
     }
 
     private func makeDirectory(named name: String) throws -> URL {
@@ -252,7 +275,7 @@ import Testing
     private func makeInjectedWorkspace(
         root: URL,
         fileSystem: WorkspaceFileSystem
-    ) throws -> ProjectWorkspace {
+    ) async throws -> ProjectWorkspace {
         let store = StoreRecorder()
         let workspace = ProjectWorkspace(
             bookmarking: WorkspaceBookmarking(
@@ -263,6 +286,7 @@ import Testing
             fileSystem: fileSystem
         )
         try workspace.addProject(at: root)
+        await workspace.waitForRefresh(at: root)
         return workspace
     }
 
@@ -304,6 +328,7 @@ import Testing
         var metadataFailures: Set<URL> = []
         var directoryFailures: Set<URL> = []
         var directories: Set<URL> = []
+        var enumerationDelay: TimeInterval = 0
 
         init(root: URL, entries: [URL]) {
             self.root = root.standardizedFileURL
@@ -314,6 +339,9 @@ import Testing
             WorkspaceFileSystem(
                 contentsOfDirectory: { [weak self] url in
                     guard let self else { return [] }
+                    if self.enumerationDelay > 0 {
+                        Thread.sleep(forTimeInterval: self.enumerationDelay)
+                    }
                     let normalized = url.standardizedFileURL
                     if (normalized == self.root && self.failRoot)
                         || self.directoryFailures.contains(normalized) {

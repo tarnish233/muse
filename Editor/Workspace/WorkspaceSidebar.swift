@@ -57,9 +57,6 @@ struct WorkspaceSidebar: View {
             alert = WorkspaceAlert(message: message)
             workspace.presentedError = nil
         }
-        .task {
-            workspace.refreshAll()
-        }
     }
 
     private var emptyState: some View {

@@ -22,21 +22,146 @@ public struct RenderEngine {
         public let lineStarts: [Int]
         /// GFM 表格的源码几何，按表头行升序。列宽在应用样式时才算（要读字体）。
         public let tables: [TableStructure]
+        /// 块图片目标文本在后台解析阶段提取，主线程应用属性后不再扫描整篇 token
+        /// 和桥接整份 NSTextStorage 字符串。
+        public let blockImageDestinations: [String]
+        /// 用户感知字符数（扩展字形簇），在后台快照阶段计算，避免状态栏在主线程
+        /// 对整篇 `String.count`。
+        public let characterCount: Int
+        /// 与 `tokens` 一一对应的源码行跨度。输入热路径据此筛出脏行 token，避免
+        /// 每次按键都为整篇 token 重做 UTF-8/UTF-16 与行号二分换算。
+        let tokenLineRanges: [ClosedRange<Int>]
+        private let tokenPrefixMaxEndLines: [Int]
+        let structuralBlockLineRanges: [ClosedRange<Int>]
+        let quoteLineSet: Set<Int>
 
         public init(
             tokens: [Token],
             index: SourceIndex,
             lineStarts: [Int],
-            tables: [TableStructure] = []
+            tables: [TableStructure] = [],
+            blockImageDestinations: [String] = [],
+            characterCount: Int? = nil
         ) {
             self.tokens = tokens
             self.index = index
             self.lineStarts = lineStarts
             self.tables = tables
+            self.blockImageDestinations = blockImageDestinations
+            self.characterCount = characterCount ?? index.utf16Length
+
+            func lineIndex(atUTF8 offset: Int) -> Int {
+                guard !lineStarts.isEmpty else { return 0 }
+                var lowerBound = 0
+                var upperBound = lineStarts.count - 1
+                let clamped = min(max(offset, 0), index.utf8Length)
+                while lowerBound < upperBound {
+                    let middle = (lowerBound + upperBound + 1) / 2
+                    if lineStarts[middle] <= clamped {
+                        lowerBound = middle
+                    } else {
+                        upperBound = middle - 1
+                    }
+                }
+                return lowerBound
+            }
+
+            let computedTokenLineRanges = tokens.map { token in
+                let startLine = min(max(token.line, 0), max(0, lineStarts.count - 1))
+                switch token.kind {
+                case .table(let lastLine):
+                    return startLine...max(startLine, min(lastLine, max(0, lineStarts.count - 1)))
+                case .codeFence:
+                    let end = token.contentRange?.upperBound ?? token.markerRange.upperBound
+                    return startLine...max(startLine, lineIndex(atUTF8: end))
+                default:
+                    let sourceRange = token.sourceRange
+                    let lastByte = sourceRange.isEmpty
+                        ? sourceRange.lowerBound
+                        : sourceRange.upperBound - 1
+                    let nextLineStart = startLine + 1 < lineStarts.count
+                        ? lineStarts[startLine + 1]
+                        : index.utf8Length + 1
+                    let endLine = lastByte < nextLineStart
+                        ? startLine
+                        : lineIndex(atUTF8: lastByte)
+                    return startLine...max(startLine, endLine)
+                }
+            }
+            tokenLineRanges = computedTokenLineRanges
+
+            var prefixMaxEndLines: [Int] = []
+            prefixMaxEndLines.reserveCapacity(computedTokenLineRanges.count)
+            var maxEndLine = 0
+            var structuralRanges: [ClosedRange<Int>] = []
+            var quoteLines: Set<Int> = []
+            for (tokenIndex, token) in tokens.enumerated() {
+                let lineRange = computedTokenLineRanges[tokenIndex]
+                maxEndLine = max(maxEndLine, lineRange.upperBound)
+                prefixMaxEndLines.append(maxEndLine)
+                switch token.kind {
+                case .codeFence, .table:
+                    structuralRanges.append(lineRange)
+                case .blockquote:
+                    quoteLines.insert(token.line)
+                default:
+                    break
+                }
+            }
+            tokenPrefixMaxEndLines = prefixMaxEndLines
+            structuralBlockLineRanges = structuralRanges
+            quoteLineSet = quoteLines
         }
 
         func table(headerLine: Int) -> TableStructure? {
-            tables.first { $0.headerLine == headerLine }
+            // `MarkdownSemantics` emits tables in source order. A linear search here makes a
+            // full render quadratic in the number of tables (the performance corpus contains
+            // hundreds of them), even though the lookup key is already sorted.
+            var lowerBound = 0
+            var upperBound = tables.count
+            while lowerBound < upperBound {
+                let middle = lowerBound + (upperBound - lowerBound) / 2
+                let candidate = tables[middle]
+                if candidate.headerLine < headerLine {
+                    lowerBound = middle + 1
+                } else {
+                    upperBound = middle
+                }
+            }
+            guard lowerBound < tables.count, tables[lowerBound].headerLine == headerLine else {
+                return nil
+            }
+            return tables[lowerBound]
+        }
+
+        /// Sorted interval query over token line spans. The prefix maximum includes tokens that
+        /// start before the dirty band but continue into it (multi-line inline syntax included).
+        func tokenIndices(overlapping lines: ClosedRange<Int>) -> Range<Int> {
+            guard !tokens.isEmpty else { return 0..<0 }
+
+            var lowerBound = 0
+            var upperBound = tokenPrefixMaxEndLines.count
+            while lowerBound < upperBound {
+                let middle = lowerBound + (upperBound - lowerBound) / 2
+                if tokenPrefixMaxEndLines[middle] < lines.lowerBound {
+                    lowerBound = middle + 1
+                } else {
+                    upperBound = middle
+                }
+            }
+            let firstCandidate = lowerBound
+
+            lowerBound = firstCandidate
+            upperBound = tokenLineRanges.count
+            while lowerBound < upperBound {
+                let middle = lowerBound + (upperBound - lowerBound) / 2
+                if tokenLineRanges[middle].lowerBound <= lines.upperBound {
+                    lowerBound = middle + 1
+                } else {
+                    upperBound = middle
+                }
+            }
+            return firstCandidate..<max(firstCandidate, lowerBound)
         }
     }
 
@@ -50,7 +175,7 @@ public struct RenderEngine {
 
     private let theme = Theme.standard
 
-    public init() {}
+    public nonisolated init() {}
 
     /// 表驱动行内样式合并：需要"在既有字体上叠特征"的 token 类型。
     private enum FontMerge {
@@ -69,11 +194,25 @@ public struct RenderEngine {
         // AST 是语义与源码定位的唯一来源。即使文档没有链接或深层缩进，也必须
         // 构建语义层，避免同一 Markdown 在不同输入形态下走两套规则。
         let semantics = MarkdownSemantics(source, bytes: bytes, lines: sourceLines)
+        let tokens = semantics.tokens
+        let index = SourceIndex(utf8: bytes)
+        let nsSource = source as NSString
+        let blockImageDestinations = tokens.compactMap { token -> String? in
+            guard case .image = token.kind,
+                  token.isBlockImage,
+                  let destinationRange = token.linkDestination
+            else { return nil }
+            let range = index.nsRange(destinationRange)
+            guard range.location >= 0, range.upperBound <= nsSource.length else { return nil }
+            return nsSource.substring(with: range)
+        }
         return Package(
-            tokens: semantics.tokens,
-            index: SourceIndex(utf8: bytes),
+            tokens: tokens,
+            index: index,
             lineStarts: lineStarts,
-            tables: semantics.tables
+            tables: semantics.tables,
+            blockImageDestinations: blockImageDestinations,
+            characterCount: source.count
         )
     }
 
@@ -88,7 +227,12 @@ public struct RenderEngine {
     ) -> Stats {
         let full = NSRange(location: 0, length: storage.length)
 
-        let context = StyleContext(storage: storage, package: package, imageBaseURL: imageBaseURL)
+        let context = StyleContext(
+            storage: storage,
+            package: package,
+            imageBaseURL: imageBaseURL,
+            theme: theme
+        )
         storage.beginEditing()
         storage.setAttributes(mode == .source ? sourceAttributes() : baseAttributes(), range: full)
         if mode == .rendered {
@@ -138,11 +282,18 @@ public struct RenderEngine {
         let spanEnd = package.index.utf16Offset(endUTF8)
         let span = NSRange(location: spanStart, length: spanEnd - spanStart)
 
-        let context = StyleContext(storage: storage, package: package, imageBaseURL: imageBaseURL)
+        let context = StyleContext(
+            storage: storage,
+            package: package,
+            imageBaseURL: imageBaseURL,
+            theme: theme
+        )
         storage.beginEditing()
         storage.setAttributes(mode == .source ? sourceAttributes() : baseAttributes(), range: span)
         if mode == .rendered {
-            for token in package.tokens where tokenLineRange(token, package: package).overlaps(dirtyLines) {
+            for tokenIndex in package.tokenIndices(overlapping: dirtyLines) {
+                let token = package.tokens[tokenIndex]
+                guard package.tokenLineRanges[tokenIndex].overlaps(dirtyLines) else { continue }
                 applyStyle(token, package: package, into: storage, context: context)
             }
         }
@@ -204,23 +355,11 @@ public struct RenderEngine {
 
     /// 跨多行的结构块（围栏、表格）覆盖的行区间。
     private func multilineBlockRanges(of package: Package?) -> [ClosedRange<Int>] {
-        guard let package else { return [] }
-        return package.tokens.compactMap { token in
-            switch token.kind {
-            case .codeFence, .table:
-                return tokenLineRange(token, package: package)
-            default:
-                return nil
-            }
-        }
+        package?.structuralBlockLineRanges ?? []
     }
 
     private func quoteLines(of package: Package?) -> Set<Int> {
-        guard let package else { return [] }
-        return Set(package.tokens.compactMap { token in
-            if case .blockquote = token.kind { return token.line }
-            return nil
-        })
+        package?.quoteLineSet ?? []
     }
 
     private func contiguousRanges(_ lines: Set<Int>) -> [ClosedRange<Int>] {
@@ -389,21 +528,30 @@ public struct RenderEngine {
         markerVisibilityAttributes(state: revealed ? .revealed : .hidden)
     }
 
-    public static func markerVisibilityAttributes(state: MarkerState) -> [NSAttributedString.Key: Any] {
+    private static let revealedMarkerAttributes: [NSAttributedString.Key: Any] = {
         let theme = Theme.standard
+        return [
+            .font: theme.revealedMarkerFont(),
+            .foregroundColor: theme.markerText,
+            .backgroundColor: NSColor.clear,
+        ]
+    }()
+
+    private static let hiddenMarkerAttributes: [NSAttributedString.Key: Any] = {
+        let theme = Theme.standard
+        return [
+            .font: theme.hiddenMarkerFont(),
+            .foregroundColor: NSColor.clear,
+            .backgroundColor: NSColor.clear,
+        ]
+    }()
+
+    public static func markerVisibilityAttributes(state: MarkerState) -> [NSAttributedString.Key: Any] {
         switch state {
         case .revealed:
-            return [
-                .font: theme.revealedMarkerFont(),
-                .foregroundColor: theme.markerText,
-                .backgroundColor: NSColor.clear,
-            ]
+            return revealedMarkerAttributes
         case .hidden:
-            return [
-                .font: theme.hiddenMarkerFont(),
-                .foregroundColor: NSColor.clear,
-                .backgroundColor: NSColor.clear,
-            ]
+            return hiddenMarkerAttributes
         }
     }
 
@@ -523,13 +671,52 @@ public struct RenderEngine {
         let imageBaseURL: URL?
         private let storage: NSTextStorage
         private let package: Package
+        private let theme: Theme
+        lazy var baseFont: NSFont = theme.baseFont()
+        lazy var boldFont: NSFont = theme.boldFont()
+        lazy var codeFont: NSFont = theme.codeFont()
+        lazy var quoteParagraph: NSParagraphStyle = theme.quoteParagraph()
+        lazy var ruleParagraph: NSParagraphStyle = theme.ruleParagraph()
+        lazy var tableParagraph: NSParagraphStyle = theme.tableParagraph(isLast: false)
+        lazy var lastTableParagraph: NSParagraphStyle = theme.tableParagraph(isLast: true)
+        lazy var tableDelimiterParagraph: NSParagraphStyle = theme.tableDelimiterParagraph()
         private var cachedSource: NSString?
         private var resolvedImages: [String: ResolvedImage?] = [:]
+        private var headingFonts: [Int: NSFont] = [:]
+        private var headingParagraphs: [Int: NSParagraphStyle] = [:]
+        private struct ListParagraphKey: Hashable {
+            let depth: Int
+            let sourcePrefix: String
+        }
+        private var listParagraphs: [ListParagraphKey: NSParagraphStyle] = [:]
+        private struct FenceParagraphKey: Hashable {
+            let isFirst: Bool
+            let isLast: Bool
+        }
+        private var fenceParagraphs: [FenceParagraphKey: NSParagraphStyle] = [:]
+        private struct DerivedFontKey: Hashable {
+            let fontName: String
+            let pointSize: CGFloat
+            let existingTraits: UInt
+            let addedTrait: UInt
+        }
+        private var derivedFonts: [DerivedFontKey: NSFont] = [:]
+        private struct TableMeasurementKey: Hashable {
+            let text: String
+            let isHeader: Bool
+        }
+        private var tableMeasurements: [TableMeasurementKey: CGFloat] = [:]
 
-        init(storage: NSTextStorage, package: Package, imageBaseURL: URL?) {
+        init(
+            storage: NSTextStorage,
+            package: Package,
+            imageBaseURL: URL?,
+            theme: Theme
+        ) {
             self.storage = storage
             self.package = package
             self.imageBaseURL = imageBaseURL
+            self.theme = theme
         }
 
         var source: NSString {
@@ -569,11 +756,63 @@ public struct RenderEngine {
             if let cached = resolvedImages[destination] { return cached }
             let resolved = ImageResolver.resolvedURL(destination: destination, baseURL: imageBaseURL)
                 .flatMap { url -> ResolvedImage? in
-                    guard let image = ImageResolver.loadLocalImage(url: url) else { return nil }
+                    guard let image = ImageResolver.cachedLocalImage(url: url) else { return nil }
                     return ResolvedImage(url: url, image: image)
                 }
             resolvedImages[destination] = resolved
             return resolved
+        }
+
+        func tableTextWidth(_ text: NSString, isHeader: Bool) -> CGFloat {
+            let key = TableMeasurementKey(text: text as String, isHeader: isHeader)
+            if let cached = tableMeasurements[key] { return cached }
+            let font = isHeader ? boldFont : baseFont
+            let width = text.size(withAttributes: [.font: font]).width
+            tableMeasurements[key] = width
+            return width
+        }
+
+        func headingFont(level: Int) -> NSFont {
+            if let cached = headingFonts[level] { return cached }
+            let font = theme.titleFont(level: level)
+            headingFonts[level] = font
+            return font
+        }
+
+        func headingParagraph(level: Int) -> NSParagraphStyle {
+            if let cached = headingParagraphs[level] { return cached }
+            let paragraph = theme.headingParagraph(level: level)
+            headingParagraphs[level] = paragraph
+            return paragraph
+        }
+
+        func listParagraph(depth: Int, sourcePrefix: String) -> NSParagraphStyle {
+            let key = ListParagraphKey(depth: depth, sourcePrefix: sourcePrefix)
+            if let cached = listParagraphs[key] { return cached }
+            let paragraph = theme.listParagraph(depth: depth, sourcePrefixText: sourcePrefix)
+            listParagraphs[key] = paragraph
+            return paragraph
+        }
+
+        func fenceParagraph(isFirst: Bool, isLast: Bool) -> NSParagraphStyle {
+            let key = FenceParagraphKey(isFirst: isFirst, isLast: isLast)
+            if let cached = fenceParagraphs[key] { return cached }
+            let paragraph = theme.fenceParagraph(isFirstLine: isFirst, isLastLine: isLast)
+            fenceParagraphs[key] = paragraph
+            return paragraph
+        }
+
+        func derivedFont(from font: NSFont, adding trait: NSFontTraitMask) -> NSFont {
+            let key = DerivedFontKey(
+                fontName: font.fontName,
+                pointSize: font.pointSize,
+                existingTraits: NSFontManager.shared.traits(of: font).rawValue,
+                addedTrait: trait.rawValue
+            )
+            if let cached = derivedFonts[key] { return cached }
+            let derived = theme.derivedFont(from: font, adding: trait)
+            derivedFonts[key] = derived
+            return derived
         }
     }
 
@@ -605,7 +844,7 @@ public struct RenderEngine {
         if token.kind == .rule {
             // 分隔线：标记隐藏 + 上下留白；真实横线由 MuseLayoutFragment 绘制。
             storage.addAttributes([
-                .paragraphStyle: theme.ruleParagraph(),
+                .paragraphStyle: context.ruleParagraph,
                 .museBlock: BlockVisual.rule.rawValue,
             ], range: index.nsRange(package.lineStarts[token.line]..<token.markerRange.upperBound))
             return
@@ -633,17 +872,17 @@ public struct RenderEngine {
                 location: lineStart,
                 length: markerNS.location - lineStart + markerNS.length
             )
-            return theme.listParagraph(
+            return context.listParagraph(
                 depth: depth,
-                sourcePrefixText: context.source.substring(with: prefixRange)
+                sourcePrefix: context.source.substring(with: prefixRange)
             )
         }
 
         switch token.kind {
         case .heading(let level):
             storage.addAttributes([
-                .font: theme.titleFont(level: level),
-                .paragraphStyle: theme.headingParagraph(level: level),
+                .font: context.headingFont(level: level),
+                .paragraphStyle: context.headingParagraph(level: level),
                 .museBlock: BlockVisual.heading.rawValue,
             ], range: wholeLine)
 
@@ -670,12 +909,12 @@ public struct RenderEngine {
                 .museTaskChecked: NSNumber(value: checked),
             ]) { _, new in new }, range: wholeLine)
             // [ ] / [x] 用代码字体区分（源码模式下可见；渲染态被折叠字体覆盖）。
-            storage.addAttributes([.font: theme.codeFont()], range: index.nsRange(token.markerRange))
+            storage.addAttributes([.font: context.codeFont], range: index.nsRange(token.markerRange))
 
         case .blockquote:
             storage.addAttributes([
                 .foregroundColor: theme.quoteText,
-                .paragraphStyle: theme.quoteParagraph(),
+                .paragraphStyle: context.quoteParagraph,
                 .backgroundColor: theme.quoteBackground,
             ], range: wholeLine)
             // 块标记覆盖整行（含 "> " marker 字符）：绘制层在行首即可读到。
@@ -698,13 +937,13 @@ public struct RenderEngine {
             }
             let fullRange = package.lineStarts[token.line]..<upper
             storage.addAttributes([
-                .font: theme.codeFont(),
+                .font: context.codeFont,
                 .foregroundColor: theme.codeText,
                 .backgroundColor: theme.codeBackground,
                 .museBlock: BlockVisual.codeFence.rawValue,
             ], range: index.nsRange(fullRange))
             storage.addAttributes([
-                .font: theme.codeFont(),
+                .font: context.codeFont,
                 .foregroundColor: theme.markerText,
             ], range: index.nsRange(token.markerRange))
 
@@ -719,7 +958,7 @@ public struct RenderEngine {
                 case (false, false): ""
                 }
                 var lineAttributes: [NSAttributedString.Key: Any] = [
-                    .paragraphStyle: theme.fenceParagraph(isFirstLine: isFirst, isLastLine: isLast)
+                    .paragraphStyle: context.fenceParagraph(isFirst: isFirst, isLast: isLast)
                 ]
                 if !role.isEmpty {
                     lineAttributes[.museBlockRole] = role
@@ -735,12 +974,12 @@ public struct RenderEngine {
 
         case .strong:
             // 合并字形特征而非覆盖：嵌套（粗体里的斜体、斜体里的粗体）应得到组合样式。
-            let existing = storage.attribute(.font, at: content.location, effectiveRange: nil) as? NSFont ?? theme.baseFont()
-            storage.addAttributes([.font: theme.derivedFont(from: existing, adding: .boldFontMask)], range: content)
+            let existing = storage.attribute(.font, at: content.location, effectiveRange: nil) as? NSFont ?? context.baseFont
+            storage.addAttributes([.font: context.derivedFont(from: existing, adding: .boldFontMask)], range: content)
 
         case .emphasis:
-            let existing = storage.attribute(.font, at: content.location, effectiveRange: nil) as? NSFont ?? theme.baseFont()
-            storage.addAttributes([.font: theme.derivedFont(from: existing, adding: .italicFontMask)], range: content)
+            let existing = storage.attribute(.font, at: content.location, effectiveRange: nil) as? NSFont ?? context.baseFont
+            storage.addAttributes([.font: context.derivedFont(from: existing, adding: .italicFontMask)], range: content)
 
         case .strikethrough:
             storage.addAttributes([
@@ -751,7 +990,7 @@ public struct RenderEngine {
 
         case .inlineCode:
             storage.addAttributes([
-                .font: theme.codeFont(),
+                .font: context.codeFont,
                 .foregroundColor: theme.codeText,
                 .backgroundColor: theme.codeBackground,
             ], range: content)
@@ -863,13 +1102,19 @@ public struct RenderEngine {
         // 表格用正文字体（对标 Typora：表格不是代码）；列对齐由 kern 负责，
         // 不再依赖等宽字体去凑源码列。
         storage.addAttributes([
-            .font: theme.baseFont(),
+            .font: context.baseFont,
             .foregroundColor: theme.text,
             .museBlock: BlockVisual.table.rawValue,
         ], range: index.nsRange(fullRange))
 
         guard let structure = package.table(headerLine: token.line) else {
-            applyPlainTableStyle(from: token.line, to: lastLine, package: package, into: storage)
+            applyPlainTableStyle(
+                from: token.line,
+                to: lastLine,
+                package: package,
+                into: storage,
+                context: context
+            )
             return
         }
 
@@ -880,13 +1125,20 @@ public struct RenderEngine {
             // 单元格里的行内标记（`**`、`` ` `` 等）在渲染态是近零宽的，
             // 度量列宽必须把它们排除掉。
             hiddenRanges: context.hiddenInlineRanges(in: fullRange),
-            headerFont: theme.boldFont(),
-            bodyFont: theme.baseFont()
+            headerFont: context.boldFont,
+            bodyFont: context.baseFont,
+            measureText: context.tableTextWidth
         )
         guard layout.isAlignable else {
             // 结构区放不下 kern 的承载字符（完全不留空格的 `|a|b|` 写法）：
             // 列对不齐时不画格线，避免线与文字错位——比硬画一个歪的表格好。
-            applyPlainTableStyle(from: token.line, to: lastLine, package: package, into: storage)
+            applyPlainTableStyle(
+                from: token.line,
+                to: lastLine,
+                package: package,
+                into: storage,
+                context: context
+            )
             return
         }
         let boundaries = layout.columnBoundaries.map { NSNumber(value: Double($0)) }
@@ -896,13 +1148,15 @@ public struct RenderEngine {
                 package.lineStarts[row.line]..<lineEndUTF8(row.line, package: package)
             )
             var attributes: [NSAttributedString.Key: Any] = [
-                .paragraphStyle: theme.tableParagraph(isLast: row.line == lastLine),
+                .paragraphStyle: row.line == lastLine
+                    ? context.lastTableParagraph
+                    : context.tableParagraph,
                 .museTableColumns: boundaries,
                 .museTableRow: NSNumber(value: rowIndex),
                 .museTableID: NSNumber(value: structure.headerLine),
             ]
             if rowIndex == 0 {
-                attributes[.font] = theme.boldFont()
+                attributes[.font] = context.boldFont
                 attributes[.museBlockRole] = "head"
             } else if row.line == lastLine {
                 attributes[.museBlockRole] = "close"
@@ -916,7 +1170,7 @@ public struct RenderEngine {
         let delimiterEnd = lineEndUTF8(structure.delimiterLine, package: package)
         let delimiterRange = index.nsRange(delimiterStart..<delimiterEnd)
         storage.addAttributes([
-            .paragraphStyle: theme.tableDelimiterParagraph(),
+            .paragraphStyle: context.tableDelimiterParagraph,
             .foregroundColor: theme.markerText,
             .museBlockRole: "delimiter",
         ], range: delimiterRange)
@@ -938,18 +1192,21 @@ public struct RenderEngine {
         from firstLine: Int,
         to lastLine: Int,
         package: Package,
-        into storage: NSTextStorage
+        into storage: NSTextStorage,
+        context: StyleContext
     ) {
         let index = package.index
         for line in firstLine...lastLine {
             var attributes: [NSAttributedString.Key: Any] = [
-                .paragraphStyle: theme.tableParagraph(isLast: line == lastLine)
+                .paragraphStyle: line == lastLine
+                    ? context.lastTableParagraph
+                    : context.tableParagraph
             ]
             if line == firstLine {
-                attributes[.font] = theme.boldFont()
+                attributes[.font] = context.boldFont
                 attributes[.museBlockRole] = "head"
             } else if line == firstLine + 1 {
-                attributes[.paragraphStyle] = theme.tableDelimiterParagraph()
+                attributes[.paragraphStyle] = context.tableDelimiterParagraph
                 attributes[.museBlockRole] = "delimiter"
             } else if line == lastLine {
                 attributes[.museBlockRole] = "close"

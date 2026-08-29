@@ -147,6 +147,11 @@ public nonisolated struct MarkdownSemantics: Sendable {
     /// 这是唯一的转换层；TokenScanner 的 `scan` 仅为旧调用方保留同一结果的
     /// 兼容入口，不再另行实现 Markdown 匹配规则。
     public var tokens: [Token] {
+        // A table block needs its structural marker ranges. Looking it up with `first(where:)`
+        // for every block makes token construction quadratic in table-heavy documents.
+        let tablesByHeaderLine = Dictionary(uniqueKeysWithValues: tables.map {
+            ($0.headerLine, $0)
+        })
         var result = blocks.map { block -> Token in
             switch block.kind {
             case let .heading(level):
@@ -168,7 +173,7 @@ public nonisolated struct MarkdownSemantics: Sendable {
                 // 表格的「marker」是分隔行整行：随光标显隐（块级）。行内的结构区
                 // （`|` 与单元格填充空白）作为附加 marker 一并显隐——隐藏态由绘制层
                 // 画真实表格线，回显态露出源码。
-                let structural = tables.first { $0.headerLine == block.line }?.structuralRanges ?? []
+                let structural = tablesByHeaderLine[block.line]?.structuralRanges ?? []
                 return Token(kind: .table(lastLine: lastLine), markerRange: block.marker,
                              contentRange: block.content, extraMarkerRanges: structural,
                              line: block.line)
@@ -358,6 +363,10 @@ public nonisolated struct MarkdownSemantics: Sendable {
             }
             guard !rows.isEmpty else { return }
 
+            let firstStructureOffset = rows[0].cells[0].leadingGap.lowerBound
+            let prefixRange = lines[headerLine].start..<max(lines[headerLine].start, firstStructureOffset)
+            let containerPrefix = String(decoding: bytes[prefixRange], as: UTF8.self)
+
             let alignments = table.columnAlignments.map { alignment -> TableStructure.ColumnAlignment in
                 switch alignment {
                 case .center: return .center
@@ -367,6 +376,7 @@ public nonisolated struct MarkdownSemantics: Sendable {
             }
             tables.append(TableStructure(
                 headerLine: headerLine,
+                containerPrefix: containerPrefix,
                 delimiterLine: headerLine + 1,
                 lastLine: lastLine,
                 alignments: alignments,

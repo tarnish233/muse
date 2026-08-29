@@ -488,6 +488,37 @@ import Testing
         #expect(coordinator.lastReconcileWriteCount < totalMarkers / 10)
     }
 
+    /// 单元格刚输入完就按 Tab 时，后台 AST 仍对应旧正文。导航必须等新 package
+    /// 落地再执行，既不能跳错格，也不能把一个字面制表符写进 Markdown。
+    @Test func tableTabWaitsForFreshPackageAfterTyping() async throws {
+        let source = "| 姓名 | 状态 |\n|---|---|\n| Muse | ok |"
+        let storage = NSTextStorage(string: source)
+        let coordinator = RenderCoordinator()
+        coordinator.attach(storage: storage)
+        coordinator.onTextEdited = {}
+        let textView = EditorTextView.make(textStorage: storage)
+        coordinator.textView = textView
+        textView.tableNavigationHandler = { coordinator.navigateTable(backward: $0) }
+
+        storage.replaceCharacters(in: NSRange(location: 0, length: 0), with: "")
+        #expect(await waitForApplied(coordinator, atLeast: 1))
+        let initialPackage = try #require(coordinator.lastPackage)
+        let first = try #require(initialPackage.tables.first?.rows.first?.cells.first)
+        let firstInk = initialPackage.index.nsRange(first.ink)
+        textView.setSelectedRange(NSRange(location: NSMaxRange(firstInk), length: 0))
+
+        let revision = coordinator.appliedRevision
+        textView.insertText("!", replacementRange: NSRange(location: NSNotFound, length: 0))
+        textView.insertTab(nil)
+        #expect(!storage.string.contains("\t"))
+
+        #expect(await waitForApplied(coordinator, atLeast: revision + 1))
+        let freshPackage = try #require(coordinator.lastPackage)
+        let second = try #require(freshPackage.tables.first?.rows.first?.cells.last)
+        #expect(textView.selectedRange() == freshPackage.index.nsRange(second.ink))
+        #expect(storage.string.contains("姓名!"))
+    }
+
     // MARK: - 真实管线下的列表续行（缺陷 17）
     //
     // TypingBehaviorsTests 里的用例都用同步预渲染或干脆不渲染来构造两种极端。

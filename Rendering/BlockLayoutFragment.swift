@@ -220,9 +220,41 @@ public nonisolated enum ListMarkerGeometry {
 ///
 /// 隔离：基类的绘制/度量接口是 nonisolated（AppKit 只在主线程调用它们），
 /// 主题为此声明 nonisolated —— 见 Theme。
+public nonisolated struct TableDragHandleGeometry: Sendable, Equatable {
+    public enum Axis: String, Sendable {
+        case row
+        case column
+    }
+
+    public let tableID: Int
+    public let axis: Axis
+    public let index: Int
+    public let frame: CGRect
+    public let itemFrame: CGRect
+    public let isLastRow: Bool
+
+    public init(
+        tableID: Int,
+        axis: Axis,
+        index: Int,
+        frame: CGRect,
+        itemFrame: CGRect,
+        isLastRow: Bool = false
+    ) {
+        self.tableID = tableID
+        self.axis = axis
+        self.index = index
+        self.frame = frame
+        self.itemFrame = itemFrame
+        self.isLastRow = isLastRow
+    }
+}
+
 public nonisolated final class MuseLayoutFragment: NSTextLayoutFragment {
     public override func draw(at point: CGPoint, in context: CGContext) {
         drawBlockVisuals(at: point, in: context)
+        drawTableDragFeedback(at: point, in: context)
+        drawTableSelection(at: point, in: context)
         super.draw(at: point, in: context)
     }
 
@@ -267,6 +299,16 @@ public nonisolated final class MuseLayoutFragment: NSTextLayoutFragment {
                 height: max(layoutFragmentFrame.height, size.height)
             ))
         }
+        if blockKind == BlockVisual.table.rawValue,
+           let tableWidth = tableColumnBoundaries?.last {
+            let topExtension: CGFloat = tableRowIndex == 0 ? 16 : 0
+            extended = extended.union(CGRect(
+                x: -16,
+                y: -topExtension,
+                width: tableWidth + 16,
+                height: layoutFragmentFrame.height + topExtension
+            ))
+        }
         return extended
     }
 
@@ -306,6 +348,46 @@ public nonisolated final class MuseLayoutFragment: NSTextLayoutFragment {
     var tableRowIndex: Int? {
         guard let string = elementString, string.length > 0 else { return nil }
         return (string.attribute(.museTableRow, at: 0, effectiveRange: nil) as? NSNumber)?.intValue
+    }
+
+    /// 同一张表所有可见行共享的身份（表头源码行号）。
+    public var tableIdentifier: Int? {
+        guard let string = elementString, string.length > 0 else { return nil }
+        return (string.attribute(.museTableID, at: 0, effectiveRange: nil) as? NSNumber)?.intValue
+    }
+
+    private var tableDragAxis: TableDragHandleGeometry.Axis? {
+        guard let string = elementString, string.length > 0,
+              let raw = string.attribute(.museTableDragAxis, at: 0, effectiveRange: nil) as? String
+        else { return nil }
+        return TableDragHandleGeometry.Axis(rawValue: raw)
+    }
+
+    private var tableDragSource: Int? {
+        guard let string = elementString, string.length > 0 else { return nil }
+        return (string.attribute(.museTableDragSource, at: 0, effectiveRange: nil) as? NSNumber)?.intValue
+    }
+
+    private var tableDragDestination: Int? {
+        guard let string = elementString, string.length > 0 else { return nil }
+        return (string.attribute(.museTableDragDestination, at: 0, effectiveRange: nil) as? NSNumber)?.intValue
+    }
+
+    private var tableCellSelection: TableSelectionBounds? {
+        guard let string = elementString, string.length > 0,
+              let values = string.attribute(.museTableCellSelection, at: 0, effectiveRange: nil) as? [NSNumber],
+              values.count == 4
+        else { return nil }
+        return TableSelectionBounds(
+            minRow: values[0].intValue,
+            maxRow: values[1].intValue,
+            minColumn: values[2].intValue,
+            maxColumn: values[3].intValue
+        )
+    }
+
+    public var isLastTableRow: Bool {
+        (blockRole ?? "").contains("close")
     }
 
     /// 这一行的表格源码是否处于回显态。
@@ -651,9 +733,9 @@ public nonisolated final class MuseLayoutFragment: NSTextLayoutFragment {
         let role = blockRole ?? ""
         // 分隔行（`|---|`）在渲染态塌成零高：不画，否则会在表头下留一条色带。
         guard !role.contains("delimiter") else { return }
-        // 回显态（光标在表格内）不画格线与底色：源码里的 `|` 全露出来了，而格线
-        // 停在渲染态的列位置上，两套竖线叠在一起比不画更乱。表格是否回显直接看
-        // 行首那个结构字符还折不折叠——它和显隐状态是同一份事实，不需要另存状态。
+        // 防御性兼容旧属性或过渡帧：若结构字符意外处于回显态，不叠画第二套格线。
+        // 正常的渲染模式会始终折叠表格结构；完整源码只在源码模式显示，而源码模式
+        // 本身不会携带 `.museBlock`，因此不会进入这里。
         guard !isTableSourceRevealed else { return }
 
         let isHead = role.contains("head")
@@ -696,6 +778,174 @@ public nonisolated final class MuseLayoutFragment: NSTextLayoutFragment {
             guard x >= rect.minX else { continue }
             context.fill(CGRect(x: x, y: rect.minY, width: border, height: rect.height))
         }
+    }
+
+    /// 当前 fragment 对应的真实表格行盒。拖拽手柄、命中测试、选中底色与格线
+    /// 全部从这里取几何，避免各层各算一套后发生漂移。
+    public func tableRowFrame(at point: CGPoint) -> CGRect? {
+        guard blockKind == BlockVisual.table.rawValue,
+              !isTableSourceRevealed,
+              !(blockRole ?? "").contains("delimiter"),
+              let line = textLineFragments.first,
+              let boundaries = tableColumnBoundaries,
+              let tableWidth = boundaries.last,
+              tableWidth > 0
+        else { return nil }
+        return CGRect(
+            x: point.x,
+            y: point.y + line.typographicBounds.minY,
+            width: tableWidth,
+            height: line.typographicBounds.height + Theme.tableCellPaddingY
+        )
+    }
+
+    /// 本行贡献的拖拽手柄。每行有一个左侧行手柄；只有表头贡献顶部列手柄。
+    public func tableDragHandleGeometries(at point: CGPoint) -> [TableDragHandleGeometry] {
+        guard let tableID = tableIdentifier,
+              let row = tableRowIndex,
+              let rowFrame = tableRowFrame(at: point),
+              let boundaries = tableColumnBoundaries,
+              boundaries.count >= 2
+        else { return [] }
+
+        let handleThickness = Theme.tableChromeSize
+        var result = [TableDragHandleGeometry(
+            tableID: tableID,
+            axis: .row,
+            index: row,
+            frame: CGRect(
+                x: rowFrame.minX - handleThickness,
+                y: rowFrame.minY,
+                width: handleThickness,
+                height: rowFrame.height
+            ),
+            itemFrame: rowFrame,
+            isLastRow: isLastTableRow
+        )]
+        guard row == 0 else { return result }
+
+        for column in 0..<(boundaries.count - 1) {
+            let item = CGRect(
+                x: rowFrame.minX + boundaries[column],
+                y: rowFrame.minY,
+                width: boundaries[column + 1] - boundaries[column],
+                height: rowFrame.height
+            )
+            result.append(TableDragHandleGeometry(
+                tableID: tableID,
+                axis: .column,
+                index: column,
+                frame: CGRect(
+                    x: item.minX,
+                    y: rowFrame.minY - handleThickness,
+                    width: item.width,
+                    height: handleThickness
+                ),
+                itemFrame: item,
+                isLastRow: isLastTableRow
+            ))
+        }
+        return result
+    }
+
+    /// Obsidian 风格的结构选择与拖拽反馈。手柄本身由 EditorTextView 的顶层 chrome
+    /// 按悬停绘制；fragment 只负责必须落在字形下方的单元格底色和边框。
+    private func drawTableDragFeedback(at point: CGPoint, in context: CGContext) {
+        let handles = tableDragHandleGeometries(at: point)
+        guard !handles.isEmpty else { return }
+
+        let accent = NSColor.controlAccentColor
+        let axis = tableDragAxis
+        let source = tableDragSource
+        let destination = tableDragDestination
+        let row = tableRowIndex
+        let rowFrame = tableRowFrame(at: point)
+        let boundaries = tableColumnBoundaries
+
+        if let selection = tableCellSelection,
+           let row, row >= selection.minRow, row <= selection.maxRow,
+           let rowFrame, let boundaries,
+           selection.minColumn >= 0, selection.maxColumn + 1 < boundaries.count {
+            let rect = CGRect(
+                x: rowFrame.minX + boundaries[selection.minColumn],
+                y: rowFrame.minY,
+                width: boundaries[selection.maxColumn + 1] - boundaries[selection.minColumn],
+                height: rowFrame.height
+            )
+            context.setFillColor(accent.withAlphaComponent(0.10).cgColor)
+            context.fill(rect)
+            context.setFillColor(accent.cgColor)
+            let border: CGFloat = 2
+            if row == selection.minRow {
+                context.fill(CGRect(x: rect.minX, y: rect.minY, width: rect.width, height: border))
+            }
+            if row == selection.maxRow {
+                context.fill(CGRect(x: rect.minX, y: rect.maxY - border, width: rect.width, height: border))
+            }
+            context.fill(CGRect(x: rect.minX, y: rect.minY, width: border, height: rect.height))
+            context.fill(CGRect(x: rect.maxX - border, y: rect.minY, width: border, height: rect.height))
+        }
+
+        if let axis, let source, let destination, let rowFrame {
+            switch axis {
+            case .row:
+                if row == source {
+                    context.setFillColor(accent.withAlphaComponent(0.07).cgColor)
+                    context.fill(rowFrame)
+                }
+            case .column:
+                if let boundaries, source >= 0, source + 1 < boundaries.count {
+                    let selected = CGRect(
+                        x: rowFrame.minX + boundaries[source],
+                        y: rowFrame.minY,
+                        width: boundaries[source + 1] - boundaries[source],
+                        height: rowFrame.height
+                    )
+                    context.setFillColor(accent.withAlphaComponent(0.07).cgColor)
+                    context.fill(selected)
+                }
+            }
+        }
+    }
+
+    /// 表格选区按行片段的真实字符落点绘制。系统选区使用另一条几何路径，会把
+    /// 结构字符上的列对齐 kern 重复计算，第三列的高亮因此漂到表格右边。
+    private func drawTableSelection(at point: CGPoint, in context: CGContext) {
+        for rect in tableSelectionRects(at: point) {
+            context.setFillColor(NSColor.selectedContentBackgroundColor.cgColor)
+            context.fill(rect)
+        }
+    }
+
+    /// 与绘制共用的可观测几何，供回归测试确认高亮留在表格边界内。
+    func tableSelectionRects(at point: CGPoint) -> [CGRect] {
+        guard blockKind == BlockVisual.table.rawValue,
+              let string = elementString,
+              let line = textLineFragments.first,
+              let boundaries = tableColumnBoundaries,
+              let tableWidth = boundaries.last
+        else { return [] }
+
+        var rects: [CGRect] = []
+        string.enumerateAttribute(
+            .museTableSelection,
+            in: NSRange(location: 0, length: string.length),
+            options: []
+        ) { value, range, _ in
+            guard value != nil, range.length > 0 else { return }
+            let start = line.locationForCharacter(at: range.location).x
+            let end = line.locationForCharacter(at: NSMaxRange(range)).x
+            let left = max(0, min(start, end))
+            let right = min(tableWidth, max(start, end))
+            guard right > left else { return }
+            rects.append(CGRect(
+                x: point.x + left,
+                y: point.y + line.typographicBounds.minY,
+                width: right - left,
+                height: line.typographicBounds.height
+            ))
+        }
+        return rects
     }
 
     /// 块图片：把图画进段落撑出的行高里。

@@ -379,7 +379,17 @@ public nonisolated struct MarkdownSemantics: Sendable {
             var contents: [Range<Int>] = []
             for cell in cells {
                 // colspan 0 的单元格被前一格覆盖，没有自己的源码区间。
-                guard cell.colspan > 0, let range = byteRange(cell) else { continue }
+                guard cell.colspan > 0, var range = byteRange(cell) else { continue }
+                // cmark-gfm 对全空白单元格会把右侧分隔 `|` 算进 Cell.range。
+                // 例如 `|  |  |` 的两个 cell 都以管线符结尾；若把它当作墨迹，
+                // 增量渲染重置属性后就会露出竖线。未转义的管线符在 GFM 单元格
+                // 末尾只能是分隔符，因此把它移回结构区；内容里的 `\|` 保留。
+                if range.upperBound > range.lowerBound {
+                    let pipeOffset = range.upperBound - 1
+                    if bytes[pipeOffset] == 0x7C, isEscaped(at: pipeOffset) == false {
+                        range = range.lowerBound..<pipeOffset
+                    }
+                }
                 contents.append(range)
             }
             guard !contents.isEmpty else { return nil }
@@ -430,6 +440,17 @@ public nonisolated struct MarkdownSemantics: Sendable {
         /// `offset` 前一个字节正好是 `|` 时返回它的区间。
         private func pipe(endingAt offset: Int) -> Range<Int>? {
             pipe(startingAt: offset - 1)
+        }
+
+        private func isEscaped(at offset: Int) -> Bool {
+            guard offset > 0 else { return false }
+            var cursor = offset
+            var slashCount = 0
+            while cursor > 0, bytes[cursor - 1] == 0x5C {
+                slashCount += 1
+                cursor -= 1
+            }
+            return slashCount % 2 == 1
         }
 
         mutating func visitThematicBreak(_ thematicBreak: ThematicBreak) {

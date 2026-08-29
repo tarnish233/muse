@@ -238,9 +238,8 @@ import Testing
         #expect(difference < 6, "列宽把折叠掉的 ** 也算进去了：多了 \(difference)pt")
     }
 
-    /// 光标进入表格：结构区回显源码。列仍然对齐——每行的结构字符个数相同，
-    /// 各列同步位移。
-    @Test func caretInsideTableRevealsSource() throws {
+    /// 光标进入表格仍直接编辑可视单元格，不把整块 Markdown 结构摊开。
+    @Test func caretInsideTableKeepsStructureHidden() throws {
         let source = "| 功能 | 状态 |\n|---|---|\n| 即时渲染 | ok |"
         let storage = NSTextStorage(string: source)
         let package = engine.prepare(source)
@@ -251,14 +250,495 @@ import Testing
         for range in structure.structuralRanges {
             let ns = package.index.nsRange(range)
             let font = storage.attribute(.font, at: ns.location, effectiveRange: nil) as? NSFont
-            #expect((font?.pointSize ?? 0) > 1, "回显时结构字符应可见")
+            #expect((font?.pointSize ?? 100) < 1, "可视化编辑时结构字符应保持隐藏")
         }
         let origins = inkOrigins(source: source, storage: storage, structure: structure, index: package.index)
         for column in 0..<structure.columnCount {
             let xs = origins.map { $0[column] }
-            #expect((xs.max() ?? 0) - (xs.min() ?? 0) < 1.0, "回显后第 \(column) 列错位：\(xs)")
+            #expect((xs.max() ?? 0) - (xs.min() ?? 0) < 1.0, "编辑时第 \(column) 列错位：\(xs)")
         }
         #expect(storage.string == source)
+    }
+
+    @Test func tableTabSelectsNextCellAndBacktabReturns() throws {
+        let source = "| 姓名 | 状态 |\n|---|---|\n| Muse | ok |"
+        let storage = NSTextStorage(string: source)
+        let package = engine.prepare(source)
+        let table = try #require(package.tables.first)
+        _ = engine.render(package: package, selection: nil, into: storage)
+
+        let textView = EditorTextView.make(textStorage: storage)
+        let coordinator = RenderCoordinator()
+        coordinator.attach(storage: storage)
+        coordinator.textView = textView
+        coordinator.adoptPackage(package)
+        textView.tableNavigationHandler = { coordinator.navigateTable(backward: $0) }
+
+        let first = package.index.nsRange(table.rows[0].cells[0].ink)
+        let second = package.index.nsRange(table.rows[0].cells[1].ink)
+        textView.setSelectedRange(NSRange(location: first.location, length: 0))
+        textView.insertTab(nil)
+        #expect(textView.selectedRange() == second)
+
+        textView.insertBacktab(nil)
+        #expect(textView.selectedRange() == first)
+        #expect(storage.string == source)
+    }
+
+    @Test func tabFromLastCellAppendsRowAndKeepsMarkdownBacking() throws {
+        let source = "| 姓名 | 状态 |\n|---|---|\n| Muse | ok |"
+        let storage = NSTextStorage(string: source)
+        let package = engine.prepare(source)
+        let table = try #require(package.tables.first)
+        _ = engine.render(package: package, selection: nil, into: storage)
+
+        let textView = EditorTextView.make(textStorage: storage)
+        let coordinator = RenderCoordinator()
+        coordinator.attach(storage: storage)
+        coordinator.textView = textView
+        coordinator.adoptPackage(package)
+        textView.tableNavigationHandler = { coordinator.navigateTable(backward: $0) }
+
+        let last = package.index.nsRange(try #require(table.rows.last?.cells.last?.ink))
+        textView.setSelectedRange(last)
+        textView.insertTab(nil)
+
+        #expect(storage.string == source + "\n|  |  |")
+        #expect(textView.selectedRange() == NSRange(location: (source as NSString).length + 3, length: 0))
+        let generated = NSRange(location: (source as NSString).length + 1, length: 7)
+        for location in generated.location..<NSMaxRange(generated) {
+            #expect(isHidden(location, in: storage), "新增行在解析落地前不应闪出 Markdown 源码")
+        }
+        #expect(storage.attribute(.museBlock, at: generated.location, effectiveRange: nil) as? String
+                == BlockVisual.table.rawValue)
+    }
+
+    @Test func returnFromLastCellAppendsRenderedRow() throws {
+        let source = "| 姓名 | 状态 |\n|---|---|\n| Muse | ok |"
+        let storage = NSTextStorage(string: source)
+        let package = engine.prepare(source)
+        let table = try #require(package.tables.first)
+        _ = engine.render(package: package, selection: nil, into: storage)
+
+        let textView = EditorTextView.make(textStorage: storage)
+        let coordinator = RenderCoordinator()
+        coordinator.attach(storage: storage)
+        coordinator.textView = textView
+        coordinator.adoptPackage(package)
+        textView.tableReturnHandler = { coordinator.insertTableRowOnReturn() }
+
+        let last = package.index.nsRange(try #require(table.rows.last?.cells.last?.ink))
+        textView.setSelectedRange(last)
+        textView.insertNewline(nil)
+
+        #expect(storage.string == source + "\n|  |  |")
+        #expect(textView.selectedRange() == NSRange(location: (source as NSString).length + 6, length: 0))
+        let generated = NSRange(location: (source as NSString).length + 1, length: 7)
+        for location in generated.location..<NSMaxRange(generated) {
+            #expect(isHidden(location, in: storage), "Return 新增行应立即保持网格呈现")
+        }
+        let typingFont = textView.typingAttributes[.font] as? NSFont
+        #expect((typingFont?.pointSize ?? 0) >= 1, "新增行首字必须立即可见")
+    }
+
+    @Test(arguments: [0, 1, 2])
+    func returnFromAnyLastRowColumnAppendsAtSameColumn(column: Int) throws {
+        let source = "| 功能 | 状态 | 说明 |\n|---|---|---|\n| 图片 | ✅ | 行内呈现 |"
+        let storage = NSTextStorage(string: source)
+        let package = engine.prepare(source)
+        let table = try #require(package.tables.first)
+        _ = engine.render(package: package, selection: nil, into: storage)
+
+        let textView = EditorTextView.make(textStorage: storage)
+        let coordinator = RenderCoordinator()
+        coordinator.attach(storage: storage)
+        coordinator.textView = textView
+        coordinator.adoptPackage(package)
+        textView.tableReturnHandler = { coordinator.insertTableRowOnReturn() }
+
+        let cell = try #require(table.rows.last?.cells[column])
+        let ink = package.index.nsRange(cell.ink)
+        let caret = NSRange(location: ink.location + min(1, ink.length), length: 0)
+        textView.setSelectedRange(caret)
+        textView.insertNewline(nil)
+
+        let row = "|  |  |  |"
+        #expect(storage.string == source + "\n" + row,
+                "最后一行第 \(column + 1) 列回车不应拆开 Markdown 表格行")
+        let rowStart = (source as NSString).length + 1
+        #expect(textView.selectedRange() == NSRange(
+            location: rowStart + 2 + column * 3,
+            length: 0
+        ), "新增行后应停在同一列")
+        for location in rowStart..<(rowStart + (row as NSString).length) {
+            #expect(isHidden(location, in: storage), "新增行不应短暂显示 Markdown 源码")
+        }
+    }
+
+    @Test(arguments: [0, 1, 2])
+    func returnBeforeLastRowMovesDownSameColumnWithoutEditing(column: Int) throws {
+        let source = "| 功能 | 状态 | 说明 |\n|---|---|---|\n| 表格 | ✅ | 网格 |\n| 图片 | ✅ | 行内呈现 |"
+        let storage = NSTextStorage(string: source)
+        let package = engine.prepare(source)
+        let table = try #require(package.tables.first)
+        _ = engine.render(package: package, selection: nil, into: storage)
+
+        let textView = EditorTextView.make(textStorage: storage)
+        let coordinator = RenderCoordinator()
+        coordinator.attach(storage: storage)
+        coordinator.textView = textView
+        coordinator.adoptPackage(package)
+        textView.tableReturnHandler = { coordinator.insertTableRowOnReturn() }
+
+        let current = package.index.nsRange(table.rows[1].cells[column].ink)
+        let expected = package.index.nsRange(table.rows[2].cells[column].ink)
+        textView.setSelectedRange(NSRange(location: current.location, length: 0))
+        textView.insertNewline(nil)
+
+        #expect(storage.string == source, "非末行回车只负责纵向导航，不应改写 Markdown")
+        #expect(textView.selectedRange() == expected, "回车应选中下一行的同列单元格")
+    }
+
+    @Test func arrowKeysCrossCellBoundariesWithoutEditingMarkdown() throws {
+        let source = "| 功能 | 状态 | 说明 |\n|---|---|---|\n| 表格 | ✅ | 网格 |\n| 图片 | ✅ | 行内呈现 |"
+        let storage = NSTextStorage(string: source)
+        let package = engine.prepare(source)
+        let table = try #require(package.tables.first)
+        _ = engine.render(package: package, selection: nil, into: storage)
+
+        let textView = EditorTextView.make(textStorage: storage)
+        let coordinator = RenderCoordinator()
+        coordinator.attach(storage: storage)
+        coordinator.textView = textView
+        coordinator.adoptPackage(package)
+        textView.tableArrowHandler = { coordinator.navigateTable(arrow: $0) }
+
+        let first = package.index.nsRange(table.rows[1].cells[0].ink)
+        let second = package.index.nsRange(table.rows[1].cells[1].ink)
+        let belowSecond = package.index.nsRange(table.rows[2].cells[1].ink)
+
+        textView.setSelectedRange(NSRange(location: NSMaxRange(first), length: 0))
+        textView.moveRight(nil)
+        #expect(textView.selectedRange() == NSRange(location: second.location, length: 0),
+                "右方向键到达格尾后应进入下一格开头")
+
+        textView.moveLeft(nil)
+        #expect(textView.selectedRange() == NSRange(location: NSMaxRange(first), length: 0),
+                "左方向键到达格首后应回到上一格末尾")
+
+        textView.setSelectedRange(NSRange(location: second.location, length: 0))
+        textView.moveDown(nil)
+        #expect(textView.selectedRange() == NSRange(location: belowSecond.location, length: 0),
+                "下方向键应进入下一行同列")
+
+        textView.moveUp(nil)
+        #expect(textView.selectedRange() == NSRange(location: second.location, length: 0),
+                "上方向键应返回上一行同列")
+        #expect(storage.string == source, "方向键导航不应改写 Markdown")
+    }
+
+    @Test(arguments: [0, 1, 2])
+    func appendedBlankRowKeepsDelimitersHiddenAfterPipelineRender(column: Int) async throws {
+        let source = "| 功能 | 状态 | 说明 |\n|---|---|---|\n| 图片 | ✅ | 行内呈现 |"
+        let storage = NSTextStorage(string: source)
+        let textView = EditorTextView.make(textStorage: storage)
+        let coordinator = RenderCoordinator()
+        coordinator.attach(storage: storage)
+        coordinator.textView = textView
+        coordinator.onTextEdited = {}
+
+        storage.replaceCharacters(in: NSRange(location: 0, length: storage.length), with: source)
+        let firstDeadline = ContinuousClock.now + .seconds(10)
+        while coordinator.appliedRevision < 1, ContinuousClock.now < firstDeadline {
+            try? await Task.sleep(for: .milliseconds(2))
+        }
+        #expect(coordinator.appliedRevision >= 1)
+
+        let package = try #require(coordinator.lastPackage)
+        let table = try #require(package.tables.first)
+        let cell = try #require(table.rows.last?.cells[column])
+        let ink = package.index.nsRange(cell.ink)
+        textView.setSelectedRange(NSRange(location: ink.location + min(1, ink.length), length: 0))
+        textView.tableReturnHandler = { coordinator.insertTableRowOnReturn() }
+        textView.insertNewline(nil)
+
+        let secondDeadline = ContinuousClock.now + .seconds(10)
+        while coordinator.appliedRevision < 2, ContinuousClock.now < secondDeadline {
+            try? await Task.sleep(for: .milliseconds(2))
+        }
+        #expect(coordinator.appliedRevision >= 2)
+
+        let rowStart = (source as NSString).length + 1
+        for offset in [0, 3, 6, 9] {
+            let location = rowStart + offset
+            #expect(isHidden(location, in: storage),
+                    "后台渲染完成后，第 \(offset / 3 + 1) 个表格分隔符仍应不可见")
+            #expect((storage.attribute(.foregroundColor, at: location, effectiveRange: nil) as? NSColor)
+                    == NSColor.clear)
+        }
+        #expect(textView.selectedRange() == NSRange(
+            location: rowStart + 2 + column * 3,
+            length: 0
+        ), "后台渲染后仍应停在新增行的同一列")
+    }
+
+    @Test func thirdColumnSelectionRectStaysInsideTable() throws {
+        let source = """
+        | 功能 | 状态 | 说明 |
+        |---|---|---|
+        | 即时渲染 | ✅ | 属性层 + 绘制层 |
+        | 表格 | ✅ | 列宽实测对齐，绘制层画网格 |
+        | 图片 | ✅ | 独占一行时行内呈现 |
+        """
+        let storage = NSTextStorage(string: source)
+        let package = engine.prepare(source)
+        let table = try #require(package.tables.first)
+        _ = engine.render(package: package, selection: nil, into: storage)
+        let selection = package.index.nsRange(table.rows[2].cells[2].ink)
+        storage.addAttribute(.museTableSelection, value: true, range: selection)
+
+        let textView = EditorTextView.make(textStorage: storage)
+        textView.frame = NSRect(x: 0, y: 0, width: 1200, height: 500)
+        textView.textContainer?.containerSize = NSSize(
+            width: 1200,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        let layoutManager = try #require(textView.textLayoutManager)
+        layoutManager.ensureLayout(for: layoutManager.documentRange)
+
+        var target: MuseLayoutFragment?
+        layoutManager.enumerateTextLayoutFragments(
+            from: layoutManager.documentRange.location,
+            options: [.ensuresLayout]
+        ) { fragment in
+            guard let fragment = fragment as? MuseLayoutFragment,
+                  fragment.blockKind == BlockVisual.table.rawValue,
+                  fragment.tableRowIndex == 2
+            else { return true }
+            target = fragment
+            return false
+        }
+        let fragment = try #require(target)
+        let boundaries = try #require(fragment.tableColumnBoundaries)
+        let point = fragment.layoutFragmentFrame.origin
+        let rect = try #require(fragment.tableSelectionRects(at: point).first)
+        #expect(rect.minX >= point.x + boundaries[2] - 1,
+                "第三列选区不应画到前一列：\(rect)")
+        #expect(rect.maxX <= point.x + (boundaries.last ?? 0) + 1,
+                "第三列选区越过表格右边界：\(rect)")
+    }
+
+    @Test func draggingWholeRowReordersCanonicalMarkdownAndUndoesOnce() throws {
+        let source = "| A | B | C |\n|---|:---:|---:|\n| 1 | 2 | 3 |\n| 4 | 5 | 6 |"
+        let storage = NSTextStorage(string: source)
+        let package = engine.prepare(source)
+        _ = engine.render(package: package, selection: nil, into: storage)
+        let table = try #require(package.tables.first)
+        let textView = EditorTextView.make(textStorage: storage)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 500),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = textView
+        defer { window.contentView = nil }
+        let coordinator = RenderCoordinator()
+        coordinator.attach(storage: storage)
+        coordinator.textView = textView
+        coordinator.adoptPackage(package)
+
+        #expect(coordinator.moveTableRow(tableID: table.headerLine, from: 2, to: 1))
+        #expect(storage.string == "| A | B | C |\n| --- | :---: | ---: |\n| 4 | 5 | 6 |\n| 1 | 2 | 3 |")
+
+        let undo = try #require(textView.undoManager)
+        undo.undo()
+        #expect(storage.string == source, "整行拖拽应由一次撤销完整还原")
+    }
+
+    @Test func draggingWholeColumnMovesCellsAndAlignmentTogether() throws {
+        let source = "| A | B | C |\n|---|:---:|---:|\n| 1 | 2 | 3 |"
+        let storage = NSTextStorage(string: source)
+        let package = engine.prepare(source)
+        _ = engine.render(package: package, selection: nil, into: storage)
+        let table = try #require(package.tables.first)
+        let textView = EditorTextView.make(textStorage: storage)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 500),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = textView
+        defer { window.contentView = nil }
+        let coordinator = RenderCoordinator()
+        coordinator.attach(storage: storage)
+        coordinator.textView = textView
+        coordinator.adoptPackage(package)
+
+        #expect(coordinator.moveTableColumn(tableID: table.headerLine, from: 0, to: 2))
+        #expect(storage.string == "| B | C | A |\n| :---: | ---: | --- |\n| 2 | 3 | 1 |")
+    }
+
+    @Test func cancellingTableDragOnlyClearsTransientPresentation() throws {
+        let source = "| A | B |\n|---|---|\n| 1 | 2 |"
+        let storage = NSTextStorage(string: source)
+        let package = engine.prepare(source)
+        _ = engine.render(package: package, selection: nil, into: storage)
+        let table = try #require(package.tables.first)
+        let textView = EditorTextView.make(textStorage: storage)
+        let coordinator = RenderCoordinator()
+        coordinator.attach(storage: storage)
+        coordinator.textView = textView
+        coordinator.adoptPackage(package)
+
+        #expect(coordinator.handleTableDrag(TableDragEvent(
+            phase: .began,
+            tableID: table.headerLine,
+            axis: .column,
+            source: 0,
+            destination: 0
+        )))
+        #expect(storage.attribute(.museTableDragAxis, at: 0, effectiveRange: nil) as? String == "column")
+        #expect(coordinator.handleTableDrag(TableDragEvent(
+            phase: .cancelled,
+            tableID: table.headerLine,
+            axis: .column,
+            source: 0,
+            destination: 1
+        )))
+        #expect(storage.attribute(.museTableDragAxis, at: 0, effectiveRange: nil) == nil)
+        #expect(storage.string == source)
+        #expect(textView.undoManager?.canUndo != true, "纯拖拽反馈不应污染撤销栈")
+    }
+
+    @Test func tableStructureActionsInsertRenderedRowsAndPreserveAlignment() throws {
+        let source = "| A | B |\n|---|:---:|\n| 1 | 2 |"
+        let storage = NSTextStorage(string: source)
+        let package = engine.prepare(source)
+        _ = engine.render(package: package, selection: nil, into: storage)
+        let table = try #require(package.tables.first)
+        let textView = EditorTextView.make(textStorage: storage)
+        let coordinator = RenderCoordinator()
+        coordinator.attach(storage: storage)
+        coordinator.textView = textView
+        coordinator.adoptPackage(package)
+
+        #expect(coordinator.performTableAction(
+            tableID: table.headerLine,
+            action: .insertRow(index: table.rows.count, copying: nil)
+        ))
+        #expect(storage.string == "| A | B |\n| --- | :---: |\n| 1 | 2 |\n|  |  |")
+        #expect(coordinator.currentTableSelection?.bounds == TableSelectionBounds(
+            minRow: 2, maxRow: 2, minColumn: 0, maxColumn: 1
+        ))
+    }
+
+    @Test func tableSortKeepsHeaderAndUsesNaturalOrdering() throws {
+        let source = "| Item | Value |\n|---|---|\n| item10 | x |\n| item2 | y |\n| item1 | z |"
+        let storage = NSTextStorage(string: source)
+        let package = engine.prepare(source)
+        _ = engine.render(package: package, selection: nil, into: storage)
+        let table = try #require(package.tables.first)
+        let textView = EditorTextView.make(textStorage: storage)
+        let coordinator = RenderCoordinator()
+        coordinator.attach(storage: storage)
+        coordinator.textView = textView
+        coordinator.adoptPackage(package)
+
+        #expect(coordinator.performTableAction(
+            tableID: table.headerLine,
+            action: .sort(column: 0, direction: .ascending)
+        ))
+        #expect(storage.string == "| Item | Value |\n| --- | --- |\n| item1 | z |\n| item2 | y |\n| item10 | x |")
+    }
+
+    @Test func shiftArrowsGrowAndShrinkRectangularTableSelection() throws {
+        let source = "| A | B | C |\n|---|---|---|\n| 1 | 2 | 3 |\n| 4 | 5 | 6 |"
+        let storage = NSTextStorage(string: source)
+        let package = engine.prepare(source)
+        _ = engine.render(package: package, selection: nil, into: storage)
+        let table = try #require(package.tables.first)
+        let textView = EditorTextView.make(textStorage: storage)
+        let coordinator = RenderCoordinator()
+        coordinator.attach(storage: storage)
+        coordinator.textView = textView
+        coordinator.adoptPackage(package)
+        textView.setSelectedRange(package.index.nsRange(table.rows[1].cells[1].ink))
+
+        #expect(coordinator.extendTableSelection(arrow: .right))
+        #expect(coordinator.extendTableSelection(arrow: .down))
+        #expect(coordinator.currentTableSelection?.bounds == TableSelectionBounds(
+            minRow: 1, maxRow: 2, minColumn: 1, maxColumn: 2
+        ))
+
+        #expect(coordinator.extendTableSelection(arrow: .left))
+        #expect(coordinator.currentTableSelection?.bounds == TableSelectionBounds(
+            minRow: 1, maxRow: 2, minColumn: 1, maxColumn: 1
+        ), "活动端返回锚点列时，选区应收缩而不是保留历史并集")
+    }
+
+    @Test func pastedTSVExpandsTableWithoutExposingMarkdownDelimiters() throws {
+        let source = "| A | B |\n|---|---|\n| 1 | 2 |"
+        let storage = NSTextStorage(string: source)
+        let package = engine.prepare(source)
+        _ = engine.render(package: package, selection: nil, into: storage)
+        let table = try #require(package.tables.first)
+        let textView = EditorTextView.make(textStorage: storage)
+        let coordinator = RenderCoordinator()
+        coordinator.attach(storage: storage)
+        coordinator.textView = textView
+        coordinator.adoptPackage(package)
+        #expect(coordinator.selectTableCells(
+            tableID: table.headerLine,
+            bounds: TableSelectionBounds(minRow: 1, maxRow: 1, minColumn: 1, maxColumn: 1)
+        ))
+        let pasteboard = NSPasteboard(name: .init("MuseTests.TableTSV.\(UUID().uuidString)"))
+        pasteboard.clearContents()
+        pasteboard.setString("p\tq\nr\ts", forType: .string)
+
+        #expect(coordinator.pasteTableSelection(from: pasteboard))
+        #expect(storage.string == "| A | B |  |\n| --- | --- | --- |\n| 1 | p | q |\n|  | r | s |")
+        #expect(coordinator.currentTableSelection?.bounds == TableSelectionBounds(
+            minRow: 1, maxRow: 2, minColumn: 1, maxColumn: 2
+        ))
+    }
+
+    @Test func tableFragmentsExposeOneRowHandleAndHeaderColumnHandles() throws {
+        let source = "| A | B | C |\n|---|---|---|\n| 1 | 2 | 3 |"
+        let (storage, _) = render(source)
+        let textView = EditorTextView.make(textStorage: storage)
+        textView.frame = NSRect(x: 0, y: 0, width: 1000, height: 400)
+        textView.textContainer?.containerSize = NSSize(
+            width: 1000,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        let layoutManager = try #require(textView.textLayoutManager)
+        layoutManager.ensureLayout(for: layoutManager.documentRange)
+
+        var headerHandles: [TableDragHandleGeometry] = []
+        var bodyHandles: [TableDragHandleGeometry] = []
+        layoutManager.enumerateTextLayoutFragments(
+            from: layoutManager.documentRange.location,
+            options: [.ensuresLayout]
+        ) { fragment in
+            guard let fragment = fragment as? MuseLayoutFragment else { return true }
+            let handles = fragment.tableDragHandleGeometries(at: fragment.layoutFragmentFrame.origin)
+            if fragment.tableRowIndex == 0 { headerHandles = handles }
+            if fragment.tableRowIndex == 1 { bodyHandles = handles }
+            return true
+        }
+        #expect(headerHandles.filter { $0.axis == .row }.count == 1)
+        #expect(headerHandles.filter { $0.axis == .column }.count == 3)
+        #expect(bodyHandles.filter { $0.axis == .row }.count == 1)
+        #expect(bodyHandles.filter { $0.axis == .column }.isEmpty)
+    }
+
+    @Test func tableChromeRemovesScrollOffsetWithoutFlippingAgain() {
+        let visibleDocumentRect = CGRect(x: 0, y: 400, width: 1000, height: 600)
+        let headerHandle = CGRect(x: 120, y: 450, width: 240, height: 16)
+
+        let layerRect = TableChromeCoordinateSpace.layerRect(
+            for: headerHandle,
+            overlayFrame: visibleDocumentRect
+        )
+
+        #expect(layerRect == CGRect(x: 120, y: 50, width: 240, height: 16),
+                "翻转 NSView 的 backing layer 已由 AppKit 对齐到左上坐标，不能再次镜像 Y")
+        #expect(layerRect.minY == headerHandle.minY - visibleDocumentRect.minY,
+                "覆盖层内的位置应只扣除可视区滚动偏移")
     }
 
     /// 边界形状：空单元格、少一格的行、只有表头没有数据行。

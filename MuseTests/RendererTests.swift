@@ -610,13 +610,13 @@ import Testing
         #expect(isHidden(10, in: storage))                    // 分隔行折叠
         #expect(storage.string == source)
 
-        // 光标进表格：分隔行回显
+        // 光标进表格：仍保持可视化网格，不回显 Markdown 分隔行
         _ = engine.render(
             package: package,
             selection: NSRange(location: 22, length: 0),
             into: storage
         )
-        #expect(font(at: 10, in: storage) == theme.revealedMarkerFont())
+        #expect(isHidden(10, in: storage))
         #expect(storage.string == source)
     }
 

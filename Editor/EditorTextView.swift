@@ -1,12 +1,343 @@
 import AppKit
 import MuseKit
 
+private struct TableChromeControl: Equatable {
+    enum Kind: Equatable {
+        case handle(axis: TableDragHandleGeometry.Axis, index: Int)
+        case addRow
+        case addColumn
+    }
+
+    let tableID: Int
+    let kind: Kind
+    let frame: CGRect
+    let itemFrame: CGRect
+}
+
+/// 表格 chrome 的几何来自 NSTextView 的文档坐标；覆盖层本身正好铺在
+/// `visibleRect` 上，所以这里只需要移除滚动偏移。
+///
+/// 不要在这里再翻转 Y：`TableChromeOverlayView.isFlipped == true`，AppKit 会让它
+/// 的 backing layer 同样使用翻转后的内容坐标。手工执行 `height - y` 会造成二次
+/// 翻转，表现就是顶部列手柄被镜像到可视区下方。
+nonisolated enum TableChromeCoordinateSpace {
+    static func layerRect(for documentRect: CGRect, overlayFrame: CGRect) -> CGRect {
+        CGRect(
+            x: documentRect.minX - overlayFrame.minX,
+            y: documentRect.minY - overlayFrame.minY,
+            width: documentRect.width,
+            height: documentRect.height
+        )
+    }
+}
+
+/// 表格外沿的交互 chrome。它位于 TextKit fragment 图层之上，但不参与命中；
+/// EditorTextView 用同一份几何处理鼠标。未悬停时完全不绘制，行为与 Obsidian 一致。
+private final class TableChromeOverlayView: NSView {
+    var hoveredControl: TableChromeControl? {
+        didSet { updateControl(animated: oldValue != hoveredControl) }
+    }
+    var activeControl: TableChromeControl? {
+        didSet { updateControl(animated: oldValue != activeControl) }
+    }
+
+    private let chromeLayer = CALayer()
+    private let backgroundLayer = CAShapeLayer()
+    private let iconLayer = CAShapeLayer()
+    private let dragGhostLayer = CAShapeLayer()
+    private let dropIndicatorLayer = CAShapeLayer()
+    private var dragGhostFrame: CGRect?
+    private var dropIndicatorFrame: CGRect?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        configureLayers()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        configureLayers()
+    }
+
+    override var isFlipped: Bool { true }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        chromeLayer.frame = bounds
+        backgroundLayer.frame = bounds
+        iconLayer.frame = bounds
+        dragGhostLayer.frame = bounds
+        dropIndicatorLayer.frame = bounds
+        CATransaction.commit()
+        updateControl(animated: false)
+        updateDragPaths()
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateControl(animated: false)
+        updateDragPaths()
+    }
+
+    func setDragFeedback(ghostFrame: CGRect, dropIndicatorFrame: CGRect) {
+        dragGhostFrame = ghostFrame
+        self.dropIndicatorFrame = dropIndicatorFrame
+        updateDragPaths()
+        setOpacity(1, for: dragGhostLayer, duration: 0)
+        setOpacity(1, for: dropIndicatorLayer, duration: 0)
+    }
+
+    func clearDragFeedback(animated: Bool) {
+        let duration = animated && !reduceMotion ? 0.11 : 0
+        setOpacity(0, for: dragGhostLayer, duration: duration)
+        setOpacity(0, for: dropIndicatorLayer, duration: duration)
+        dragGhostFrame = nil
+        dropIndicatorFrame = nil
+    }
+
+    private var reduceMotion: Bool {
+        NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    }
+
+    private func configureLayers() {
+        wantsLayer = true
+        let root = CALayer()
+        layer = root
+
+        chromeLayer.opacity = 0
+        backgroundLayer.fillColor = NSColor.clear.cgColor
+        backgroundLayer.lineJoin = .round
+        iconLayer.fillColor = NSColor.clear.cgColor
+        iconLayer.strokeColor = NSColor.clear.cgColor
+        iconLayer.lineCap = .round
+        iconLayer.lineJoin = .round
+
+        dragGhostLayer.fillColor = NSColor.controlAccentColor.withAlphaComponent(0.10).cgColor
+        dragGhostLayer.strokeColor = NSColor.controlAccentColor.withAlphaComponent(0.72).cgColor
+        dragGhostLayer.lineWidth = 1.5
+        dragGhostLayer.lineDashPattern = [5, 3]
+        dragGhostLayer.opacity = 0
+        dragGhostLayer.shadowColor = NSColor.black.cgColor
+        dragGhostLayer.shadowOpacity = 0.10
+        dragGhostLayer.shadowRadius = 5
+        dragGhostLayer.shadowOffset = CGSize(width: 0, height: 2)
+
+        dropIndicatorLayer.fillColor = NSColor.controlAccentColor.cgColor
+        dropIndicatorLayer.opacity = 0
+        dropIndicatorLayer.shadowColor = NSColor.controlAccentColor.cgColor
+        dropIndicatorLayer.shadowOpacity = 0.28
+        dropIndicatorLayer.shadowRadius = 3
+        dropIndicatorLayer.shadowOffset = .zero
+
+        chromeLayer.addSublayer(backgroundLayer)
+        chromeLayer.addSublayer(iconLayer)
+        root.addSublayer(dragGhostLayer)
+        root.addSublayer(dropIndicatorLayer)
+        root.addSublayer(chromeLayer)
+    }
+
+    private func updateControl(animated: Bool) {
+        guard let control = activeControl ?? hoveredControl else {
+            setOpacity(0, for: chromeLayer, duration: animated && !reduceMotion ? 0.07 : 0)
+            return
+        }
+
+        let rect = local(control.frame)
+        let active = activeControl != nil
+        let accent = NSColor.controlAccentColor
+        let isAddControl: Bool
+        switch control.kind {
+        case .addRow, .addColumn: isAddControl = true
+        case .handle: isAddControl = false
+        }
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        backgroundLayer.path = CGPath(
+            roundedRect: rect.insetBy(dx: active ? 1 : 0, dy: active ? 1 : 0),
+            cornerWidth: isAddControl ? 0 : 4,
+            cornerHeight: isAddControl ? 0 : 4,
+            transform: nil
+        )
+        if active {
+            backgroundLayer.fillColor = accent.cgColor
+            backgroundLayer.strokeColor = accent.cgColor
+            backgroundLayer.lineWidth = 2
+        } else if isAddControl {
+            backgroundLayer.fillColor = NSColor.clear.cgColor
+            backgroundLayer.strokeColor = NSColor.separatorColor.withAlphaComponent(0.62).cgColor
+            backgroundLayer.lineWidth = Theme.tableBorderWidth
+        } else {
+            // Obsidian 的悬浮手柄不画“按钮盒子”，只显露淡色点阵。
+            backgroundLayer.fillColor = NSColor.clear.cgColor
+            backgroundLayer.strokeColor = NSColor.clear.cgColor
+            backgroundLayer.lineWidth = 0
+        }
+
+        let foreground = active ? NSColor.white : NSColor.tertiaryLabelColor
+        switch control.kind {
+        case let .handle(axis, _):
+            iconLayer.path = gripPath(axis: axis, in: rect)
+            iconLayer.fillColor = foreground.cgColor
+            iconLayer.strokeColor = NSColor.clear.cgColor
+            iconLayer.lineWidth = 0
+        case .addRow, .addColumn:
+            iconLayer.path = plusPath(in: rect)
+            iconLayer.fillColor = NSColor.clear.cgColor
+            iconLayer.strokeColor = foreground.cgColor
+            iconLayer.lineWidth = 1.6
+        }
+        CATransaction.commit()
+
+        let wasHidden = (chromeLayer.presentation()?.opacity ?? chromeLayer.opacity) < 0.01
+        let delay = isAddControl && wasHidden ? 0.08 : 0
+        setOpacity(
+            1,
+            for: chromeLayer,
+            duration: animated && !reduceMotion ? (active ? 0.06 : 0.09) : 0,
+            delay: delay
+        )
+    }
+
+    private func gripPath(axis: TableDragHandleGeometry.Axis, in rect: CGRect) -> CGPath {
+        let path = CGMutablePath()
+        let columns = axis == .column ? 3 : 2
+        let rows = axis == .column ? 2 : 3
+        let gap: CGFloat = 4.5
+        let dot: CGFloat = 2.6
+        let width = CGFloat(columns - 1) * gap
+        let height = CGFloat(rows - 1) * gap
+        for row in 0..<rows {
+            for column in 0..<columns {
+                let center = CGPoint(
+                    x: rect.midX - width / 2 + CGFloat(column) * gap,
+                    y: rect.midY - height / 2 + CGFloat(row) * gap
+                )
+                path.addEllipse(in: CGRect(
+                    x: center.x - dot / 2,
+                    y: center.y - dot / 2,
+                    width: dot,
+                    height: dot
+                ))
+            }
+        }
+        return path
+    }
+
+    private func plusPath(in rect: CGRect) -> CGPath {
+        let path = CGMutablePath()
+        let length: CGFloat = 9
+        path.move(to: CGPoint(x: rect.midX - length / 2, y: rect.midY))
+        path.addLine(to: CGPoint(x: rect.midX + length / 2, y: rect.midY))
+        path.move(to: CGPoint(x: rect.midX, y: rect.midY - length / 2))
+        path.addLine(to: CGPoint(x: rect.midX, y: rect.midY + length / 2))
+        return path
+    }
+
+    private func updateDragPaths() {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        if let dragGhostFrame {
+            let rect = local(dragGhostFrame).insetBy(dx: 1, dy: 1)
+            dragGhostLayer.path = CGPath(
+                roundedRect: rect, cornerWidth: 4, cornerHeight: 4, transform: nil
+            )
+            dragGhostLayer.shadowPath = dragGhostLayer.path
+        }
+        if let dropIndicatorFrame {
+            let rect = local(dropIndicatorFrame)
+            dropIndicatorLayer.path = CGPath(
+                roundedRect: rect, cornerWidth: 1.5, cornerHeight: 1.5, transform: nil
+            )
+        }
+        dragGhostLayer.fillColor = NSColor.controlAccentColor.withAlphaComponent(0.10).cgColor
+        dragGhostLayer.strokeColor = NSColor.controlAccentColor.withAlphaComponent(0.72).cgColor
+        dropIndicatorLayer.fillColor = NSColor.controlAccentColor.cgColor
+        dropIndicatorLayer.shadowColor = NSColor.controlAccentColor.cgColor
+        CATransaction.commit()
+    }
+
+    private func local(_ rect: CGRect) -> CGRect {
+        TableChromeCoordinateSpace.layerRect(for: rect, overlayFrame: frame)
+    }
+
+    private func setOpacity(
+        _ opacity: Float,
+        for layer: CALayer,
+        duration: CFTimeInterval,
+        delay: CFTimeInterval = 0
+    ) {
+        let current = layer.presentation()?.opacity ?? layer.opacity
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer.opacity = opacity
+        CATransaction.commit()
+        guard duration > 0, abs(current - opacity) > 0.001 else { return }
+        let animation = CABasicAnimation(keyPath: "opacity")
+        animation.fromValue = current
+        animation.toValue = opacity
+        animation.duration = duration
+        animation.beginTime = CACurrentMediaTime() + delay
+        animation.fillMode = .backwards
+        animation.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        layer.add(animation, forKey: "muse.opacity")
+    }
+}
+
 /// M1：编辑视图。手工搭建 TextKit 2 栈，把文档的单一 NSTextStorage 挂进编辑面
 /// （v0.2 数据所有权边界：EditorBuffer.textStorage 是唯一可变正文）。
 /// 禁止代码访问 TextKit 1 的 layoutManager（会把视图打进不可逆的兼容模式）。
 final class EditorTextView: NSTextView {
     /// 块级视觉的 fragment 工厂（layoutManager.delegate 是 unowned，需强引用持有）。
     private var fragmentProvider: MuseLayoutFragmentProvider?
+    /// App 层接到文档的 RenderCoordinator。返回 true 表示表格已消费按键。
+    var tableNavigationHandler: ((Bool) -> Bool)?
+    /// 表格内 Return 向下一行同列导航；末行则追加一行。返回 false 时交回普通换行。
+    var tableReturnHandler: (() -> Bool)?
+    /// 表格单元格边界上的方向键导航；单元格内部返回 false 交还 NSTextView。
+    var tableArrowHandler: ((TableArrowDirection) -> Bool)?
+    /// Shift+方向键扩展 Obsidian 风格矩形单元格选区。
+    var tableSelectionArrowHandler: ((TableArrowDirection) -> Bool)?
+    /// 整行/整列拖拽。began 返回 false 时视图放弃接管本次鼠标序列。
+    var tableDragHandler: ((TableDragEvent) -> Bool)?
+    var tableStructureActionHandler: ((Int, TableStructureAction) -> Bool)?
+    var tableSelectionHandler: ((Int, TableSelectionBounds?) -> Bool)?
+    var tableCopyHandler: ((NSPasteboard, Bool) -> Bool)?
+    var tablePasteHandler: ((NSPasteboard) -> Bool)?
+    var tableCurrentSelectionProvider: (() -> (tableID: Int, bounds: TableSelectionBounds)?)?
+    var tableDimensionProvider: ((Int) -> (rows: Int, columns: Int)?)?
+    /// 非表格选区的系统默认属性。表格选区由 MuseLayoutFragment 按真实字形位置画，
+    /// 这里只把 TextKit 那个会受 kern 干扰的背景关掉。
+    private var standardSelectedTextAttributes: [NSAttributedString.Key: Any]?
+    private var usesCustomTableSelection = false
+    private struct ActiveTableDrag {
+        let tableID: Int
+        let axis: TableDragHandleGeometry.Axis
+        let source: Int
+        let sourceFrame: CGRect
+        let grabOffset: CGFloat
+        var destination: Int
+        var hasMoved = false
+    }
+    private var activeTableDrag: ActiveTableDrag?
+    private let tableChromeOverlay = TableChromeOverlayView(frame: .zero)
+    private var tableTrackingArea: NSTrackingArea?
+    private var hoveredTableControl: TableChromeControl?
+    private struct TableMenuContext {
+        let tableID: Int
+        let row: Int
+        let column: Int
+    }
+    private var tableMenuTarget: TableMenuContext?
+    private enum TableMenuCommand: Int {
+        case rowBefore = 1, rowAfter, rowUp, rowDown, rowDuplicate, rowDelete
+        case columnBefore, columnAfter, columnLeft, columnRight, columnDuplicate, columnDelete
+        case alignLeft, alignCenter, alignRight, sortAscending, sortDescending
+        case clearSelection, deleteSelection
+    }
 
     /// Closer inserted by Muse for the active symmetric pair. Its validity is
     /// tied to the view's edit epoch: any other edit invalidates the pair, so
@@ -71,7 +402,25 @@ final class EditorTextView: NSTextView {
         // 左侧 28pt 纯粹是正文的左页边距。列表 marker 的悬挂 lane 落在列表自己的
         // 缩进步长里（见 Theme.listIndentStep），不再借用这块页边距。
         textView.textContainerInset = NSSize(width: 28, height: 16)
+        textView.standardSelectedTextAttributes = textView.selectedTextAttributes
+        textView.addSubview(textView.tableChromeOverlay, positioned: .above, relativeTo: nil)
         return textView
+    }
+
+    func setUsesCustomTableSelection(_ enabled: Bool) {
+        guard enabled != usesCustomTableSelection else { return }
+        usesCustomTableSelection = enabled
+        if enabled {
+            if standardSelectedTextAttributes == nil {
+                standardSelectedTextAttributes = selectedTextAttributes
+            }
+            var attributes = standardSelectedTextAttributes ?? selectedTextAttributes
+            attributes[.backgroundColor] = NSColor.clear
+            selectedTextAttributes = attributes
+        } else if let standardSelectedTextAttributes {
+            selectedTextAttributes = standardSelectedTextAttributes
+        }
+        needsDisplay = true
     }
 
     override func viewDidChangeEffectiveAppearance() {
@@ -98,6 +447,16 @@ final class EditorTextView: NSTextView {
         super.resetCursorRects()
         for rect in taskCheckboxCursorRects() {
             addCursorRect(rect, cursor: .pointingHand)
+        }
+        for geometry in tableDragHandleGeometries() {
+            addCursorRect(geometry.frame, cursor: .openHand)
+        }
+        for control in tableChromeControls() {
+            switch control.kind {
+            case .addRow: addCursorRect(control.frame, cursor: .resizeUpDown)
+            case .addColumn: addCursorRect(control.frame, cursor: .resizeLeftRight)
+            case .handle: break
+            }
         }
     }
 
@@ -135,6 +494,368 @@ final class EditorTextView: NSTextView {
         return rects
     }
 
+    /// 可见表格手柄，已转换为 NSTextView 坐标。绘制与命中都由 fragment 提供
+    /// 原始几何，因此缩放、字体或列宽变化不会让手柄与表格脱节。
+    func tableDragHandleGeometries() -> [TableDragHandleGeometry] {
+        guard let layoutManager = textLayoutManager else { return [] }
+        let inset = textContainerOrigin
+        let visible = visibleRect
+        guard !visible.isEmpty else { return [] }
+        let topInContainer = visible.minY - inset.y
+        guard let first = layoutManager.textLayoutFragment(
+            for: CGPoint(x: 0, y: max(0, topInContainer))
+        ) else { return [] }
+
+        var result: [TableDragHandleGeometry] = []
+        layoutManager.enumerateTextLayoutFragments(
+            from: first.rangeInElement.location,
+            options: [.ensuresLayout]
+        ) { fragment in
+            let frame = fragment.layoutFragmentFrame
+            if frame.minY + inset.y > visible.maxY { return false }
+            guard let fragment = fragment as? MuseLayoutFragment else { return true }
+            for geometry in fragment.tableDragHandleGeometries(at: frame.origin) {
+                result.append(TableDragHandleGeometry(
+                    tableID: geometry.tableID,
+                    axis: geometry.axis,
+                    index: geometry.index,
+                    frame: geometry.frame.offsetBy(dx: inset.x, dy: inset.y),
+                    itemFrame: geometry.itemFrame.offsetBy(dx: inset.x, dy: inset.y),
+                    isLastRow: geometry.isLastRow
+                ))
+            }
+            return true
+        }
+        return result
+    }
+
+    private func tableChromeControls() -> [TableChromeControl] {
+        let handles = tableDragHandleGeometries()
+        var controls = handles.map { geometry in
+            TableChromeControl(
+                tableID: geometry.tableID,
+                kind: .handle(axis: geometry.axis, index: geometry.index),
+                frame: geometry.frame,
+                itemFrame: geometry.itemFrame
+            )
+        }
+        let grouped = Dictionary(grouping: handles, by: \.tableID)
+        let thickness = Theme.tableChromeSize
+        for (tableID, group) in grouped {
+            let columns = group.filter { $0.axis == .column }.sorted { $0.index < $1.index }
+            let rows = group.filter { $0.axis == .row }.sorted { $0.index < $1.index }
+            guard let firstColumn = columns.first,
+                  let lastColumn = columns.last,
+                  let lastRow = rows.first(where: \.isLastRow)
+            else { continue }
+            let tableMinX = firstColumn.itemFrame.minX
+            let tableMaxX = lastColumn.itemFrame.maxX
+            controls.append(TableChromeControl(
+                tableID: tableID,
+                kind: .addRow,
+                frame: CGRect(
+                    x: tableMinX,
+                    y: lastRow.itemFrame.maxY,
+                    width: tableMaxX - tableMinX,
+                    height: thickness
+                ),
+                itemFrame: lastRow.itemFrame
+            ))
+            if let firstRow = rows.first {
+                controls.append(TableChromeControl(
+                    tableID: tableID,
+                    kind: .addColumn,
+                    frame: CGRect(
+                        x: tableMaxX,
+                        y: firstRow.itemFrame.minY,
+                        width: thickness,
+                        height: lastRow.itemFrame.maxY - firstRow.itemFrame.minY
+                    ),
+                    itemFrame: CGRect(
+                        x: tableMinX,
+                        y: firstRow.itemFrame.minY,
+                        width: tableMaxX - tableMinX,
+                        height: lastRow.itemFrame.maxY - firstRow.itemFrame.minY
+                    )
+                ))
+            }
+        }
+        return controls
+    }
+
+    private func syncTableChrome() {
+        tableChromeOverlay.frame = visibleRect
+        tableChromeOverlay.hoveredControl = hoveredTableControl
+        if let drag = activeTableDrag {
+            tableChromeOverlay.activeControl = tableChromeControls().first {
+                guard $0.tableID == drag.tableID else { return false }
+                if case let .handle(axis, index) = $0.kind {
+                    return axis == drag.axis && index == drag.source
+                }
+                return false
+            }
+        } else if hoveredTableControl == nil,
+                  let selection = tableCurrentSelectionProvider?(),
+                  let dimensions = tableDimensionProvider?(selection.tableID) {
+            let bounds = selection.bounds
+            let selectedAxisAndIndex: (TableDragHandleGeometry.Axis, Int)?
+            if bounds.minRow == bounds.maxRow,
+               bounds.minColumn == 0,
+               bounds.maxColumn == dimensions.columns - 1 {
+                selectedAxisAndIndex = (.row, bounds.minRow)
+            } else if bounds.minColumn == bounds.maxColumn,
+                      bounds.minRow == 0,
+                      bounds.maxRow == dimensions.rows - 1 {
+                selectedAxisAndIndex = (.column, bounds.minColumn)
+            } else {
+                selectedAxisAndIndex = nil
+            }
+            tableChromeOverlay.activeControl = selectedAxisAndIndex.flatMap { axis, index in
+                tableChromeControls().first {
+                    guard $0.tableID == selection.tableID else { return false }
+                    if case let .handle(controlAxis, controlIndex) = $0.kind {
+                        return controlAxis == axis && controlIndex == index
+                    }
+                    return false
+                }
+            }
+        } else {
+            tableChromeOverlay.activeControl = nil
+        }
+    }
+
+    private func sourceFrame(
+        for control: TableChromeControl,
+        axis: TableDragHandleGeometry.Axis
+    ) -> CGRect {
+        guard axis == .column else { return control.itemFrame }
+        let rows = tableDragHandleGeometries().filter {
+            $0.tableID == control.tableID && $0.axis == .row
+        }
+        guard let minY = rows.map(\.itemFrame.minY).min(),
+              let maxY = rows.map(\.itemFrame.maxY).max()
+        else { return control.itemFrame }
+        return CGRect(
+            x: control.itemFrame.minX,
+            y: minY,
+            width: control.itemFrame.width,
+            height: maxY - minY
+        )
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let tableTrackingArea { removeTrackingArea(tableTrackingArea) }
+        let area = NSTrackingArea(
+            rect: .zero,
+            options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        tableTrackingArea = area
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        let next = activeTableDrag == nil
+            ? tableChromeControls().last(where: { $0.frame.contains(point) })
+            : hoveredTableControl
+        guard next != hoveredTableControl else {
+            super.mouseMoved(with: event)
+            return
+        }
+        hoveredTableControl = next
+        syncTableChrome()
+        window?.invalidateCursorRects(for: self)
+        super.mouseMoved(with: event)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        guard activeTableDrag == nil else { return }
+        hoveredTableControl = nil
+        syncTableChrome()
+        super.mouseExited(with: event)
+    }
+
+    private func tableCell(at point: CGPoint) -> TableMenuContext? {
+        let handles = tableDragHandleGeometries()
+        let grouped = Dictionary(grouping: handles, by: \.tableID)
+        for (tableID, group) in grouped {
+            guard let row = group.first(where: {
+                $0.axis == .row && point.y >= $0.itemFrame.minY && point.y <= $0.itemFrame.maxY
+            }),
+            let column = group.first(where: {
+                $0.axis == .column && point.x >= $0.itemFrame.minX && point.x <= $0.itemFrame.maxX
+            }),
+            point.x >= row.itemFrame.minX, point.x <= row.itemFrame.maxX
+            else { continue }
+            return TableMenuContext(tableID: tableID, row: row.index, column: column.index)
+        }
+        return nil
+    }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let point = convert(event.locationInWindow, from: nil)
+        let control = tableChromeControls().last(where: { $0.frame.contains(point) })
+        let context: TableMenuContext?
+        var directAxis: TableDragHandleGeometry.Axis?
+        if let control, case let .handle(axis, index) = control.kind {
+            directAxis = axis
+            let row = axis == .row ? index : 0
+            let column = axis == .column ? index : 0
+            context = TableMenuContext(tableID: control.tableID, row: row, column: column)
+            let dimensions = tableDimensionProvider?(control.tableID)
+            let bounds: TableSelectionBounds
+            if axis == .row {
+                bounds = TableSelectionBounds(
+                    minRow: index, maxRow: index,
+                    minColumn: 0,
+                    maxColumn: max(0, (dimensions?.columns ?? 1) - 1)
+                )
+            } else {
+                bounds = TableSelectionBounds(
+                    minRow: 0,
+                    maxRow: max(0, (dimensions?.rows ?? 1) - 1),
+                    minColumn: index, maxColumn: index
+                )
+            }
+            _ = tableSelectionHandler?(control.tableID, bounds)
+        } else {
+            context = tableCell(at: point)
+        }
+        guard let context else { return super.menu(for: event) }
+        tableMenuTarget = context
+
+        let menu = NSMenu(title: "表格")
+        if let selection = tableCurrentSelectionProvider?(), selection.tableID == context.tableID,
+           context.row >= selection.bounds.minRow, context.row <= selection.bounds.maxRow,
+           context.column >= selection.bounds.minColumn, context.column <= selection.bounds.maxColumn {
+            menu.addItem(menuItem("清空选区", symbol: "eraser", command: .clearSelection))
+            menu.addItem(menuItem("删除选区", symbol: "trash", command: .deleteSelection))
+            menu.addItem(.separator())
+        }
+
+        if directAxis == .row {
+            appendRowMenu(to: menu, context: context)
+        } else if directAxis == .column {
+            appendColumnMenu(to: menu, context: context)
+            menu.addItem(.separator())
+            appendSortItems(to: menu)
+        } else {
+            let rowItem = NSMenuItem(title: "行", action: nil, keyEquivalent: "")
+            let rowMenu = NSMenu(title: "行")
+            appendRowMenu(to: rowMenu, context: context)
+            rowItem.submenu = rowMenu
+            menu.addItem(rowItem)
+
+            let columnItem = NSMenuItem(title: "列", action: nil, keyEquivalent: "")
+            let columnMenu = NSMenu(title: "列")
+            appendColumnMenu(to: columnMenu, context: context)
+            columnItem.submenu = columnMenu
+            menu.addItem(columnItem)
+            menu.addItem(.separator())
+            appendSortItems(to: menu)
+        }
+        return menu
+    }
+
+    private func appendRowMenu(to menu: NSMenu, context: TableMenuContext) {
+        menu.addItem(menuItem("在上方插入行", symbol: "rectangle.tophalf.inset.filled", command: .rowBefore))
+        menu.addItem(menuItem("在下方插入行", symbol: "rectangle.bottomhalf.inset.filled", command: .rowAfter))
+        menu.addItem(.separator())
+        if context.row > 0 { menu.addItem(menuItem("向上移动", symbol: "arrow.up", command: .rowUp)) }
+        if context.row < tableLastIndices(tableID: context.tableID).row {
+            menu.addItem(menuItem("向下移动", symbol: "arrow.down", command: .rowDown))
+        }
+        menu.addItem(.separator())
+        menu.addItem(menuItem("复制行", symbol: "plus.square.on.square", command: .rowDuplicate))
+        menu.addItem(menuItem("删除行", symbol: "trash", command: .rowDelete))
+    }
+
+    private func appendColumnMenu(to menu: NSMenu, context: TableMenuContext) {
+        menu.addItem(menuItem("在左侧插入列", symbol: "rectangle.leadinghalf.inset.filled", command: .columnBefore))
+        menu.addItem(menuItem("在右侧插入列", symbol: "rectangle.trailinghalf.inset.filled", command: .columnAfter))
+        menu.addItem(.separator())
+        if context.column > 0 { menu.addItem(menuItem("向左移动", symbol: "arrow.left", command: .columnLeft)) }
+        if context.column < tableLastIndices(tableID: context.tableID).column {
+            menu.addItem(menuItem("向右移动", symbol: "arrow.right", command: .columnRight))
+        }
+        menu.addItem(.separator())
+        menu.addItem(menuItem("左对齐", symbol: "text.alignleft", command: .alignLeft))
+        menu.addItem(menuItem("居中对齐", symbol: "text.aligncenter", command: .alignCenter))
+        menu.addItem(menuItem("右对齐", symbol: "text.alignright", command: .alignRight))
+        menu.addItem(.separator())
+        menu.addItem(menuItem("复制列", symbol: "plus.square.on.square", command: .columnDuplicate))
+        menu.addItem(menuItem("删除列", symbol: "trash", command: .columnDelete))
+    }
+
+    private func appendSortItems(to menu: NSMenu) {
+        menu.addItem(menuItem("升序排列", symbol: "arrow.down", command: .sortAscending))
+        menu.addItem(menuItem("降序排列", symbol: "arrow.up", command: .sortDescending))
+    }
+
+    private func tableLastIndices(tableID: Int) -> (row: Int, column: Int) {
+        if let dimensions = tableDimensionProvider?(tableID) {
+            return (max(0, dimensions.rows - 1), max(0, dimensions.columns - 1))
+        }
+        let handles = tableDragHandleGeometries().filter { $0.tableID == tableID }
+        return (
+            handles.filter { $0.axis == .row }.map(\.index).max() ?? 0,
+            handles.filter { $0.axis == .column }.map(\.index).max() ?? 0
+        )
+    }
+
+    private func menuItem(
+        _ title: String,
+        symbol: String,
+        command: TableMenuCommand
+    ) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: #selector(performTableMenuCommand(_:)), keyEquivalent: "")
+        item.target = self
+        item.tag = command.rawValue
+        item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)
+        return item
+    }
+
+    @objc private func performTableMenuCommand(_ sender: NSMenuItem) {
+        guard let context = tableMenuTarget,
+              let command = TableMenuCommand(rawValue: sender.tag)
+        else { return }
+        let action: TableStructureAction
+        switch command {
+        case .rowBefore: action = .insertRow(index: context.row, copying: nil)
+        case .rowAfter: action = .insertRow(index: context.row + 1, copying: nil)
+        case .rowUp: action = .moveRow(from: context.row, to: context.row - 1)
+        case .rowDown: action = .moveRow(from: context.row, to: context.row + 1)
+        case .rowDuplicate: action = .insertRow(index: context.row, copying: context.row)
+        case .rowDelete: action = .removeRow(index: context.row)
+        case .columnBefore:
+            action = .insertColumn(index: context.column, copying: nil, alignmentFrom: context.column)
+        case .columnAfter:
+            action = .insertColumn(index: context.column + 1, copying: nil, alignmentFrom: context.column)
+        case .columnLeft: action = .moveColumn(from: context.column, to: context.column - 1)
+        case .columnRight: action = .moveColumn(from: context.column, to: context.column + 1)
+        case .columnDuplicate:
+            action = .insertColumn(index: context.column, copying: context.column, alignmentFrom: context.column)
+        case .columnDelete: action = .removeColumn(index: context.column)
+        case .alignLeft: action = .align(columns: context.column...context.column, alignment: .leading)
+        case .alignCenter: action = .align(columns: context.column...context.column, alignment: .center)
+        case .alignRight: action = .align(columns: context.column...context.column, alignment: .trailing)
+        case .sortAscending: action = .sort(column: context.column, direction: .ascending)
+        case .sortDescending: action = .sort(column: context.column, direction: .descending)
+        case .clearSelection:
+            guard let selection = tableCurrentSelectionProvider?(), selection.tableID == context.tableID else { return }
+            action = .clear(selection.bounds)
+        case .deleteSelection:
+            guard let selection = tableCurrentSelectionProvider?(), selection.tableID == context.tableID else { return }
+            action = .delete(selection.bounds)
+        }
+        _ = tableStructureActionHandler?(context.tableID, action)
+        hoveredTableControl = nil
+        syncTableChrome()
+    }
+
     /// 复选框位置只随「重排」和「滚动」变化，两者都不改文本视图自身的 bounds，
     /// 所以 AppKit 不会自动重算光标区——这里显式失效。
     private func invalidateCheckboxCursorRects() {
@@ -144,6 +865,7 @@ final class EditorTextView: NSTextView {
     override func layout() {
         super.layout()
         invalidateCheckboxCursorRects()
+        syncTableChrome()
     }
 
     /// 观察 clip view 的 bounds 变化来接住滚动。
@@ -157,6 +879,7 @@ final class EditorTextView: NSTextView {
             self, name: NSView.boundsDidChangeNotification, object: nil
         )
         guard let clipView = enclosingScrollView?.contentView else { return }
+        window?.acceptsMouseMovedEvents = true
         clipView.postsBoundsChangedNotifications = true
         NotificationCenter.default.addObserver(
             self,
@@ -167,7 +890,9 @@ final class EditorTextView: NSTextView {
     }
 
     @objc private func clipViewBoundsDidChange() {
+        hoveredTableControl = nil
         invalidateCheckboxCursorRects()
+        syncTableChrome()
     }
 
     // MARK: - M4 editing behavior
@@ -367,6 +1092,13 @@ final class EditorTextView: NSTextView {
     }
 
     override func deleteBackward(_ sender: Any?) {
+        if let selection = tableCurrentSelectionProvider?(),
+           tableStructureActionHandler?(
+               selection.tableID, .clear(selection.bounds)
+           ) == true {
+            pendingPair = nil
+            return
+        }
         let selection = selectedRange()
         guard hasMarkedText() == false,
               selectedRanges.count == 1,
@@ -440,10 +1172,104 @@ final class EditorTextView: NSTextView {
     /// `doCommandBy` hook means every host of this view gets list continuation,
     /// and the production entry point is the one the tests drive.
     override func insertNewline(_ sender: Any?) {
+        pendingPair = nil
+        if tableReturnHandler?() == true { return }
         guard performSmartNewline() else {
             super.insertNewline(sender)
             return
         }
+    }
+
+    /// Obsidian 风格表格导航：Tab 前进，Shift-Tab 后退。非表格位置仍交还 AppKit。
+    override func insertTab(_ sender: Any?) {
+        pendingPair = nil
+        guard tableNavigationHandler?(false) == true else {
+            super.insertTab(sender)
+            return
+        }
+    }
+
+    override func insertBacktab(_ sender: Any?) {
+        pendingPair = nil
+        guard tableNavigationHandler?(true) == true else {
+            super.insertBacktab(sender)
+            return
+        }
+    }
+
+    override func moveUp(_ sender: Any?) {
+        pendingPair = nil
+        guard tableArrowHandler?(.up) == true else {
+            super.moveUp(sender)
+            return
+        }
+    }
+
+    override func moveDown(_ sender: Any?) {
+        pendingPair = nil
+        guard tableArrowHandler?(.down) == true else {
+            super.moveDown(sender)
+            return
+        }
+    }
+
+    override func moveLeft(_ sender: Any?) {
+        pendingPair = nil
+        guard tableArrowHandler?(.left) == true else {
+            super.moveLeft(sender)
+            return
+        }
+    }
+
+    override func moveRight(_ sender: Any?) {
+        pendingPair = nil
+        guard tableArrowHandler?(.right) == true else {
+            super.moveRight(sender)
+            return
+        }
+    }
+
+    override func moveUpAndModifySelection(_ sender: Any?) {
+        pendingPair = nil
+        guard tableSelectionArrowHandler?(.up) == true else {
+            super.moveUpAndModifySelection(sender)
+            return
+        }
+    }
+
+    override func moveDownAndModifySelection(_ sender: Any?) {
+        pendingPair = nil
+        guard tableSelectionArrowHandler?(.down) == true else {
+            super.moveDownAndModifySelection(sender)
+            return
+        }
+    }
+
+    override func moveLeftAndModifySelection(_ sender: Any?) {
+        pendingPair = nil
+        guard tableSelectionArrowHandler?(.left) == true else {
+            super.moveLeftAndModifySelection(sender)
+            return
+        }
+    }
+
+    override func moveRightAndModifySelection(_ sender: Any?) {
+        pendingPair = nil
+        guard tableSelectionArrowHandler?(.right) == true else {
+            super.moveRightAndModifySelection(sender)
+            return
+        }
+    }
+
+    override func deleteForward(_ sender: Any?) {
+        if let selection = tableCurrentSelectionProvider?(),
+           tableStructureActionHandler?(
+               selection.tableID, .clear(selection.bounds)
+           ) == true {
+            pendingPair = nil
+            return
+        }
+        super.deleteForward(sender)
     }
 
     /// ⌃Return. `NSTextView`'s implementation inserts `NSLineSeparatorCharacter`
@@ -479,6 +1305,84 @@ final class EditorTextView: NSTextView {
         if Self.isCheckboxToggleCandidate(event),
            hasMarkedText() == false,
            isEditable,
+           let control = tableChromeControls().last(where: { $0.frame.contains(point) })
+        {
+            switch control.kind {
+            case .addRow:
+                let rows = tableDragHandleGeometries().filter {
+                    $0.tableID == control.tableID && $0.axis == .row
+                }
+                let index = (rows.map(\.index).max() ?? -1) + 1
+                window?.makeFirstResponder(self)
+                if tableStructureActionHandler?(control.tableID, .insertRow(index: index, copying: nil)) == true {
+                    hoveredTableControl = nil
+                    syncTableChrome()
+                    return
+                }
+            case .addColumn:
+                let columns = tableDragHandleGeometries().filter {
+                    $0.tableID == control.tableID && $0.axis == .column
+                }
+                let index = (columns.map(\.index).max() ?? -1) + 1
+                window?.makeFirstResponder(self)
+                if tableStructureActionHandler?(control.tableID, .insertColumn(
+                    index: index, copying: nil, alignmentFrom: nil
+                )) == true {
+                    hoveredTableControl = nil
+                    syncTableChrome()
+                    return
+                }
+            case let .handle(axis, index):
+                let sourceFrame = sourceFrame(for: control, axis: axis)
+                let drag = ActiveTableDrag(
+                    tableID: control.tableID,
+                    axis: axis,
+                    source: index,
+                    sourceFrame: sourceFrame,
+                    grabOffset: axis == .row
+                        ? point.y - sourceFrame.minY
+                        : point.x - sourceFrame.minX,
+                    destination: index
+                )
+                let accepted = tableDragHandler?(TableDragEvent(
+                    phase: .began,
+                    tableID: drag.tableID,
+                    axis: drag.axis,
+                    source: drag.source,
+                    destination: drag.destination
+                )) == true
+                if accepted {
+                    window?.makeFirstResponder(self)
+                    activeTableDrag = drag
+                    tableChromeOverlay.activeControl = control
+                    NSCursor.closedHand.set()
+                    return
+                }
+            }
+        }
+        if event.type == .leftMouseDown,
+           event.clickCount == 1,
+           event.modifierFlags.contains(.shift),
+           let cell = tableCell(at: point),
+           let selection = tableCurrentSelectionProvider?(),
+           selection.tableID == cell.tableID {
+            let bounds = TableSelectionBounds(
+                minRow: min(selection.bounds.minRow, cell.row),
+                maxRow: max(selection.bounds.maxRow, cell.row),
+                minColumn: min(selection.bounds.minColumn, cell.column),
+                maxColumn: max(selection.bounds.maxColumn, cell.column)
+            )
+            window?.makeFirstResponder(self)
+            if tableSelectionHandler?(cell.tableID, bounds) == true { return }
+        }
+        if event.type == .leftMouseDown,
+           !event.modifierFlags.contains(.shift),
+           let selection = tableCurrentSelectionProvider?() {
+            _ = tableSelectionHandler?(selection.tableID, nil)
+        }
+        if Self.isCheckboxToggleCandidate(event),
+           hasMarkedText() == false,
+           isEditable,
            taskCheckboxToggleRange(at: point) != nil
         {
             // Focus first, then edit. The old order evaluated the toggle inside the
@@ -497,6 +1401,140 @@ final class EditorTextView: NSTextView {
             return
         }
         super.mouseDown(with: event)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard var drag = activeTableDrag else {
+            super.mouseDragged(with: event)
+            return
+        }
+        let point = convert(event.locationInWindow, from: nil)
+        let candidates = tableDragHandleGeometries().filter {
+            $0.tableID == drag.tableID && $0.axis == drag.axis
+        }
+        guard let nearest = candidates.min(by: { lhs, rhs in
+            let leftDistance: CGFloat
+            let rightDistance: CGFloat
+            switch drag.axis {
+            case .row:
+                leftDistance = abs(lhs.itemFrame.midY - point.y)
+                rightDistance = abs(rhs.itemFrame.midY - point.y)
+            case .column:
+                leftDistance = abs(lhs.itemFrame.midX - point.x)
+                rightDistance = abs(rhs.itemFrame.midX - point.x)
+            }
+            return leftDistance < rightDistance
+        }) else { return }
+
+        let ghostFrame: CGRect
+        let indicatorFrame: CGRect
+        switch drag.axis {
+        case .row:
+            ghostFrame = CGRect(
+                x: drag.sourceFrame.minX,
+                y: point.y - drag.grabOffset,
+                width: drag.sourceFrame.width,
+                height: drag.sourceFrame.height
+            )
+            let y = nearest.index < drag.source ? nearest.itemFrame.minY : nearest.itemFrame.maxY
+            indicatorFrame = CGRect(
+                x: drag.sourceFrame.minX,
+                y: y - 1.5,
+                width: drag.sourceFrame.width,
+                height: 3
+            )
+        case .column:
+            ghostFrame = CGRect(
+                x: point.x - drag.grabOffset,
+                y: drag.sourceFrame.minY,
+                width: drag.sourceFrame.width,
+                height: drag.sourceFrame.height
+            )
+            let x = nearest.index < drag.source ? nearest.itemFrame.minX : nearest.itemFrame.maxX
+            indicatorFrame = CGRect(
+                x: x - 1.5,
+                y: drag.sourceFrame.minY,
+                width: 3,
+                height: drag.sourceFrame.height
+            )
+        }
+        drag.hasMoved = true
+        tableChromeOverlay.setDragFeedback(
+            ghostFrame: ghostFrame,
+            dropIndicatorFrame: indicatorFrame
+        )
+
+        guard nearest.index != drag.destination else {
+            activeTableDrag = drag
+            return
+        }
+        drag.destination = nearest.index
+        activeTableDrag = drag
+        _ = tableDragHandler?(TableDragEvent(
+            phase: .changed,
+            tableID: drag.tableID,
+            axis: drag.axis,
+            source: drag.source,
+            destination: drag.destination
+        ))
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard let drag = activeTableDrag else {
+            super.mouseUp(with: event)
+            return
+        }
+        activeTableDrag = nil
+        tableChromeOverlay.clearDragFeedback(animated: drag.hasMoved)
+        _ = tableDragHandler?(TableDragEvent(
+            phase: .ended,
+            tableID: drag.tableID,
+            axis: drag.axis,
+            source: drag.source,
+            destination: drag.destination
+        ))
+        NSCursor.arrow.set()
+        syncTableChrome()
+        window?.invalidateCursorRects(for: self)
+    }
+
+    override func cancelOperation(_ sender: Any?) {
+        guard let drag = activeTableDrag else {
+            if let selection = tableCurrentSelectionProvider?(),
+               tableSelectionHandler?(selection.tableID, nil) == true {
+                hoveredTableControl = nil
+                syncTableChrome()
+                return
+            }
+            super.cancelOperation(sender)
+            return
+        }
+        activeTableDrag = nil
+        tableChromeOverlay.clearDragFeedback(animated: drag.hasMoved)
+        _ = tableDragHandler?(TableDragEvent(
+            phase: .cancelled,
+            tableID: drag.tableID,
+            axis: drag.axis,
+            source: drag.source,
+            destination: drag.destination
+        ))
+        NSCursor.arrow.set()
+        syncTableChrome()
+    }
+
+    override func copy(_ sender: Any?) {
+        if tableCopyHandler?(NSPasteboard.general, false) == true { return }
+        super.copy(sender)
+    }
+
+    override func cut(_ sender: Any?) {
+        if tableCopyHandler?(NSPasteboard.general, true) == true { return }
+        super.cut(sender)
+    }
+
+    override func paste(_ sender: Any?) {
+        if tablePasteHandler?(NSPasteboard.general) == true { return }
+        super.paste(sender)
     }
 
     /// Standard text replacement for the checkbox hit by `point`. The source

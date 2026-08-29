@@ -1,5 +1,66 @@
 import AppKit
 
+public nonisolated enum TableDragPhase: Sendable {
+    case began
+    case changed
+    case ended
+    case cancelled
+}
+
+public nonisolated struct TableDragEvent: Sendable {
+    public let phase: TableDragPhase
+    public let tableID: Int
+    public let axis: TableDragHandleGeometry.Axis
+    public let source: Int
+    public let destination: Int
+
+    public init(
+        phase: TableDragPhase,
+        tableID: Int,
+        axis: TableDragHandleGeometry.Axis,
+        source: Int,
+        destination: Int
+    ) {
+        self.phase = phase
+        self.tableID = tableID
+        self.axis = axis
+        self.source = source
+        self.destination = destination
+    }
+}
+
+public nonisolated struct TableSelectionBounds: Sendable, Equatable {
+    public let minRow: Int
+    public let maxRow: Int
+    public let minColumn: Int
+    public let maxColumn: Int
+
+    public init(minRow: Int, maxRow: Int, minColumn: Int, maxColumn: Int) {
+        self.minRow = min(minRow, maxRow)
+        self.maxRow = max(minRow, maxRow)
+        self.minColumn = min(minColumn, maxColumn)
+        self.maxColumn = max(minColumn, maxColumn)
+    }
+}
+
+public nonisolated enum TableSortDirection: Sendable {
+    case ascending
+    case descending
+}
+
+public nonisolated enum TableStructureAction: Sendable {
+    case insertRow(index: Int, copying: Int?)
+    case removeRow(index: Int)
+    case moveRow(from: Int, to: Int)
+    case insertColumn(index: Int, copying: Int?, alignmentFrom: Int?)
+    case removeColumn(index: Int)
+    case moveColumn(from: Int, to: Int)
+    case align(columns: ClosedRange<Int>, alignment: TableStructure.ColumnAlignment)
+    case sort(column: Int, direction: TableSortDirection)
+    case clear(TableSelectionBounds)
+    case delete(TableSelectionBounds)
+}
+
 /// 块级视觉标记：渲染引擎把它作为自定义属性写入整行/整块范围，
 /// 布局层的 MuseLayoutFragment 据此决定绘制内容（引用竖线、通宽背景、分隔线横线）。
 /// 与样式状态严格一致（随属性应用写、随脏带重置清）。
@@ -29,6 +90,20 @@ extension NSAttributedString.Key {
     public nonisolated static let museTableColumns = NSAttributedString.Key("museTableColumns")
     /// 表格内的行序号（0 为表头）：绘制层用它做隔行底色。
     public nonisolated static let museTableRow = NSAttributedString.Key("museTableRow")
+    /// 表格的稳定身份（表头源码行号）。同一张表的所有可见行共享该值，编辑视图
+    /// 据此把各 fragment 组合成一项整行/整列拖拽操作。
+    public nonisolated static let museTableID = NSAttributedString.Key("museTableID")
+    /// 表格内的临时选区。TextKit 2 会把隐藏结构字符上的大额 kern 再算进系统选区
+    /// 几何，导致蓝色选框漂到表格右侧；布局 fragment 用这个属性在真实字形位置
+    /// 绘制选区。它只是一项可丢弃的呈现属性，不进入 Markdown 与撤销栈。
+    public nonisolated static let museTableSelection = NSAttributedString.Key("museTableSelection")
+    /// 拖拽期间的纯呈现属性；不进入 Markdown，也不进入撤销栈。
+    public nonisolated static let museTableDragAxis = NSAttributedString.Key("museTableDragAxis")
+    public nonisolated static let museTableDragSource = NSAttributedString.Key("museTableDragSource")
+    public nonisolated static let museTableDragDestination = NSAttributedString.Key("museTableDragDestination")
+    /// Obsidian 风格的持久单元格选区，值为 `[minRow,maxRow,minColumn,maxColumn]`。
+    /// 只影响绘制和剪贴板命令，不写回 Markdown。
+    public nonisolated static let museTableCellSelection = NSAttributedString.Key("museTableCellSelection")
     /// 图片解析后的本地文件路径（绘制层按它取缓存里的图，不再解析相对路径）。
     public nonisolated static let museImagePath = NSAttributedString.Key("museImagePath")
     /// 图片的呈现尺寸（[NSNumber] 宽、高），与撑出的行高一致。
@@ -280,12 +355,14 @@ public nonisolated struct Theme: @unchecked Sendable {
     public nonisolated static let tableCellPaddingX: CGFloat = 13
     public nonisolated static let tableCellPaddingY: CGFloat = 6
     public nonisolated static let tableBorderWidth: CGFloat = 1
+    /// 表格外沿控制区与 Obsidian 的 `--size-4-4` 一致：足够命中，但默认不占视觉重量。
+    public nonisolated static let tableChromeSize: CGFloat = 16
 
     /// 分隔行（`|---|---|`）的段落样式。
     ///
     /// 关键是**不设** `minimumLineHeight`：这一行整行是表格的 marker，隐藏态字体
     /// 只有 0.1pt，行高必须跟着塌到零；给它一个固定行高就会在表头与首行数据之间
-    /// 留一条空行。光标进入表格回显源码时，同一份样式又让它按 15pt 自然展开。
+    /// 留一条空行。显式切换到源码模式时，整篇会改用源码段落样式。
     public func tableDelimiterParagraph() -> NSMutableParagraphStyle {
         let p = NSMutableParagraphStyle()
         p.lineHeightMultiple = 1

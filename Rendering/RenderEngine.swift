@@ -252,7 +252,7 @@ public struct RenderEngine {
 
     // MARK: - marker 显隐（纯计算，供协调器 diff 后写属性）
 
-    /// marker 的两种显示状态（Typora 模式）：
+    /// marker 的两种显示状态（Live Preview）：
     /// - `.revealed`：回显源码标记（光标所在行/块内）；
     /// - `.hidden`：折叠隐藏（近零宽 + 透明）。列表图形符号的对齐由段落缩进
     ///   负责，具体图形由 MuseLayoutFragment 在同一 marker 带绘制。
@@ -356,14 +356,17 @@ public struct RenderEngine {
                     // 「点一下切换」失去落点。源码模式下逐字显示，由上面
                     // `mode == .rendered` 的 guard 统一处理，与光标无关。
                     onCaret = false
+                } else if case .table = token.kind {
+                    // 表格在渲染模式下始终是可直接编辑的网格（对标 Obsidian
+                    // 1.5 Table Editor）。光标进入单元格时不能把 `|`、填充空格和
+                    // 分隔行摊回源码；完整 Markdown 只在显式源码模式里显示。
+                    onCaret = false
                 } else if selection.length > 0 {
                     // 跨行拖选时，所有与选区相交的块标记都应回显，而不是只看
                     // selection.location 所在行。命中与拖选仍完全交给 NSTextView。
                     onCaret = touches(blockRange(token, package: package), selection: selection)
                 } else if case .codeFence = token.kind {
                     onCaret = tokenLineRange(token, package: package).contains(caretLine) // 光标在围栏块任意行
-                } else if case .table = token.kind {
-                    onCaret = tokenLineRange(token, package: package).contains(caretLine) // 光标在表格任意行
                 } else {
                     onCaret = token.line == caretLine
                 }
@@ -896,6 +899,7 @@ public struct RenderEngine {
                 .paragraphStyle: theme.tableParagraph(isLast: row.line == lastLine),
                 .museTableColumns: boundaries,
                 .museTableRow: NSNumber(value: rowIndex),
+                .museTableID: NSNumber(value: structure.headerLine),
             ]
             if rowIndex == 0 {
                 attributes[.font] = theme.boldFont()

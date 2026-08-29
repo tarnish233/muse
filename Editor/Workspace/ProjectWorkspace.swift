@@ -6,8 +6,13 @@ import Observation
 final class ProjectWorkspace {
     static let shared = ProjectWorkspace()
 
-    private struct StoredProject: Codable {
+    struct StoredProject: Codable, Equatable {
         let bookmark: Data
+    }
+
+    private struct TreeLoadResult {
+        let nodes: [WorkspaceNode]
+        let errors: [Error]
     }
 
     private enum Constants {
@@ -19,13 +24,24 @@ final class ProjectWorkspace {
     private(set) var trees: [URL: [WorkspaceNode]] = [:]
     var presentedError: String?
 
-    private let defaults: UserDefaults
     private let fileManager: FileManager
+    private let bookmarking: WorkspaceBookmarking
+    private let projectStore: WorkspaceProjectStore
+    private let fileSystem: WorkspaceFileSystem
+    private var bookmarksByURL: [URL: Data] = [:]
     private var securityScopedURLs: Set<URL> = []
 
-    init(defaults: UserDefaults = .standard, fileManager: FileManager = .default) {
-        self.defaults = defaults
+    init(
+        defaults: UserDefaults = .standard,
+        fileManager: FileManager = .default,
+        bookmarking: WorkspaceBookmarking? = nil,
+        projectStore: WorkspaceProjectStore? = nil,
+        fileSystem: WorkspaceFileSystem? = nil
+    ) {
         self.fileManager = fileManager
+        self.bookmarking = bookmarking ?? .live()
+        self.projectStore = projectStore ?? .userDefaults(defaults, key: Constants.projectsKey)
+        self.fileSystem = fileSystem ?? .live(fileManager: fileManager)
         restoreProjects()
     }
 
@@ -36,13 +52,24 @@ final class ProjectWorkspace {
             throw CocoaError(.fileNoSuchFile)
         }
 
-        if !projects.contains(where: { $0.rootURL == url }) {
-            projects.append(WorkspaceProject(rootURL: url))
-            projects.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        guard !projects.contains(where: { $0.rootURL == url }) else {
+            beginAccessing(url)
+            refreshProject(at: url)
+            return
         }
+
+        let bookmark = try bookmarking.create(url)
+        var nextProjects = projects
+        nextProjects.append(WorkspaceProject(rootURL: url))
+        nextProjects.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        var nextBookmarks = bookmarksByURL
+        nextBookmarks[url] = bookmark
+        try saveSnapshot(projects: nextProjects, bookmarks: nextBookmarks)
+
+        projects = nextProjects
+        bookmarksByURL = nextBookmarks
         beginAccessing(url)
         refreshProject(at: url)
-        persistProjects()
     }
 
     func createProject(at rootURL: URL) throws {
@@ -51,12 +78,24 @@ final class ProjectWorkspace {
     }
 
     func removeProject(_ project: WorkspaceProject) {
-        projects.removeAll { $0.id == project.id }
-        trees[project.rootURL] = nil
-        if securityScopedURLs.remove(project.rootURL) != nil {
-            project.rootURL.stopAccessingSecurityScopedResource()
+        let url = project.rootURL.standardizedFileURL
+        let nextProjects = projects.filter { $0.id != project.id }
+        var nextBookmarks = bookmarksByURL
+        nextBookmarks[url] = nil
+
+        do {
+            try saveSnapshot(projects: nextProjects, bookmarks: nextBookmarks)
+        } catch {
+            presentedError = error.localizedDescription
+            return
         }
-        persistProjects()
+
+        projects = nextProjects
+        bookmarksByURL = nextBookmarks
+        trees[url] = nil
+        if securityScopedURLs.remove(url) != nil {
+            url.stopAccessingSecurityScopedResource()
+        }
     }
 
     func children(of project: WorkspaceProject) -> [WorkspaceNode] {
@@ -70,10 +109,13 @@ final class ProjectWorkspace {
     }
 
     func refreshProject(at rootURL: URL) {
+        let root = rootURL.standardizedFileURL
         do {
-            trees[rootURL] = try loadChildren(of: rootURL)
+            let result = try loadChildren(of: root)
+            trees[root] = result.nodes
+            report(result.errors)
         } catch {
-            trees[rootURL] = []
+            // A transient root failure must not destroy the last successful tree.
             presentedError = error.localizedDescription
         }
     }
@@ -127,25 +169,37 @@ final class ProjectWorkspace {
         refreshProject(at: project.rootURL)
     }
 
-    private func loadChildren(of directoryURL: URL) throws -> [WorkspaceNode] {
-        let keys: Set<URLResourceKey> = [.isDirectoryKey, .isRegularFileKey, .isPackageKey]
-        let urls = try fileManager.contentsOfDirectory(
-            at: directoryURL,
-            includingPropertiesForKeys: Array(keys),
-            options: [.skipsHiddenFiles, .skipsPackageDescendants]
-        )
+    private func loadChildren(of directoryURL: URL) throws -> TreeLoadResult {
+        let urls = try fileSystem.contentsOfDirectory(directoryURL)
+        var nodes: [WorkspaceNode] = []
+        var errors: [Error] = []
+        nodes.reserveCapacity(urls.count)
 
-        return try urls.compactMap { url in
-            let values = try url.resourceValues(forKeys: keys)
-            if values.isDirectory == true, values.isPackage != true {
-                return WorkspaceNode(url: url, kind: .folder, children: try loadChildren(of: url))
+        for url in urls {
+            let metadata: WorkspaceEntryMetadata
+            do {
+                metadata = try fileSystem.metadata(url)
+            } catch {
+                errors.append(error)
+                continue
             }
-            if values.isRegularFile == true {
-                return WorkspaceNode(url: url, kind: .file, children: nil)
+
+            if metadata.isDirectory, !metadata.isPackage {
+                do {
+                    let childResult = try loadChildren(of: url)
+                    nodes.append(WorkspaceNode(url: url, kind: .folder, children: childResult.nodes))
+                    errors.append(contentsOf: childResult.errors)
+                } catch {
+                    // Keep the folder visible even when its contents are unavailable.
+                    nodes.append(WorkspaceNode(url: url, kind: .folder, children: nil))
+                    errors.append(error)
+                }
+            } else if metadata.isRegularFile {
+                nodes.append(WorkspaceNode(url: url, kind: .file, children: nil))
             }
-            return nil
         }
-        .sorted(by: Self.nodeSort)
+
+        return TreeLoadResult(nodes: nodes.sorted(by: Self.nodeSort), errors: errors)
     }
 
     private static func nodeSort(_ lhs: WorkspaceNode, _ rhs: WorkspaceNode) -> Bool {
@@ -165,45 +219,86 @@ final class ProjectWorkspace {
     }
 
     private func restoreProjects() {
-        guard let data = defaults.data(forKey: Constants.projectsKey),
+        guard let data = projectStore.load(),
               let stored = try? JSONDecoder().decode([StoredProject].self, from: data)
         else { return }
 
+        var restoredProjects: [WorkspaceProject] = []
+        var restoredBookmarks: [URL: Data] = [:]
+        var restorationErrors: [Error] = []
+        var needsRewrite = false
+
         for item in stored {
-            var isStale = false
-            guard let url = try? URL(
-                resolvingBookmarkData: item.bookmark,
-                options: [.withSecurityScope, .withoutUI],
-                relativeTo: nil,
-                bookmarkDataIsStale: &isStale
-            ) else { continue }
-            try? addRestoredProject(at: url, shouldPersist: isStale)
+            let resolution: WorkspaceBookmarkResolution
+            do {
+                resolution = try bookmarking.resolve(item.bookmark)
+            } catch {
+                restorationErrors.append(error)
+                continue
+            }
+
+            let url = resolution.url.standardizedFileURL
+            var isDirectory: ObjCBool = false
+            guard fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue,
+                  restoredBookmarks[url] == nil
+            else { continue }
+
+            var bookmark = item.bookmark
+            if resolution.isStale {
+                do {
+                    bookmark = try bookmarking.create(url)
+                    needsRewrite = true
+                } catch {
+                    // The resolved URL remains usable; preserve its last valid bookmark.
+                    restorationErrors.append(error)
+                }
+            }
+
+            restoredProjects.append(WorkspaceProject(rootURL: url))
+            restoredBookmarks[url] = bookmark
         }
+
+        restoredProjects.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        projects = restoredProjects
+        bookmarksByURL = restoredBookmarks
+
+        for project in projects {
+            beginAccessing(project.rootURL)
+            refreshProject(at: project.rootURL)
+        }
+
+        if needsRewrite {
+            do {
+                try persistProjects()
+            } catch {
+                restorationErrors.append(error)
+            }
+        }
+        report(restorationErrors)
     }
 
-    private func addRestoredProject(at url: URL, shouldPersist: Bool) throws {
-        let standardizedURL = url.standardizedFileURL
-        var isDirectory: ObjCBool = false
-        guard fileManager.fileExists(atPath: standardizedURL.path, isDirectory: &isDirectory), isDirectory.boolValue else {
-            return
-        }
-        projects.append(WorkspaceProject(rootURL: standardizedURL))
-        beginAccessing(standardizedURL)
-        refreshProject(at: standardizedURL)
-        if shouldPersist { persistProjects() }
+    private func persistProjects() throws {
+        try saveSnapshot(projects: projects, bookmarks: bookmarksByURL)
     }
 
-    private func persistProjects() {
-        let stored = projects.compactMap { project -> StoredProject? in
-            guard let bookmark = try? project.rootURL.bookmarkData(
-                options: .withSecurityScope,
-                includingResourceValuesForKeys: nil,
-                relativeTo: nil
-            ) else { return nil }
+    private func saveSnapshot(projects: [WorkspaceProject], bookmarks: [URL: Data]) throws {
+        let stored = try projects.map { project -> StoredProject in
+            guard let bookmark = bookmarks[project.rootURL.standardizedFileURL] else {
+                throw WorkspaceOperationError.incompleteProjectBookmarks
+            }
             return StoredProject(bookmark: bookmark)
         }
-        guard let data = try? JSONEncoder().encode(stored) else { return }
-        defaults.set(data, forKey: Constants.projectsKey)
+        let data = try JSONEncoder().encode(stored)
+        try projectStore.save(data)
+    }
+
+    private func report(_ errors: [Error]) {
+        guard let first = errors.first else { return }
+        if errors.count == 1 {
+            presentedError = first.localizedDescription
+        } else {
+            presentedError = "\(first.localizedDescription)\n另有 \(errors.count - 1) 个项目条目无法读取。"
+        }
     }
 
     private func beginAccessing(_ url: URL) {

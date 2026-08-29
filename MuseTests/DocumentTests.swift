@@ -224,4 +224,51 @@ import Testing
 
         #expect(document.isDocumentEdited)
     }
+
+    @Test func locationTracksSavedURLAndRendererBase() async {
+        let document = MuseDocument()
+        let file = FileManager.default.temporaryDirectory
+            .appending(path: "MuseLocationTests")
+            .appending(path: "note.md")
+
+        document.fileURL = file
+        await Task.yield()
+
+        #expect(document.location.fileURL == file.standardizedFileURL)
+        #expect(document.location.directoryURL == file.deletingLastPathComponent().standardizedFileURL)
+        #expect(document.renderer.imageBaseURL == document.location.directoryURL)
+        #expect(document.location.displayName == "note.md")
+    }
+
+    @Test func rapidFileURLChangesApplyOnlyLatestLocation() async {
+        let document = MuseDocument()
+        let root = FileManager.default.temporaryDirectory.appending(path: "MuseRapidLocationTests")
+        let first = root.appending(path: "first.md")
+        let second = root.appending(path: "second.md")
+        let third = root.appending(path: "third.md")
+
+        document.fileURL = first
+        document.fileURL = second
+        document.fileURL = third
+        await Task.yield()
+        await Task.yield()
+
+        #expect(document.location.fileURL == third.standardizedFileURL)
+        #expect(document.renderer.imageBaseURL == third.deletingLastPathComponent().standardizedFileURL)
+        #expect(document.location.displayName == "third.md")
+    }
+
+    @Test func locationUsesStandardizedFileURL() async {
+        let document = MuseDocument()
+        let root = FileManager.default.temporaryDirectory
+        let unstandardized = root
+            .appending(path: "folder")
+            .appending(path: "..")
+            .appending(path: "standard.md")
+
+        document.fileURL = unstandardized
+        await Task.yield()
+
+        #expect(document.location.fileURL == unstandardized.standardizedFileURL)
+    }
 }

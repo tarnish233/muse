@@ -37,6 +37,34 @@ import Testing
         #expect(engine.prepare("[x](y").tokens.allSatisfy { $0.kind != .link })
     }
 
+    @Test func linkDestinationExcludesOptionalTitles() throws {
+        let cases = [
+            ("[x](target.md \"caption\")", "target.md"),
+            ("[x](target.md 'caption')", "target.md"),
+            ("[x](target.md (caption))", "target.md"),
+            ("[x](foo(bar).md \"caption\")", "foo(bar).md"),
+            ("[x](<path with spaces> \"caption\")", "path with spaces"),
+        ]
+
+        for (source, expected) in cases {
+            let token = try #require(engine.prepare(source).tokens.first { $0.kind == .link })
+            let range = try #require(token.linkDestination)
+            let destination = String(decoding: Array(source.utf8)[range], as: UTF8.self)
+            #expect(destination == expected)
+            #expect(token.closingMarkerRange?.upperBound == source.utf8.count)
+        }
+    }
+
+    @Test func imageDestinationExcludesOptionalTitle() throws {
+        let source = "![x](photo.png \"caption\")"
+        let token = try #require(engine.prepare(source).tokens.first { $0.kind == .image })
+        let range = try #require(token.linkDestination)
+        let destination = String(decoding: Array(source.utf8)[range], as: UTF8.self)
+
+        #expect(destination == "photo.png")
+        #expect(token.closingMarkerRange?.upperBound == source.utf8.count)
+    }
+
     // MARK: - 图片（M5）
 
     @Test func imageBounds() throws {

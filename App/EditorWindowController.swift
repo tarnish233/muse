@@ -9,8 +9,8 @@ final class EditorWindowController: NSWindowController {
     private let navigation: EditorDocumentNavigation
     private let hostingController: NSHostingController<EditorShellView>
     private var activeDocument: MuseDocument
-    private var pendingOpenURL: URL?
-    private var isCheckingCurrentDocument = false
+    private let openStateMachine = DocumentOpenStateMachine()
+    private var closeCheckGeneration: Int?
 
     var isSourceMode: Bool { chromeState.isSourceMode }
 
@@ -84,19 +84,11 @@ final class EditorWindowController: NSWindowController {
     }
 
     private func requestOpenDocument(at url: URL) {
-        let normalizedURL = url.standardizedFileURL
-        guard activeDocument.fileURL?.standardizedFileURL != normalizedURL else {
-            window?.makeKeyAndOrderFront(nil)
-            return
-        }
-
-        pendingOpenURL = normalizedURL
-        guard !isCheckingCurrentDocument else { return }
-        isCheckingCurrentDocument = true
-        activeDocument.canClose(
-            withDelegate: self,
-            shouldClose: #selector(document(_:shouldClose:contextInfo:)),
-            contextInfo: nil
+        perform(
+            openStateMachine.requestOpen(
+                at: url,
+                currentURL: activeDocument.fileURL
+            )
         )
     }
 
@@ -105,25 +97,115 @@ final class EditorWindowController: NSWindowController {
         shouldClose: Bool,
         contextInfo: UnsafeMutableRawPointer?
     ) {
-        isCheckingCurrentDocument = false
-        guard shouldClose, let url = pendingOpenURL else {
-            pendingOpenURL = nil
-            return
-        }
-        pendingOpenURL = nil
+        guard let generation = closeCheckGeneration else { return }
+        closeCheckGeneration = nil
+        perform(
+            openStateMachine.closeCheckCompleted(
+                shouldClose,
+                generation: generation,
+                currentURL: activeDocument.fileURL
+            )
+        )
+    }
 
-        NSDocumentController.shared.openDocument(withContentsOf: url, display: false) { [weak self] document, _, error in
-            guard let self else { return }
-            if let error {
-                self.presentOpenError(error)
+    private func perform(_ step: DocumentOpenStateMachine.Step) {
+        switch step {
+        case .none:
+            return
+        case .activateCurrent:
+            window?.makeKeyAndOrderFront(nil)
+        case .checkCanClose(let request):
+            if activeDocument.windowControllers.count > 1 {
+                perform(
+                    openStateMachine.closeCheckCompleted(
+                        true,
+                        generation: request.generation,
+                        currentURL: activeDocument.fileURL
+                    )
+                )
                 return
             }
-            guard let targetDocument = document as? MuseDocument else {
-                self.presentOpenError(WorkspaceOperationError.unsupportedDocument)
-                return
-            }
-            self.adopt(targetDocument)
+            closeCheckGeneration = request.generation
+            activeDocument.canClose(
+                withDelegate: self,
+                shouldClose: #selector(document(_:shouldClose:contextInfo:)),
+                contextInfo: nil
+            )
+        case .open(let request):
+            open(request)
         }
+    }
+
+    private func open(_ request: DocumentOpenStateMachine.Request) {
+        NSDocumentController.shared.openDocument(
+            withContentsOf: request.url,
+            display: false
+        ) { [weak self] document, wasAlreadyOpen, error in
+            guard let self else {
+                Self.discardIfOrphan(document, wasAlreadyOpen: wasAlreadyOpen)
+                return
+            }
+
+            let result = DocumentOpenStateMachine.OpenResult(
+                succeeded: error == nil && document != nil,
+                wasAlreadyOpen: wasAlreadyOpen,
+                isSupportedDocument: document is MuseDocument,
+                hasDocument: document != nil
+            )
+            let decision = self.openStateMachine.openCompleted(
+                generation: request.generation,
+                result: result,
+                currentURL: self.activeDocument.fileURL
+            )
+            self.handle(
+                decision.disposition,
+                document: document,
+                wasAlreadyOpen: wasAlreadyOpen,
+                error: error
+            )
+            self.perform(decision.next)
+        }
+    }
+
+    private func handle(
+        _ disposition: DocumentOpenStateMachine.CompletionDisposition,
+        document: NSDocument?,
+        wasAlreadyOpen: Bool,
+        error: Error?
+    ) {
+        switch disposition {
+        case .ignore:
+            return
+        case .discardNewDocument:
+            Self.discardIfOrphan(document, wasAlreadyOpen: wasAlreadyOpen)
+        case .presentError:
+            presentOpenError(error ?? WorkspaceOperationError.unsupportedDocument)
+        case .discardNewDocumentAndPresentError:
+            Self.discardIfOrphan(document, wasAlreadyOpen: wasAlreadyOpen)
+            presentOpenError(error ?? WorkspaceOperationError.unsupportedDocument)
+        case .activateExistingDocument:
+            guard let targetDocument = document as? MuseDocument else {
+                presentOpenError(WorkspaceOperationError.unsupportedDocument)
+                return
+            }
+            if targetDocument.windowControllers.isEmpty {
+                targetDocument.makeWindowControllers()
+            }
+            targetDocument.showWindows()
+            targetDocument.windowControllers.first?.window?.makeKeyAndOrderFront(nil)
+        case .adoptNewDocument:
+            guard let targetDocument = document as? MuseDocument else {
+                Self.discardIfOrphan(document, wasAlreadyOpen: wasAlreadyOpen)
+                presentOpenError(WorkspaceOperationError.unsupportedDocument)
+                return
+            }
+            adopt(targetDocument)
+        }
+    }
+
+    private static func discardIfOrphan(_ document: NSDocument?, wasAlreadyOpen: Bool) {
+        guard !wasAlreadyOpen, let document, document.windowControllers.isEmpty else { return }
+        document.close()
     }
 
     private func adopt(_ document: MuseDocument) {
@@ -131,6 +213,7 @@ final class EditorWindowController: NSWindowController {
         previousDocument.removeWindowController(self)
         document.addWindowController(self)
         activeDocument = document
+        document.synchronizeLocation()
 
         hostingController.rootView = EditorShellView(
             document: document,
@@ -140,7 +223,10 @@ final class EditorWindowController: NSWindowController {
         window?.title = document.displayName
         window?.makeKeyAndOrderFront(nil)
 
-        if previousDocument !== document {
+        if DocumentOpenStateMachine.shouldClosePreviousDocument(
+            isSameDocument: previousDocument === document,
+            remainingWindowControllerCount: previousDocument.windowControllers.count
+        ) {
             previousDocument.close()
         }
     }

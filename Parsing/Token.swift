@@ -65,6 +65,19 @@ public nonisolated struct Token: Equatable, Sendable {
         self.line = line
     }
 
+    /// 实际源码覆盖范围。跨 soft line break 的行内 token 不能只依赖起始行。
+    public var sourceRange: Range<Int> {
+        var lower = markerRange.lowerBound
+        var upper = markerRange.upperBound
+        let ranges = [contentRange, closingMarkerRange, linkDestination].compactMap { $0 }
+            + extraMarkerRanges
+        for range in ranges {
+            lower = min(lower, range.lowerBound)
+            upper = max(upper, range.upperBound)
+        }
+        return lower..<upper
+    }
+
     /// 全部标记区间（块级通常只有一个；表格另带每行的 `|`）。
     public var allMarkerRanges: [Range<Int>] {
         var result = [markerRange]

@@ -9,10 +9,12 @@ public final class MuseDocument: NSDocument {
 
     public let buffer = EditorBuffer()
     public let renderer = RenderCoordinator()
+    public let location = DocumentLocationState()
     private var isReadingContent = false
 
     public override init() {
         super.init()
+        synchronizeLocation()
         buffer.textStorage.delegate = renderer
         renderer.attach(storage: buffer.textStorage)
         renderer.onTextEdited = { [weak self] in
@@ -36,11 +38,22 @@ public final class MuseDocument: NSDocument {
     /// 不要冒断言崩溃的风险。
     nonisolated public override var fileURL: URL? {
         didSet {
-            let directory = fileURL?.deletingLastPathComponent()
+            let capturedURL = fileURL?.standardizedFileURL
             Task { @MainActor [weak self] in
-                self?.renderer.imageBaseURL = directory
+                guard let self,
+                      self.fileURL?.standardizedFileURL == capturedURL
+                else { return }
+                self.synchronizeLocation()
             }
         }
+    }
+
+    /// Synchronizes every location-dependent consumer from NSDocument.fileURL.
+    /// AppKit window adoption calls this before installing a new SwiftUI root.
+    public func synchronizeLocation() {
+        let standardizedURL = fileURL?.standardizedFileURL
+        location.update(fileURL: standardizedURL, displayName: displayName)
+        renderer.imageBaseURL = standardizedURL?.deletingLastPathComponent()
     }
 
     // 以下重写均为 nonisolated（NSDocument 的声明在主线程外也可见），

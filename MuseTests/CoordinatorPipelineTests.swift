@@ -370,6 +370,101 @@ import Testing
         #expect(coordinator.lastAppliedDirtyLines?.upperBound ?? 0 >= 3)
     }
 
+    @Test func imageBaseURLChangeDuringPendingDirtyDoesNotRenderStalePackage() async {
+        let source = "prefix\n**bold at end**\n![x](missing.png)"
+        let storage = NSTextStorage(string: source)
+        let coordinator = RenderCoordinator()
+        coordinator.attach(storage: storage)
+        coordinator.onTextEdited = {}
+
+        storage.replaceCharacters(in: NSRange(location: 0, length: storage.length), with: source)
+        #expect(await waitForApplied(coordinator, atLeast: 1))
+        let preparationCount = coordinator.parsePreparationCount
+
+        storage.replaceCharacters(in: NSRange(location: 0, length: storage.length), with: "x")
+        coordinator.imageBaseURL = FileManager.default.temporaryDirectory
+
+        #expect(storage.string == "x")
+        #expect(await waitForApplied(coordinator, atLeast: 2))
+        #expect(coordinator.parsePreparationCount == preparationCount + 1)
+        #expect(coordinator.lastAppliedDirtyLines == 0...0)
+    }
+
+    @Test func deletingLongFenceOpenerInvalidatesThroughFormerTail() {
+        let old = "```\nline 1\nline 2\nline 3\nline 4\n```\nafter"
+        let storage = NSTextStorage(string: old)
+        let oldPackage = engine.prepare(old)
+        _ = engine.render(package: oldPackage, selection: nil, into: storage)
+        let lastCodeLine = (old as NSString).range(of: "line 4")
+        #expect(storage.attribute(.backgroundColor, at: lastCodeLine.location, effectiveRange: nil) != nil)
+
+        storage.replaceCharacters(in: NSRange(location: 0, length: 3), with: "")
+        let source = storage.string
+        let newPackage = engine.prepare(source)
+        let dirtyLines = engine.applyDirty(
+            package: newPackage,
+            previousPackage: oldPackage,
+            utf16Range: NSRange(location: 0, length: 0),
+            into: storage
+        )
+
+        let newLastCodeLine = (source as NSString).range(of: "line 4")
+        #expect(dirtyLines.upperBound >= 5)
+        #expect(storage.attribute(.backgroundColor, at: newLastCodeLine.location, effectiveRange: nil) == nil)
+    }
+
+    @Test func deletingLongLazyQuoteOpenerInvalidatesEntireFormerQuote() {
+        let old = "> first\nlazy 1\nlazy 2\nlazy 3\nlazy 4\nlazy 5\nlazy 6"
+        let storage = NSTextStorage(string: old)
+        let oldPackage = engine.prepare(old)
+        _ = engine.render(package: oldPackage, selection: nil, into: storage)
+        let lastLazy = (old as NSString).range(of: "lazy 6")
+        #expect(storage.attribute(.backgroundColor, at: lastLazy.location, effectiveRange: nil) != nil)
+
+        storage.replaceCharacters(in: NSRange(location: 0, length: 2), with: "")
+        let source = storage.string
+        let newPackage = engine.prepare(source)
+        let dirtyLines = engine.applyDirty(
+            package: newPackage,
+            previousPackage: oldPackage,
+            utf16Range: NSRange(location: 0, length: 0),
+            into: storage
+        )
+
+        let newLastLazy = (source as NSString).range(of: "lazy 6")
+        #expect(dirtyLines.upperBound == 6)
+        #expect(storage.attribute(.backgroundColor, at: newLastLazy.location, effectiveRange: nil) == nil)
+    }
+
+    @Test func multilineStrongReappliesWhenSecondLineChanges() throws {
+        let old = "**first\nsecond**\nplain"
+        let storage = NSTextStorage(string: old)
+        let oldPackage = engine.prepare(old)
+        _ = engine.render(package: oldPackage, selection: nil, into: storage)
+
+        let second = (old as NSString).range(of: "second")
+        storage.replaceCharacters(in: second, with: "changed")
+        let source = storage.string
+        let newPackage = engine.prepare(source)
+        _ = engine.applyDirty(
+            package: newPackage,
+            previousPackage: oldPackage,
+            utf16Range: NSRange(location: second.location, length: "changed".utf16.count),
+            into: storage
+        )
+
+        let changed = (source as NSString).range(of: "changed")
+        #expect(isBold(storage.attribute(.font, at: changed.location, effectiveRange: nil) as? NSFont))
+
+        let strong = try #require(newPackage.tokens.first { $0.kind == .strong })
+        let closing = try #require(strong.closingMarkerRange)
+        let closingNS = newPackage.index.nsRange(closing)
+        let entry = engine.computedVisibility(package: newPackage, selection: nil)
+            .first { $0.markerNS == closingNS }
+        #expect(entry?.line == 1)
+        #expect(entry?.markerRelOffset == "changed".utf8.count)
+    }
+
     /// P1-4：插入字符不破坏 marker diff 的稳定身份。
     /// 在 200KB 文档开头插入一个字符后，只有受影响行的 marker 被重写。
     @Test func markerDiffStableUnderFrontInsertion() async {

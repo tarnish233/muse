@@ -1,67 +1,124 @@
 import AppKit
 
 /// 图片目的地 → URL / NSImage 的解析（M5 行内图片与点击预览共用）。
-///
-/// 行内呈现的铁律约束：只写属性、不改字符——隐藏态把 `![标签](目的地)`
-/// 的首个字符换成 NSTextAttachment 呈现，字符本身仍在 storage 里。
 public nonisolated enum ImageResolver {
-    /// 本地图加载缓存：全量渲染对每个图片 token 都要走这里，避免重复磁盘 IO。
-    ///
-    /// `NSCache` 本身是线程安全的（Apple 文档：可跨线程增删查，无需自己加锁），
-    /// 但它没有声明 `Sendable`，直接作为 `static let` 在 Swift 6 下不合法。
-    /// 包一层 `@unchecked Sendable` 持有者，把「已知线程安全」这件事讲清楚，
-    /// 而不是用 `nonisolated(unsafe)` 把检查整个关掉。
-    private nonisolated final class ImageCache: @unchecked Sendable {
-        let storage = NSCache<NSString, NSImage>()
+    private struct FileFingerprint: Equatable {
+        let size: UInt64
+        let modificationDate: Date?
+        let fileNumber: UInt64?
     }
 
-    private nonisolated static let cache = ImageCache()
+    private final class CacheEntry {
+        let image: NSImage
+        let fingerprint: FileFingerprint
+
+        init(image: NSImage, fingerprint: FileFingerprint) {
+            self.image = image
+            self.fingerprint = fingerprint
+        }
+    }
+
+    /// NSCache 的单次操作线程安全；这里额外用锁覆盖 stat → load → stat → set
+    /// 复合事务，避免较旧的并发加载最后覆盖较新的文件版本。
+    private final class ImageCache: @unchecked Sendable {
+        private let storage = NSCache<NSString, CacheEntry>()
+        private let lock = NSLock()
+
+        init() {
+            storage.countLimit = 128
+            storage.totalCostLimit = 256 * 1024 * 1024
+        }
+
+        func image(at url: URL) -> NSImage? {
+            let standardizedURL = url.standardizedFileURL
+            let key = standardizedURL.path as NSString
+            lock.lock()
+            defer { lock.unlock() }
+
+            for _ in 0..<2 {
+                guard let before = Self.fingerprint(at: standardizedURL) else {
+                    storage.removeObject(forKey: key)
+                    return nil
+                }
+                if let cached = storage.object(forKey: key), cached.fingerprint == before {
+                    return cached.image
+                }
+                guard let image = NSImage(contentsOf: standardizedURL),
+                      let after = Self.fingerprint(at: standardizedURL)
+                else {
+                    storage.removeObject(forKey: key)
+                    return nil
+                }
+                guard before == after else { continue }
+
+                storage.setObject(
+                    CacheEntry(image: image, fingerprint: after),
+                    forKey: key,
+                    cost: Self.cost(of: image)
+                )
+                return image
+            }
+
+            storage.removeObject(forKey: key)
+            return nil
+        }
+
+        private static func fingerprint(at url: URL) -> FileFingerprint? {
+            guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+                  let size = attributes[.size] as? NSNumber
+            else { return nil }
+            return FileFingerprint(
+                size: size.uint64Value,
+                modificationDate: attributes[.modificationDate] as? Date,
+                fileNumber: (attributes[.systemFileNumber] as? NSNumber)?.uint64Value
+            )
+        }
+
+        private static func cost(of image: NSImage) -> Int {
+            let pixels = image.representations.map { representation in
+                max(1, representation.pixelsWide) * max(1, representation.pixelsHigh)
+            }.max() ?? max(1, Int(image.size.width * image.size.height))
+            let (cost, overflow) = pixels.multipliedReportingOverflow(by: 4)
+            return overflow ? Int.max : cost
+        }
+    }
+
+    private static let cache = ImageCache()
 
     /// 解析目的地：http(s) 远程图、`~` 展开、相对文档目录、绝对路径。
-    /// 文档无目录（未保存的示例文档）时，相对路径回退到主包资源——
-    /// 示例文档自带的图片随 App 打包，开箱即可演示预览。
+    /// 本地路径只做一次 percent decode；无效 escape 保守按字面路径处理。
     public static func resolvedURL(destination: String, baseURL: URL?) -> URL? {
         let trimmed = destination.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         if let url = URL(string: trimmed), let scheme = url.scheme?.lowercased() {
-            if scheme == "http" || scheme == "https" { return url }
-            if scheme == "file" { return url }
+            if scheme == "http" || scheme == "https" || scheme == "file" { return url }
         }
-        if trimmed.hasPrefix("~") {
-            return URL(fileURLWithPath: NSString(string: trimmed).expandingTildeInPath)
+
+        let localPath = trimmed.removingPercentEncoding ?? trimmed
+        if localPath.hasPrefix("~") {
+            return URL(fileURLWithPath: NSString(string: localPath).expandingTildeInPath)
         }
         if let base = baseURL {
-            // 基准必须是「目录」语义：无尾斜杠的 file URL 会被当作文件，
-            // 相对解析时丢掉最后一级目录（实测 /Users/muse/docs + assets/x.png
-            // → /Users/muse/assets/x.png）。
             let directory = base.standardizedFileURL.appendingPathComponent("", isDirectory: true)
-            return URL(fileURLWithPath: trimmed, relativeTo: directory)
+            return URL(fileURLWithPath: localPath, relativeTo: directory)
         }
         if let bundled = Bundle.main.resourceURL {
-            return URL(fileURLWithPath: trimmed, relativeTo: bundled)
+            return URL(fileURLWithPath: localPath, relativeTo: bundled)
         }
-        return URL(fileURLWithPath: trimmed)
+        return URL(fileURLWithPath: localPath)
     }
 
-    /// 同步加载本地图（带缓存）。远程图不走这里——属性层不接受异步写入，
-    /// 远程目的地保持源码展示（点击预览走异步加载）。
+    /// 同步加载本地图（带版本校验缓存）。远程图不走这里。
     public static func loadLocalImage(url: URL) -> NSImage? {
         guard url.isFileURL else { return nil }
-        let key = url.standardizedFileURL.path as NSString
-        if let cached = cache.storage.object(forKey: key) { return cached }
-        guard FileManager.default.fileExists(atPath: key as String),
-              let image = NSImage(contentsOf: url) else { return nil }
-        cache.storage.setObject(image, forKey: key)
-        return image
+        return cache.image(at: url)
     }
 
-    /// 按目的地与基准目录加载本地图。
     public static func loadLocalImage(destination: String, baseURL: URL?) -> NSImage? {
         guard let url = resolvedURL(destination: destination, baseURL: baseURL) else { return nil }
         return loadLocalImage(url: url)
     }
 
-    /// 行内附件的显示尺寸：自然尺寸为上限，超出按 Theme.inlineImageMaxSize 缩小。
     public static func displaySize(for imageSize: NSSize) -> NSSize {
         let maxSize = Theme.inlineImageMaxSize
         guard imageSize.width > 0, imageSize.height > 0 else { return maxSize }
@@ -69,7 +126,6 @@ public nonisolated enum ImageResolver {
         return NSSize(width: imageSize.width * scale, height: imageSize.height * scale)
     }
 
-    /// 隐藏态的行内附件：目的地可解析且为本地图时返回，否则 nil（保持源码呈现）。
     public static func inlineAttachment(destination: String, baseURL: URL?) -> NSTextAttachment? {
         guard let image = loadLocalImage(destination: destination, baseURL: baseURL) else { return nil }
         let attachment = NSTextAttachment()

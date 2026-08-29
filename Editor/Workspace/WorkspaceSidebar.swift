@@ -3,7 +3,7 @@ import SwiftUI
 
 struct WorkspaceSidebar: View {
     @Bindable var workspace: ProjectWorkspace
-    @Binding var selectedFileURL: URL?
+    let selectedFileURL: URL?
     let openFile: (URL) -> Void
 
     @State private var creationRequest: WorkspaceCreationRequest?
@@ -142,7 +142,6 @@ struct WorkspaceSidebar: View {
             return
         }
 
-        selectedFileURL = url.standardizedFileURL
         openFile(url)
     }
 

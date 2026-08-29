@@ -174,13 +174,27 @@ nonisolated struct TableLayout {
         guard !ink.isEmpty else { return "" }
         var pieces: [String] = []
         var cursor = ink.lowerBound
-        for range in hidden where range.upperBound > ink.lowerBound && range.lowerBound < ink.upperBound {
+        var low = 0
+        var high = hidden.count
+        while low < high {
+            let mid = (low + high) / 2
+            if hidden[mid].upperBound <= ink.lowerBound {
+                low = mid + 1
+            } else {
+                high = mid
+            }
+        }
+        var hiddenIndex = low
+        while hiddenIndex < hidden.count {
+            let range = hidden[hiddenIndex]
+            guard range.lowerBound < ink.upperBound else { break }
             let start = max(cursor, ink.lowerBound)
             let stop = min(range.lowerBound, ink.upperBound)
             if stop > start, let piece = substring(start..<stop, source: source, index: index) {
                 pieces.append(piece)
             }
             cursor = max(cursor, range.upperBound)
+            hiddenIndex += 1
         }
         if cursor < ink.upperBound,
            let piece = substring(cursor..<ink.upperBound, source: source, index: index) {

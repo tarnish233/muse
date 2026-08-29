@@ -6,13 +6,13 @@ import SwiftUI
 struct EditorShellView: View {
     let document: MuseDocument
     @Bindable var chromeState: EditorChromeState
+    @Bindable private var location: DocumentLocationState
     let navigation: EditorDocumentNavigation
     @ObservedObject private var renderer: RenderCoordinator
     @State private var workspace = ProjectWorkspace.shared
     @State private var projectSidebarWidth = EditorChromeMetrics.projectSidebarDefaultWidth
     @State private var outlineSidebarWidth = EditorChromeMetrics.outlineSidebarDefaultWidth
     @State private var selectedHeadingID: Int?
-    @State private var selectedFileURL: URL?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     init(
@@ -22,9 +22,9 @@ struct EditorShellView: View {
     ) {
         self.document = document
         self.chromeState = chromeState
+        self.location = document.location
         self.navigation = navigation
         renderer = document.renderer
-        _selectedFileURL = State(initialValue: document.fileURL?.standardizedFileURL)
     }
 
     var body: some View {
@@ -57,8 +57,7 @@ struct EditorShellView: View {
         .animation(sidebarAnimation, value: chromeState.isProjectSidebarPresented)
         .animation(sidebarAnimation, value: chromeState.isOutlinePresented)
         .onChange(of: selectedHeadingID, revealSelectedHeading)
-        .onChange(of: document.fileURL) { _, newURL in
-            selectedFileURL = newURL?.standardizedFileURL
+        .onChange(of: location.fileURL) { _, _ in
             workspace.refreshAll()
         }
     }
@@ -70,7 +69,7 @@ struct EditorShellView: View {
 
             WorkspaceSidebar(
                 workspace: workspace,
-                selectedFileURL: $selectedFileURL,
+                selectedFileURL: location.fileURL,
                 openFile: navigation.open
             )
         }
@@ -84,7 +83,7 @@ struct EditorShellView: View {
     private var editorColumn: some View {
         VStack(spacing: 0) {
             CodexDocumentTitlebar(
-                document: document,
+                title: location.displayName,
                 windowControls: chromeState.windowControls,
                 reservesWindowControls: !chromeState.isProjectSidebarPresented
             )
@@ -93,6 +92,7 @@ struct EditorShellView: View {
             EditorDetailView(
                 document: document,
                 isSourceMode: chromeState.isSourceMode,
+                previewBaseURL: location.directoryURL,
                 renderer: renderer
             )
                 .frame(minWidth: 400, maxWidth: .infinity, maxHeight: .infinity)

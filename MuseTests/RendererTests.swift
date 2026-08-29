@@ -36,6 +36,10 @@ import Testing
             directory = URL(fileURLWithPath: NSTemporaryDirectory())
                 .appendingPathComponent("muse-image-\(UUID().uuidString)")
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try write(pixelSize: pixelSize, color: .red)
+        }
+
+        func write(pixelSize: NSSize, color: NSColor) throws {
             let rep = try #require(NSBitmapImageRep(
                 bitmapDataPlanes: nil,
                 pixelsWide: Int(pixelSize.width), pixelsHigh: Int(pixelSize.height),
@@ -45,10 +49,10 @@ import Testing
             rep.size = pixelSize
             NSGraphicsContext.saveGraphicsState()
             NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
-            NSColor.red.setFill()
+            color.setFill()
             NSRect(origin: .zero, size: pixelSize).fill()
             NSGraphicsContext.restoreGraphicsState()
-            try #require(rep.representation(using: .png, properties: [:])).write(to: url)
+            try #require(rep.representation(using: .png, properties: [:])).write(to: url, options: .atomic)
         }
 
         deinit {
@@ -513,6 +517,37 @@ import Testing
                 == URL(string: "https://x.com/a.png")
         )
         #expect(ImageResolver.resolvedURL(destination: "  ", baseURL: base) == nil)
+    }
+
+    @Test func localImagePathsDecodePercentEscapesExactlyOnce() {
+        let base = URL(fileURLWithPath: "/Users/muse/docs")
+        func path(_ destination: String) -> String? {
+            ImageResolver.resolvedURL(destination: destination, baseURL: base)?
+                .absoluteURL.standardizedFileURL.path
+        }
+
+        #expect(path("assets/my%20photo.png") == "/Users/muse/docs/assets/my photo.png")
+        #expect(path("assets/a+b.png") == "/Users/muse/docs/assets/a+b.png")
+        #expect(path("assets/literal%2520.png") == "/Users/muse/docs/assets/literal%20.png")
+        #expect(path("assets/bad%2G.png") == "/Users/muse/docs/assets/bad%2G.png")
+        #expect(
+            ImageResolver.resolvedURL(destination: "https://x.com/a%20b.png", baseURL: base)
+                == URL(string: "https://x.com/a%20b.png")
+        )
+    }
+
+    @Test func localImageCacheReloadsReplacementAndForgetsDeletion() throws {
+        let asset = try ImageFixture()
+        let first = try #require(ImageResolver.loadLocalImage(url: asset.url))
+        #expect(first.size == asset.pixelSize)
+
+        let replacementSize = NSSize(width: 64, height: 32)
+        try asset.write(pixelSize: replacementSize, color: .blue)
+        let replaced = try #require(ImageResolver.loadLocalImage(url: asset.url))
+        #expect(replaced.size == replacementSize)
+
+        try FileManager.default.removeItem(at: asset.url)
+        #expect(ImageResolver.loadLocalImage(url: asset.url) == nil)
     }
 
     // MARK: - 代码围栏内边距（M5 排版）

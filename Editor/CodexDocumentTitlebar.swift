@@ -2,7 +2,7 @@ import MuseKit
 import SwiftUI
 
 struct CodexDocumentTitlebar: View {
-    let document: MuseDocument
+    let title: String
     let windowControls: WindowControlsGeometry
     let reservesWindowControls: Bool
 
@@ -12,7 +12,7 @@ struct CodexDocumentTitlebar: View {
                 .font(.system(size: 14, weight: .medium))
                 .foregroundStyle(.secondary)
 
-            Text(document.displayName)
+            Text(title)
                 .font(.system(size: 13, weight: .semibold))
                 .lineLimit(1)
                 .truncationMode(.middle)

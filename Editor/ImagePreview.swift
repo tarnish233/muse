@@ -83,7 +83,7 @@ final class ImagePreviewController: NSViewController {
         if url.isFileURL {
             // 本地文件读取放进后台线程，避免大图阻塞主线程。
             return await Task.detached(priority: .userInitiated) { () -> LoadResult in
-                guard let image = NSImage(contentsOf: url) else {
+                guard let image = ImageResolver.loadLocalImage(url: url) else {
                     return .failure("无法加载图片")
                 }
                 return .image(image, image.size)

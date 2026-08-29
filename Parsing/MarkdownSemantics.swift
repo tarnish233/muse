@@ -458,7 +458,11 @@ public nonisolated struct MarkdownSemantics: Sendable {
         mutating func visitLink(_ link: Link) {
             if link.destination != nil,
                let range = byteRange(link),
-               let syntax = MarkdownSemantics.parseBounds(range, bytes: bytes) {
+               let syntax = MarkdownSemantics.parseBounds(
+                range,
+                bytes: bytes,
+                expectedDestination: link.destination
+               ) {
                 links.append(.init(openBracket: syntax.openBracket, label: syntax.label,
                                    tail: syntax.tail, destination: syntax.destination,
                                    line: sourceLine(of: link) ?? 0))
@@ -473,7 +477,10 @@ public nonisolated struct MarkdownSemantics: Sendable {
                   range.lowerBound + 1 < range.upperBound,
                   bytes[range.lowerBound] == 0x21, bytes[range.lowerBound + 1] == 0x5B,
                   let syntax = MarkdownSemantics.parseBounds(
-                    (range.lowerBound + 1)..<range.upperBound, bytes: bytes)
+                    (range.lowerBound + 1)..<range.upperBound,
+                    bytes: bytes,
+                    expectedDestination: image.source
+                  )
             else {
                 descendInto(image)
                 return
@@ -864,9 +871,12 @@ public nonisolated struct MarkdownSemantics: Sendable {
         return offset
     }
 
-    /// 在语法区间内做字节级边界解析：`[`、平衡嵌套括号的标签、`](`、
-    /// 平衡括号的目的地、收尾 `)`。reference 式链接 / 未闭合语法返回 nil。
-    private static func parseBounds(_ syntax: Range<Int>, bytes: [UInt8]) -> LinkSyntax? {
+    /// AST 已确认节点合法；这里只恢复标签、destination 与整段 tail 的源码字节边界。
+    private static func parseBounds(
+        _ syntax: Range<Int>,
+        bytes: [UInt8],
+        expectedDestination: String?
+    ) -> LinkSyntax? {
         let end = min(syntax.upperBound, bytes.count)
         guard syntax.lowerBound < end, bytes[syntax.lowerBound] == 0x5B else { return nil }
 
@@ -875,38 +885,69 @@ public nonisolated struct MarkdownSemantics: Sendable {
         var labelEnd = -1
         var i = syntax.lowerBound + 1
         while i < end {
-            let b = bytes[i]
-            if b == 0x5C { i += 2; continue }
-            if b == 0x5B { depth += 1 }
-            else if b == 0x5D {
+            let byte = bytes[i]
+            if byte == 0x5C { i += 2; continue }
+            if byte == 0x5B { depth += 1 }
+            else if byte == 0x5D {
                 depth -= 1
                 if depth == 0 { labelEnd = i; break }
             }
             i += 1
         }
-        guard labelEnd >= 0, labelEnd + 2 < end, bytes[labelEnd + 1] == 0x28 else { return nil } // ](
+        guard labelEnd >= 0,
+              labelEnd + 2 < end,
+              bytes[labelEnd + 1] == 0x28,
+              bytes[end - 1] == 0x29
+        else { return nil }
 
-        // 目的地：平衡括号（允许 URL 内含括号）
-        var parenDepth = 1
-        var j = labelEnd + 2
-        while j < end {
-            let b = bytes[j]
-            if b == 0x5C { j += 2; continue }
-            if b == 0x28 { parenDepth += 1 }
-            else if b == 0x29 {
-                parenDepth -= 1
-                if parenDepth == 0 { break }
-            }
-            j += 1
+        let payloadEnd = end - 1
+        var destinationStart = labelEnd + 2
+        while destinationStart < payloadEnd, isASCIIWhitespace(bytes[destinationStart]) {
+            destinationStart += 1
         }
-        guard j < end else { return nil }
+
+        let destination: Range<Int>
+        if expectedDestination == nil || expectedDestination?.isEmpty == true {
+            destination = destinationStart..<destinationStart
+        } else if destinationStart < payloadEnd, bytes[destinationStart] == 0x3C { // <...>
+            var close = destinationStart + 1
+            while close < payloadEnd {
+                if bytes[close] == 0x5C { close += 2; continue }
+                if bytes[close] == 0x3E { break }
+                close += 1
+            }
+            guard close < payloadEnd else { return nil }
+            destination = (destinationStart + 1)..<close
+        } else {
+            var destinationEnd = destinationStart
+            var parenthesisDepth = 0
+            while destinationEnd < payloadEnd {
+                let byte = bytes[destinationEnd]
+                if byte == 0x5C {
+                    destinationEnd = min(destinationEnd + 2, payloadEnd)
+                    continue
+                }
+                if isASCIIWhitespace(byte), parenthesisDepth == 0 { break }
+                if byte == 0x28 {
+                    parenthesisDepth += 1
+                } else if byte == 0x29, parenthesisDepth > 0 {
+                    parenthesisDepth -= 1
+                }
+                destinationEnd += 1
+            }
+            destination = destinationStart..<destinationEnd
+        }
 
         let open = syntax.lowerBound
         return LinkSyntax(
             openBracket: open..<(open + 1),
             label: (open + 1)..<labelEnd,
-            tail: labelEnd..<(j + 1),
-            destination: (labelEnd + 2)..<j
+            tail: labelEnd..<end,
+            destination: destination
         )
+    }
+
+    private static func isASCIIWhitespace(_ byte: UInt8) -> Bool {
+        byte == 0x20 || byte == 0x09 || byte == 0x0A || byte == 0x0D
     }
 }

@@ -159,41 +159,59 @@ public struct RenderEngine {
         package: Package,
         previousPackage: Package?
     ) {
-        let oldQuotes = quoteLines(of: previousPackage)
-        let newQuotes = quoteLines(of: package)
+        let lastLine = max(0, package.lineStarts.count - 1)
+        let validLines = 0...lastLine
 
         // 多行块（围栏/表格）：旧/新块与脏区相接（含相邻 1 行）→ 整块纳入。
         // 重复直到稳定（围栏串接的场景），纯区间运算，必然终止。
-        //
-        // 区间表在循环外算一次：它不随脏区扩张而变，而每次重算是 O(token 数) 加两次
-        // 数组分配。表格也算多行块之后这张表几乎翻倍，放在循环里就成了输入热路径上
-        // 一笔白花的钱。
-        let blockRanges = multilineBlockRanges(of: previousPackage) + multilineBlockRanges(of: package)
+        let blockRanges = (
+            multilineBlockRanges(of: previousPackage) + multilineBlockRanges(of: package)
+        ).compactMap { clamped($0, to: validLines) }
+        extendConnectedRange(&dirtyLines, candidates: blockRanges)
+
+        // CommonMark lazy continuation 只能由 AST 判定。引用拓扑未变化时普通正文编辑
+        // 保持局部；发生变化时沿旧/新引用的连通区间扩张到稳定。
+        let oldQuotes = quoteLines(of: previousPackage)
+        let newQuotes = quoteLines(of: package)
+        if oldQuotes != newQuotes {
+            let quoteRanges = (
+                contiguousRanges(oldQuotes) + contiguousRanges(newQuotes)
+            ).compactMap { clamped($0, to: validLines) }
+            extendConnectedRange(&dirtyLines, candidates: quoteRanges)
+        }
+    }
+
+    private func extendConnectedRange(
+        _ dirtyLines: inout ClosedRange<Int>,
+        candidates: [ClosedRange<Int>]
+    ) {
         var extended = true
         while extended {
             extended = false
-            for range in blockRanges
-            where range.lowerBound <= dirtyLines.upperBound + 1 && dirtyLines.lowerBound <= range.upperBound + 1 {
-                guard !dirtyLines.contains(range.lowerBound) else { continue }
-                dirtyLines = min(dirtyLines.lowerBound, range.lowerBound)...max(dirtyLines.upperBound, range.upperBound)
+            for range in candidates
+            where range.lowerBound <= dirtyLines.upperBound + 1
+                && dirtyLines.lowerBound <= range.upperBound + 1 {
+                let fullyContained = dirtyLines.lowerBound <= range.lowerBound
+                    && dirtyLines.upperBound >= range.upperBound
+                guard !fullyContained else { continue }
+                let lower = min(dirtyLines.lowerBound, range.lowerBound)
+                let upper = max(dirtyLines.upperBound, range.upperBound)
+                dirtyLines = lower...upper
                 extended = true
             }
-        }
-
-        // 引用归属变化（编辑是局部的，只查脏区邻近行）
-        let lastLine = package.lineStarts.count - 1
-        let near = max(0, dirtyLines.lowerBound - 2)...min(lastLine, dirtyLines.upperBound + 2)
-        for line in near where oldQuotes.contains(line) != newQuotes.contains(line) {
-            dirtyLines = min(dirtyLines.lowerBound, line)...max(dirtyLines.upperBound, line)
         }
     }
 
     /// 跨多行的结构块（围栏、表格）覆盖的行区间。
     private func multilineBlockRanges(of package: Package?) -> [ClosedRange<Int>] {
         guard let package else { return [] }
-        return package.tokens.compactMap { token -> ClosedRange<Int>? in
-            let range = tokenLineRange(token, package: package)
-            return range.lowerBound == range.upperBound ? nil : range
+        return package.tokens.compactMap { token in
+            switch token.kind {
+            case .codeFence, .table:
+                return tokenLineRange(token, package: package)
+            default:
+                return nil
+            }
         }
     }
 
@@ -203,6 +221,33 @@ public struct RenderEngine {
             if case .blockquote = token.kind { return token.line }
             return nil
         })
+    }
+
+    private func contiguousRanges(_ lines: Set<Int>) -> [ClosedRange<Int>] {
+        let sorted = lines.sorted()
+        guard var start = sorted.first else { return [] }
+        var end = start
+        var result: [ClosedRange<Int>] = []
+        for line in sorted.dropFirst() {
+            if line == end + 1 {
+                end = line
+            } else {
+                result.append(start...end)
+                start = line
+                end = line
+            }
+        }
+        result.append(start...end)
+        return result
+    }
+
+    private func clamped(
+        _ range: ClosedRange<Int>,
+        to bounds: ClosedRange<Int>
+    ) -> ClosedRange<Int>? {
+        let lower = max(range.lowerBound, bounds.lowerBound)
+        let upper = min(range.upperBound, bounds.upperBound)
+        return lower <= upper ? lower...upper : nil
     }
 
     // MARK: - marker 显隐（纯计算，供协调器 diff 后写属性）
@@ -262,9 +307,10 @@ public struct RenderEngine {
             // 行内图片：整段一个条目，携带子区间供附件显隐与源码回显。
             if let inline = token.inlineImageRange {
                 let spanNS = package.index.nsRange(inline)
+                let identity = markerIdentity(for: inline, package: package)
                 return [VisibilityEntry(
-                    line: token.line,
-                    markerRelOffset: inline.lowerBound - package.lineStarts[token.line],
+                    line: identity.line,
+                    markerRelOffset: identity.relOffset,
                     markerNS: spanNS,
                     state: state,
                     listDepth: nil,
@@ -274,9 +320,10 @@ public struct RenderEngine {
                 )]
             }
             return token.markerVisibilityRanges.map { range in
-                VisibilityEntry(
-                    line: token.line,
-                    markerRelOffset: range.lowerBound - package.lineStarts[token.line],
+                let identity = markerIdentity(for: range, package: package)
+                return VisibilityEntry(
+                    line: identity.line,
+                    markerRelOffset: identity.relOffset,
                     markerNS: package.index.nsRange(range),
                     state: state,
                     listDepth: token.listDepth
@@ -465,11 +512,16 @@ public struct RenderEngine {
     /// 实测（Release，含表格与图片的 200KB 语料）：不做这层复用时属性应用 349ms、
     /// 1MB 全管线 4025ms；做完是 245ms / 2151ms。
     private final class StyleContext {
+        struct ResolvedImage {
+            let url: URL
+            let image: NSImage
+        }
+
         let imageBaseURL: URL?
         private let storage: NSTextStorage
         private let package: Package
         private var cachedSource: NSString?
-        private var resolvedImages: [String: URL?] = [:]
+        private var resolvedImages: [String: ResolvedImage?] = [:]
 
         init(storage: NSTextStorage, package: Package, imageBaseURL: URL?) {
             self.storage = storage
@@ -509,12 +561,14 @@ public struct RenderEngine {
             return result
         }
 
-        /// 目的地 → 本地文件 URL，按次渲染记忆。缺失的图不会跨渲染缓存，
-        /// 用户补上文件后下一次渲染就能看到。
-        func imageURL(destination: String) -> URL? {
+        /// 目的地 → 本地文件与图片，按次渲染记忆（包括负结果）。
+        func image(destination: String) -> ResolvedImage? {
             if let cached = resolvedImages[destination] { return cached }
             let resolved = ImageResolver.resolvedURL(destination: destination, baseURL: imageBaseURL)
-                .flatMap { url -> URL? in ImageResolver.loadLocalImage(url: url) == nil ? nil : url }
+                .flatMap { url -> ResolvedImage? in
+                    guard let image = ImageResolver.loadLocalImage(url: url) else { return nil }
+                    return ResolvedImage(url: url, image: image)
+                }
             resolvedImages[destination] = resolved
             return resolved
         }
@@ -773,10 +827,9 @@ public struct RenderEngine {
         // 结果是任一处坏掉都被另一处补上，测试再也测不出问题。
         var attributes: [NSAttributedString.Key: Any] = [.museImageDestination: destination]
         let displaySize: NSSize
-        if let url = context.imageURL(destination: destination),
-           let image = ImageResolver.loadLocalImage(url: url) {
-            displaySize = ImageResolver.displaySize(for: image.size)
-            attributes[.museImagePath] = url.standardizedFileURL.path
+        if let resolved = context.image(destination: destination) {
+            displaySize = ImageResolver.displaySize(for: resolved.image.size)
+            attributes[.museImagePath] = resolved.url.standardizedFileURL.path
         } else {
             // 加载不到（文件缺失或远程地址）：仍然按块呈现，绘制层画一个带
             // 目的地文字的占位框——比把源码摊在正文里更能说明「这里是一张图」。
@@ -957,7 +1010,7 @@ public struct RenderEngine {
 
     // MARK: - 区间工具
 
-    /// token 覆盖的行区间（代码围栏、表格跨多行，其余 token 单行）。
+    /// token 覆盖的行区间。普通 token 从实际 UTF-8 源码范围推导，支持 soft line break。
     private func tokenLineRange(_ token: Token, package: Package) -> ClosedRange<Int> {
         switch token.kind {
         case .codeFence:
@@ -967,8 +1020,20 @@ public struct RenderEngine {
         case .table(let lastLine):
             return token.line...lastLine
         default:
-            return token.line...token.line
+            let range = token.sourceRange
+            let lower = lineIndex(atUTF8: range.lowerBound, package: package)
+            let lastByte = range.isEmpty ? range.lowerBound : range.upperBound - 1
+            let upper = lineIndex(atUTF8: lastByte, package: package)
+            return lower...upper
         }
+    }
+
+    func markerIdentity(
+        for range: Range<Int>,
+        package: Package
+    ) -> (line: Int, relOffset: Int) {
+        let line = lineIndex(atUTF8: range.lowerBound, package: package)
+        return (line, range.lowerBound - package.lineStarts[line])
     }
 
     private func blockRange(_ token: Token, package: Package) -> NSRange {

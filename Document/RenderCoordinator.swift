@@ -39,6 +39,7 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
     /// 非 nil 时 `lastPackage` 已过期，光标流与模式切换都必须等待最新 package 落地。
     private var pendingDirtyRange: NSRange?
     private var revealCache: [RevealKey: RenderEngine.MarkerState] = [:]
+    private var needsImageRefresh = false
     /// 已经写入 NSTextStorage 的呈现模式。与 `presentationMode` 分开记录，
     /// 这样在输入法 marked text 期间收到切换请求时，可以延后到组合输入结束再应用。
     private var appliedPresentationMode: RenderEngine.PresentationMode = .rendered
@@ -63,22 +64,9 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
     /// 不能等到绘制时才解析路径。文档另存/首次保存后由文档层更新。
     public var imageBaseURL: URL? {
         didSet {
-            guard imageBaseURL != oldValue, let storage = textStorage, let package = lastPackage else { return }
-            // 基准变了，原先解析失败的相对路径可能变得可解析（反之亦然）：
-            // 整篇重排一次属性，让图片的行高与块角色跟上。
-            isApplyingAttributes = true
-            suppressUndo {
-                _ = engine.render(
-                    package: package,
-                    selection: textView?.selectedRange(),
-                    mode: presentationMode,
-                    into: storage,
-                    imageBaseURL: imageBaseURL
-                )
-                textView?.needsDisplay = true
-            }
-            isApplyingAttributes = false
-            revealCache.removeAll(keepingCapacity: true)
+            guard imageBaseURL != oldValue else { return }
+            needsImageRefresh = true
+            applyImageRefreshIfPossible()
         }
     }
     /// 唯一正文存储（弱引用；由文档装配）。
@@ -172,18 +160,32 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
         let start = clock.now
         isApplyingAttributes = true
         var appliedLines: ClosedRange<Int>?
+        let requiresFullImageRefresh = needsImageRefresh
         suppressUndo {
-            let previousPackage = lastPackage // 结构变更的陈旧样式判定需要旧 package
-            let dirtyLines = engine.applyDirty(package: package, previousPackage: previousPackage,
-                                               utf16Range: dirtyNS, mode: presentationMode, into: storage,
-                                               imageBaseURL: imageBaseURL)
-            appliedLines = dirtyLines
-            if presentationMode == .rendered {
-                reconcileVisibility(package: package, selection: textView?.selectedRange(),
-                                    into: storage, forceLines: dirtyLines)
-            } else {
+            if requiresFullImageRefresh {
+                _ = engine.render(
+                    package: package,
+                    selection: textView?.selectedRange(),
+                    mode: presentationMode,
+                    into: storage,
+                    imageBaseURL: imageBaseURL
+                )
+                appliedLines = 0...max(0, package.lineStarts.count - 1)
                 revealCache.removeAll(keepingCapacity: true)
                 lastReconcileWriteCount = 0
+            } else {
+                let previousPackage = lastPackage // 结构变更的陈旧样式判定需要旧 package
+                let dirtyLines = engine.applyDirty(package: package, previousPackage: previousPackage,
+                                                   utf16Range: dirtyNS, mode: presentationMode, into: storage,
+                                                   imageBaseURL: imageBaseURL)
+                appliedLines = dirtyLines
+                if presentationMode == .rendered {
+                    reconcileVisibility(package: package, selection: textView?.selectedRange(),
+                                        into: storage, forceLines: dirtyLines)
+                } else {
+                    revealCache.removeAll(keepingCapacity: true)
+                    lastReconcileWriteCount = 0
+                }
             }
             appliedPresentationMode = presentationMode
             textView?.needsDisplay = true
@@ -194,6 +196,7 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
         // 只有与当前 revision 对应的 package 才能成为 storage 属性与光标流的权威来源。
         lastPackage = package
         pendingDirtyRange = nil
+        needsImageRefresh = false
         lastAppliedDirtyRange = dirtyNS
         lastAppliedDirtyLines = appliedLines
         appliedRevision = rev
@@ -304,7 +307,9 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
         guard let package = lastPackage else { return }
         suppressUndo {
             reconcileVisibility(package: package, selection: selection, into: storage, forceLines: nil)
-            textView?.needsDisplay = true
+            if lastReconcileWriteCount > 0 {
+                textView?.needsDisplay = true
+            }
         }
     }
 
@@ -314,7 +319,9 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
         guard let package = lastPackage else { return }
         suppressUndo {
             reconcileVisibility(package: package, selection: textView?.selectedRange(), into: storage, forceLines: nil)
-            textView?.needsDisplay = true
+            if lastReconcileWriteCount > 0 {
+                textView?.needsDisplay = true
+            }
         }
     }
 
@@ -338,6 +345,7 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
     /// NSTextView 的 marked text 仍由系统独占，不在候选态上改写属性。
     public func refreshPresentationMode() {
         applyPresentationModeIfPossible()
+        applyImageRefreshIfPossible()
     }
 
     private func applyPresentationModeIfPossible() {
@@ -362,6 +370,33 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
         }
         isApplyingAttributes = false
         appliedPresentationMode = presentationMode
+    }
+
+    private func applyImageRefreshIfPossible() {
+        guard needsImageRefresh,
+              textView?.hasMarkedText() != true,
+              !isApplyingAttributes,
+              pendingDirtyRange == nil,
+              let package = lastPackage,
+              let storage = textStorage
+        else { return }
+
+        isApplyingAttributes = true
+        suppressUndo {
+            _ = engine.render(
+                package: package,
+                selection: textView?.selectedRange(),
+                mode: presentationMode,
+                into: storage,
+                imageBaseURL: imageBaseURL
+            )
+            textView?.needsDisplay = true
+        }
+        isApplyingAttributes = false
+        appliedPresentationMode = presentationMode
+        needsImageRefresh = false
+        revealCache.removeAll(keepingCapacity: true)
+        lastReconcileWriteCount = 0
     }
 
     /// 侧边栏点击 heading 时调用：把选区放到标题行首并滚动可见。
@@ -430,14 +465,12 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
         var writeCount = 0
 
         for token in package.tokens {
-            let forced = forceLines?.contains(token.line) == true
             // `markerVisibilityRanges`（而不是 allMarkerRanges）：块图片整段折叠，
             // 只隐藏 `![` 与 `](目的地)` 会把标签留在正文里。
             for range in token.markerVisibilityRanges {
-                let key = RevealKey(
-                    line: token.line,
-                    relOffset: range.lowerBound - package.lineStarts[token.line]
-                )
+                let identity = engine.markerIdentity(for: range, package: package)
+                let forced = forceLines?.contains(identity.line) == true
+                let key = RevealKey(line: identity.line, relOffset: identity.relOffset)
                 if forced || revealCache[key] != .hidden {
                     if firstWrite {
                         storage.beginEditing()

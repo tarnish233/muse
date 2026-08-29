@@ -7,6 +7,7 @@ import MuseKit
 struct EditorView: NSViewRepresentable {
     let document: MuseDocument
     let isSourceMode: Bool
+    let previewBaseURL: URL?
 
     func makeCoordinator() -> Coordinator {
         Coordinator(document: document)
@@ -26,7 +27,7 @@ struct EditorView: NSViewRepresentable {
         textView.autoresizingMask = [.width]
         textView.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
         textView.textContainer?.widthTracksTextView = true
-        textView.previewBaseURL = document.fileURL?.deletingLastPathComponent()
+        textView.previewBaseURL = previewBaseURL
         scrollView.documentView = textView
 
         textView.delegate = context.coordinator
@@ -43,7 +44,7 @@ struct EditorView: NSViewRepresentable {
         document.renderer.setPresentationMode(isSourceMode ? .source : .rendered)
         // 另存为/首次保存后文档 URL 可能变化，相对路径图片的解析基准随之更新。
         if let textView = scrollView.documentView as? EditorTextView {
-            textView.previewBaseURL = document.fileURL?.deletingLastPathComponent()
+            textView.previewBaseURL = previewBaseURL
         }
     }
 

@@ -1281,7 +1281,7 @@ final class EditorTextView: NSTextView {
         insertText("\n", replacementRange: NSRange(location: NSNotFound, length: 0))
     }
 
-    /// Whether a mouse event should be considered for a checkbox toggle at all.
+    /// Whether a mouse event should be considered for a direct marker action.
     ///
     /// Split out from `mouseDown` so it can be tested directly: driving the full
     /// `mouseDown` for a rejected event reaches `super`, which starts AppKit's
@@ -1292,7 +1292,7 @@ final class EditorTextView: NSTextView {
     /// `flags.isEmpty` over `deviceIndependentFlagsMask` (0xFFFF0000) instead
     /// also demands Caps Lock, fn, the numeric keypad and the reserved high bits
     /// all be clear — Caps Lock alone was silently swallowing every click.
-    static func isCheckboxToggleCandidate(_ event: NSEvent) -> Bool {
+    static func isPlainPrimaryClick(_ event: NSEvent) -> Bool {
         let blockingChords: NSEvent.ModifierFlags = [.command, .option, .control, .shift]
         return event.type == .leftMouseDown
             && event.clickCount == 1
@@ -1302,7 +1302,7 @@ final class EditorTextView: NSTextView {
     override func mouseDown(with event: NSEvent) {
         pendingPair = nil
         let point = convert(event.locationInWindow, from: nil)
-        if Self.isCheckboxToggleCandidate(event),
+        if Self.isPlainPrimaryClick(event),
            hasMarkedText() == false,
            isEditable,
            let control = tableChromeControls().last(where: { $0.frame.contains(point) })
@@ -1380,7 +1380,7 @@ final class EditorTextView: NSTextView {
            let selection = tableCurrentSelectionProvider?() {
             _ = tableSelectionHandler?(selection.tableID, nil)
         }
-        if Self.isCheckboxToggleCandidate(event),
+        if Self.isPlainPrimaryClick(event),
            hasMarkedText() == false,
            isEditable,
            taskCheckboxToggleRange(at: point) != nil
@@ -1392,12 +1392,23 @@ final class EditorTextView: NSTextView {
             window?.makeFirstResponder(self)
             if toggleTaskCheckbox(at: point) { return }
         }
-        if Self.isCheckboxToggleCandidate(event),
+        if Self.isPlainPrimaryClick(event),
            hasMarkedText() == false,
            let destination = imageDestination(at: point)
         {
             window?.makeFirstResponder(self)
             showImagePreview(destination: destination, at: point)
+            return
+        }
+        if Self.isPlainPrimaryClick(event),
+           hasMarkedText() == false,
+           let location = listMarkerCaretLocation(at: point)
+        {
+            // Ordinary markers are painted outside the native glyph fragment.
+            // Letting NSTextView resolve that point can place the caret in the
+            // next item; map this small painted area to its own body explicitly.
+            window?.makeFirstResponder(self)
+            setSelectedRange(NSRange(location: location, length: 0))
             return
         }
         super.mouseDown(with: event)
@@ -1600,19 +1611,21 @@ final class EditorTextView: NSTextView {
             x: point.x - textContainerOrigin.x,
             y: point.y - textContainerOrigin.y
         )
-        // 悬挂式 marker 画在容器原点左侧的留白里，点击落点可能解析不到
-        // fragment；按同一行带在正文区内重新解析一次，交给 hit frame 精确判定。
-        var resolved = layoutManager.textLayoutFragment(for: containerPoint)
-        if resolved == nil {
-            resolved = layoutManager.textLayoutFragment(for: CGPoint(
-                x: (textContainer?.size.width ?? 0) / 2,
-                y: containerPoint.y
-            ))
-        }
-        guard let fragment = resolved as? MuseLayoutFragment,
-              let target = fragment.taskCheckboxHitTarget(),
-              target.frame.contains(containerPoint)
-        else { return nil }
+        // 悬挂式 marker 位于正文 fragment 左侧。TextKit 对这个点有时会返回垂直
+        // 距离更近的前一段（而不是 nil）；只在 nil 时回退会导致段落后的首个 Todo
+        // 看得见却点不中。先验实际落点，再始终用同一 y 的正文列复核一次。
+        let direct = layoutManager.textLayoutFragment(for: containerPoint)
+        let lineProbe = layoutManager.textLayoutFragment(for: CGPoint(
+            x: (textContainer?.size.width ?? 0) / 2,
+            y: containerPoint.y
+        ))
+        let candidates = [direct, lineProbe].compactMap { $0 as? MuseLayoutFragment }
+        guard let match = candidates.lazy.compactMap({ fragment -> (MuseLayoutFragment, (frame: CGRect, toggleRange: NSRange))? in
+            guard let target = fragment.taskCheckboxHitTarget(),
+                  target.frame.contains(containerPoint) else { return nil }
+            return (fragment, target)
+        }).first else { return nil }
+        let (fragment, target) = match
 
         // 只需要元素起点：`offset(from:to:)` 要走一趟内容树，算元素长度是白花的
         // 第二趟——它算出来从未被用到。
@@ -1625,6 +1638,39 @@ final class EditorTextView: NSTextView {
             return nil
         }
         return NSRange(location: location, length: target.toggleRange.length)
+    }
+
+    /// Source location for a click on a rendered unordered/ordered marker.
+    /// Task markers remain controls and are handled by `toggleTaskCheckbox`.
+    func listMarkerCaretLocation(at point: CGPoint) -> Int? {
+        guard let layoutManager = textLayoutManager,
+              let contentManager = layoutManager.textContentManager
+        else { return nil }
+
+        let containerPoint = CGPoint(
+            x: point.x - textContainerOrigin.x,
+            y: point.y - textContainerOrigin.y
+        )
+        let direct = layoutManager.textLayoutFragment(for: containerPoint)
+        let lineProbe = layoutManager.textLayoutFragment(for: CGPoint(
+            x: (textContainer?.size.width ?? 0) / 2,
+            y: containerPoint.y
+        ))
+        let candidates = [direct, lineProbe].compactMap { $0 as? MuseLayoutFragment }
+        guard let match = candidates.lazy.compactMap({ fragment -> (MuseLayoutFragment, Int)? in
+            guard let target = fragment.listMarkerHitTarget(),
+                  target.frame.contains(containerPoint) else { return nil }
+            return (fragment, target.contentOffset)
+        }).first else { return nil }
+
+        let (fragment, contentOffset) = match
+        let elementStart = contentManager.offset(
+            from: contentManager.documentRange.location,
+            to: fragment.rangeInElement.location
+        )
+        let location = elementStart + contentOffset
+        guard location >= 0, location <= (string as NSString).length else { return nil }
+        return location
     }
 
     // MARK: - 图片预览（M5）

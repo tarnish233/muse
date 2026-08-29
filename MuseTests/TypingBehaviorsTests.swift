@@ -658,7 +658,7 @@ import Testing
             clickCount: 1,
             pressure: 1
         ))
-        #expect(EditorTextView.isCheckboxToggleCandidate(event) == expected)
+        #expect(EditorTextView.isPlainPrimaryClick(event) == expected)
     }
 
     /// 双击不应该被当成切换（一个手势变成一次源码编辑）。
@@ -674,7 +674,7 @@ import Testing
             clickCount: 2,
             pressure: 1
         ))
-        #expect(EditorTextView.isCheckboxToggleCandidate(event) == false)
+        #expect(EditorTextView.isPlainPrimaryClick(event) == false)
     }
 
     /// 端到端：命中复选框的点击会提前返回、不进入 `super.mouseDown`，所以这条
@@ -1162,6 +1162,90 @@ import Testing
         #expect(storage.string == source)
         undoManager.redo()
         #expect(storage.string == "前😀文\n\n- [x] task")
+    }
+
+    @Test func firstCheckedTaskAfterHeadingCanBeUnchecked() throws {
+        let source = "# 任务列表\n\n- [x] 已完成：勾选态由 AST 提供，绘制层不重新解析 `[x]`\n- [ ] 未完成"
+        let storage = NSTextStorage(string: source)
+        let textView = EditorTextView.make(textStorage: storage)
+        let window = host(textView, size: NSSize(width: 720, height: 300))
+        defer { window.contentView = nil }
+        textView.textContainer?.containerSize = NSSize(
+            width: 720,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+
+        let engine = RenderEngine()
+        _ = engine.render(package: engine.prepare(source), selection: nil, into: storage)
+        textView.textLayoutManager?.ensureLayout(for: textView.textLayoutManager!.documentRange)
+
+        // Use independently scanned drawing pixels, not the hit target itself,
+        // so a shared coordinate bug cannot make this test prove itself.
+        let point = try #require(checkboxInkCenter(in: textView))
+        let stateLocation = (source as NSString).range(of: "[x]").location + 1
+        #expect(textView.taskCheckboxToggleRange(at: point) == NSRange(location: stateLocation, length: 1))
+        #expect(textView.toggleTaskCheckbox(at: point))
+        #expect((storage.string as NSString).substring(with: NSRange(location: stateLocation, length: 1)) == " ")
+    }
+
+    @Test func firstListMarkerClicksResolveToTheirOwnItems() throws {
+        for (source, suffix) in [
+            ("# 标题\n\n1. 第一项\n2. 第二项", ":o"),
+            ("# 标题\n\n- 第一项\n- 第二项", ":u"),
+        ] {
+            let storage = NSTextStorage(string: source)
+            let textView = EditorTextView.make(textStorage: storage)
+            let window = host(textView, size: NSSize(width: 480, height: 240))
+            textView.textContainer?.containerSize = NSSize(
+                width: 480,
+                height: CGFloat.greatestFiniteMagnitude
+            )
+
+            let engine = RenderEngine()
+            _ = engine.render(package: engine.prepare(source), selection: nil, into: storage)
+            let layoutManager = try #require(textView.textLayoutManager)
+            layoutManager.ensureLayout(for: layoutManager.documentRange)
+
+            var markerPoint: CGPoint?
+            layoutManager.enumerateTextLayoutFragments(
+                from: layoutManager.documentRange.location,
+                options: [.ensuresLayout]
+            ) { candidate in
+                guard let fragment = candidate as? MuseLayoutFragment,
+                      fragment.blockKind == BlockVisual.list.rawValue + suffix,
+                      let frame = fragment.listMarkerFrame(at: fragment.layoutFragmentFrame.origin)
+                else { return true }
+                markerPoint = CGPoint(
+                    x: frame.midX + textView.textContainerOrigin.x,
+                    y: frame.midY + textView.textContainerOrigin.y
+                )
+                return false
+            }
+
+            let point = try #require(markerPoint)
+            let firstBody = (source as NSString).range(of: "第一项").location
+            if suffix == ":o" {
+                // TextKit's native lookup demonstrates the original failure:
+                // the first `1.` resolves to the second item.
+                #expect(textView.characterIndex(for: point) != firstBody)
+            }
+            #expect(textView.listMarkerCaretLocation(at: point) == firstBody)
+
+            let event = try #require(NSEvent.mouseEvent(
+                with: .leftMouseDown,
+                location: textView.convert(point, to: nil),
+                modifierFlags: [],
+                timestamp: 0,
+                windowNumber: window.windowNumber,
+                context: nil,
+                eventNumber: 0,
+                clickCount: 1,
+                pressure: 1
+            ))
+            textView.mouseDown(with: event)
+            #expect(textView.selectedRange() == NSRange(location: firstBody, length: 0))
+            window.contentView = nil
+        }
     }
 
     @Test func accessibilityValuePreservesMarkdownSource() throws {

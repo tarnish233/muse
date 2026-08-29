@@ -1060,7 +1060,7 @@ import Testing
         let markerFrame = try #require(fragment.listMarkerFrame(at: drawPoint))
         let bodyFont = try #require(font(at: 2, in: storage))
         let bodyXHeightCenterY = drawPoint.y + firstLine.glyphOrigin.y - bodyFont.xHeight / 2
-        #expect(abs(markerFrame.midY - bodyXHeightCenterY) < 0.5)
+        #expect(abs(markerFrame.midY - (bodyXHeightCenterY - 1.5)) < 0.5)
         // A paragraph fragment can be much taller than its first line; the
         // marker must stay near the first line instead of paragraph-center.
         #expect(abs(markerFrame.midY - (drawPoint.y + fragment.layoutFragmentFrame.height / 2)) > 20)
@@ -1074,7 +1074,7 @@ import Testing
         let orderedFont = NSFont.systemFont(ofSize: try #require(ordered.listMarkerGlyph).fontSize)
         let markerBaselineY = orderedFrame.minY + orderedFont.ascender
         let contentBaselineY = orderedPoint.y + orderedLine.glyphOrigin.y
-        #expect(abs(markerBaselineY - contentBaselineY) < 0.5)
+        #expect(abs(markerBaselineY - (contentBaselineY - 1.5)) < 0.5)
     }
 
     @Test func unorderedMarkerAlignsWithFirstVisibleInlineContent() throws {
@@ -1099,7 +1099,7 @@ import Testing
         // The first source characters after "- " are hidden Markdown markers.
         // Their 0.1pt font must not pull the replacement bullet down toward
         // the baseline; align against the first visible inline run instead.
-        #expect(abs(markerFrame.midY - expectedCenterY) < 0.5)
+        #expect(abs(markerFrame.midY - (expectedCenterY - 1.5)) < 0.5)
     }
 
     private func listFragment(

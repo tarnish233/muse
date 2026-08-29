@@ -40,6 +40,12 @@ public nonisolated enum ListMarkerGlyph: Equatable, Sendable {
 /// marker font in `typographicBounds` makes its baseline sit visibly too high.
 public nonisolated enum ListMarkerGeometry {
     public static let markerGap: CGFloat = 7
+    /// System-font metrics describe the baseline accurately, but list markers
+    /// are much smaller than a 16pt CJK body glyph. With no optical correction,
+    /// their ink reads about 1.5pt lower even though the mathematical baseline
+    /// is shared. Apply one common lift so numbers, bullets, and checkboxes sit
+    /// on the same visual centerline.
+    public static let opticalLift: CGFloat = 1.5
     /// marker 允许占用的最大横向预算：正文列左侧这么宽的一条 lane。
     ///
     /// 它**不是落点**（落点见 `originX`：墨迹右缘紧贴正文列），只用来决定宽 marker
@@ -198,7 +204,7 @@ public nonisolated enum ListMarkerGeometry {
                 advanceWidth: glyphSize.width,
                 gap: gap
             ),
-            y: originY,
+            y: originY - opticalLift,
             width: glyphSize.width,
             height: glyphSize.height
         )
@@ -604,6 +610,24 @@ public nonisolated final class MuseLayoutFragment: NSTextLayoutFragment {
             y: markerFrame.minY,
             width: marker.info.markerLaneWidth,
             height: markerFrame.height
+        )
+    }
+
+    /// Click target and body offset for an ordinary rendered list marker.
+    ///
+    /// The marker is painted outside TextKit's native glyph fragment. Asking
+    /// NSTextView to resolve that point can therefore select the next paragraph
+    /// (most visibly on the first ordered item). Keep the hit geometry tied to
+    /// the same frame used for drawing and place the caret at this item's body.
+    public func listMarkerHitTarget() -> (frame: CGRect, contentOffset: Int)? {
+        guard let resolved = resolvedMarker() else { return nil }
+        if case .task = resolved.glyph { return nil }
+        guard let markerFrame = frame(of: resolved, at: layoutFragmentFrame.origin) else {
+            return nil
+        }
+        return (
+            frame: markerFrame.insetBy(dx: -3, dy: -2),
+            contentOffset: resolved.info.markerLocation + resolved.info.markerLength
         )
     }
 

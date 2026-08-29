@@ -543,16 +543,56 @@ public nonisolated struct MarkdownSemantics: Sendable {
             listItemLines.insert(line)
         }
 
+        /// 引用块**逐行**产出 token。
+        ///
+        /// 一块一个 token 是不够的：`.museBlock` 由绘制层按 fragment（= 一个段落，
+        /// 也就是一行）读取，只在首行落标记时第二行就既没有竖条底色、也没人折叠它的
+        /// `> `——引用块在第一行就断了。逐行产出同时让「光标所在行回显源码」这条规则
+        /// （`token.line == caretLine`）落到行的粒度上，回显一行不影响整块的视觉。
+        ///
+        /// 每一层 BlockQuote 只认自己那一个 `>`（见 `quoteMarkerRange`），所以
+        /// `> > x` 的内外两层不会抢同一段字符。
         private mutating func appendBlockQuote(_ blockQuote: BlockQuote) {
-            guard let range = byteRange(blockQuote), let line = sourceLine(of: blockQuote) else { return }
+            guard let range = byteRange(blockQuote), !lines.isEmpty else { return }
             let depth = quoteDepth(from: blockQuote)
-            let contentStart = firstChildStart(blockQuote) ?? min(range.upperBound, lines[line].end)
-            let markerStart = syntaxStart(on: line)
-            let markerUpper = min(max(contentStart, markerStart), lines[line].end)
-            blocks.append(.init(kind: .blockquote(depth: depth), line: line,
-                                marker: markerStart..<markerUpper,
-                                content: markerUpper..<lines[line].end))
+            for line in lineSpan(of: range) {
+                let marker = quoteMarkerRange(on: line, depth: depth)
+                blocks.append(.init(kind: .blockquote(depth: depth), line: line,
+                                    marker: marker,
+                                    content: marker.upperBound..<lines[line].end))
+            }
             markAllLines(range, into: &quoteLines)
+        }
+
+        /// 本层引用在这一行上的 `>` 前缀。
+        ///
+        /// 一行可能带多层 `>`（`> > x`）：先跳过外层的 `depth - 1` 个，再吃掉本层的
+        /// `>` 和紧随的至多一个空格（CommonMark 只把第一个空格算进 marker）。
+        ///
+        /// 懒续行（CommonMark 允许段落续行省掉 `>`）返回空区间——它没有字符要折叠，
+        /// 只需要拿到块视觉，竖条才不会在这一行断开。
+        private func quoteMarkerRange(on line: Int, depth: Int) -> Range<Int> {
+            let end = lines[line].end
+            var cursor = lineStarts[line]
+
+            func skipBlanks() {
+                while cursor < end, bytes[cursor] == 0x20 || bytes[cursor] == 0x09 { cursor += 1 }
+            }
+            /// 吃掉一个 `>` 及其后至多一个空格；这一行没有 `>` 时返回 false。
+            func consumeAngle() -> Bool {
+                guard cursor < end, bytes[cursor] == 0x3E else { return false }
+                cursor += 1
+                if cursor < end, bytes[cursor] == 0x20 { cursor += 1 }
+                return true
+            }
+
+            for _ in 0..<max(0, depth - 1) {
+                skipBlanks()
+                guard consumeAngle() else { return cursor..<cursor }
+            }
+            skipBlanks()
+            let start = cursor
+            return consumeAngle() ? start..<cursor : start..<start
         }
 
         private mutating func appendCodeBlock(_ codeBlock: CodeBlock) {
@@ -793,11 +833,20 @@ public nonisolated struct MarkdownSemantics: Sendable {
             return depth
         }
 
-        private func markAllLines(_ range: Range<Int>, into target: inout Set<Int>) {
+        /// 字节区间覆盖到的行号闭区间。
+        ///
+        /// `upperBound` 是开区间端点，落在下一行行首时不能把那一行算进来，所以按
+        /// 「最后一个字节」反查。逐行产出 token 与行集合（`quoteLines` 等）都从这里
+        /// 取行号，两者因此不可能漂移。
+        private func lineSpan(of range: Range<Int>) -> ClosedRange<Int> {
             let start = max(0, lineIndex(ofByte: range.lowerBound) ?? 0)
             let endOffset = max(range.lowerBound, range.upperBound - 1)
             let end = min(lines.count - 1, max(start, lineIndex(ofByte: endOffset) ?? start))
-            for line in start...end {
+            return start...end
+        }
+
+        private func markAllLines(_ range: Range<Int>, into target: inout Set<Int>) {
+            for line in lineSpan(of: range) {
                 target.insert(line)
             }
         }

@@ -31,6 +31,7 @@ public enum SampleMarkdown {
     ## 引用与代码
 
     > 引用块：渲染只写属性，不改字符。中文引用的排版需要观察。
+    > 第二行引用：竖条与底色要在多行之间连续，不能在第一行断掉。
 
     ```swift
     func hello() -> String {

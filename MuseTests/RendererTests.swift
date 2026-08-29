@@ -701,6 +701,130 @@ import Testing
         #expect(block(24) == BlockVisual.rule.rawValue)      // 分隔线（空白行之后）
     }
 
+    /// 多行引用的**每一行**都要拿到引用块视觉：竖条连续、底色连续、`>` 折叠。
+    ///
+    /// 曾经的形态：`appendBlockQuote` 只在 BlockQuote 的首行落一个 token，于是
+    /// 第二行既没有底色/竖条（绘制层按 fragment 读 `.museBlock`，一段一个 fragment），
+    /// 也没人隐藏它的 `> ` —— 视觉上引用块在第一行就断了。
+    @Test func everyLineOfMultiLineQuoteCarriesQuoteVisual() {
+        let source = "> 第一行\n> 第二行\n> 第三行"
+        let storage = NSTextStorage(string: source)
+        let package = engine.prepare(source)
+        _ = engine.render(package: package, selection: nil, into: storage)
+
+        let ns = source as NSString
+        for label in ["第一行", "第二行", "第三行"] {
+            let contentAt = ns.range(of: label).location
+            let lineStart = contentAt - 2   // "> " 的起点
+            #expect(
+                storage.attribute(.museBlock, at: lineStart, effectiveRange: nil) as? String
+                    == BlockVisual.quote.rawValue,
+                "\(label) 行首缺少引用块标记：绘制层画不出竖条"
+            )
+            #expect(
+                storage.attribute(.backgroundColor, at: contentAt, effectiveRange: nil) != nil,
+                "\(label) 缺少引用底色"
+            )
+            #expect(isHidden(lineStart, in: storage), "\(label) 的 \"> \" 没有折叠")
+        }
+        #expect(storage.string == source)
+    }
+
+    /// 光标落在多行引用的某一行时，只有那一行回显 `> `，其余行保持折叠，
+    /// 且**整块的竖条与底色不因回显而断开**。
+    @Test func revealingOneQuoteLineKeepsTheRestOfTheBlockIntact() {
+        let source = "> 第一行\n> 第二行\n> 第三行"
+        let storage = NSTextStorage(string: source)
+        let package = engine.prepare(source)
+        let ns = source as NSString
+        let caret = NSRange(location: ns.range(of: "第二行").location, length: 0)
+        _ = engine.render(package: package, selection: caret, into: storage)
+
+        #expect(!isHidden(ns.range(of: "第二行").location - 2, in: storage))
+        #expect(isHidden(ns.range(of: "第一行").location - 2, in: storage))
+        #expect(isHidden(ns.range(of: "第三行").location - 2, in: storage))
+        for label in ["第一行", "第二行", "第三行"] {
+            #expect(
+                storage.attribute(.museBlock, at: ns.range(of: label).location - 2,
+                                  effectiveRange: nil) as? String == BlockVisual.quote.rawValue,
+                "\(label) 在回显态丢了引用块标记"
+            )
+        }
+        #expect(storage.string == source)
+    }
+
+    /// 引用内的空行（只有 `>`）与懒续行（没写 `>`）也属于同一个引用块：
+    /// 竖条不能在这两种行上断开。懒续行没有 marker 可折叠，只拿块视觉。
+    @Test func quoteBlankAndLazyContinuationLinesStayInTheBlock() {
+        let source = "> 第一段\n>\n> 第二段\n懒续行"
+        let storage = NSTextStorage(string: source)
+        let package = engine.prepare(source)
+        _ = engine.render(package: package, selection: nil, into: storage)
+
+        let ns = source as NSString
+        func blockAt(_ location: Int) -> String? {
+            storage.attribute(.museBlock, at: location, effectiveRange: nil) as? String
+        }
+        #expect(blockAt(ns.range(of: "第一段").location - 2) == BlockVisual.quote.rawValue)
+        // 只有 ">" 的空行：行首那个字符本身要带块标记。
+        #expect(blockAt(ns.range(of: "\n>\n").location + 1) == BlockVisual.quote.rawValue)
+        #expect(blockAt(ns.range(of: "第二段").location - 2) == BlockVisual.quote.rawValue)
+        #expect(blockAt(ns.range(of: "懒续行").location) == BlockVisual.quote.rawValue)
+        #expect(storage.string == source)
+    }
+
+    /// 「第二行引用没有连续」的像素级守卫。
+    ///
+    /// 属性断言只能证明 `.museBlock` 落到了每一行；竖条是不是真的画出来了要问绘制层。
+    /// 多行引用在 TextKit 2 里是**每行一个 fragment**（元素以 `\n` 分段），所以这里要求
+    /// 每一个 fragment 都自报 quote，并且每一个都真的落下了墨。
+    @Test func everyLineOfMultiLineQuoteDrawsItsBar() {
+        let source = "> 第一行\n> 第二行\n> 第三行"
+        let storage = NSTextStorage(string: source)
+        let textView = EditorTextView.make(textStorage: storage)
+        textView.frame = NSRect(x: 0, y: 0, width: 640, height: 320)
+        textView.textContainer?.containerSize = NSSize(
+            width: 640, height: CGFloat.greatestFiniteMagnitude)
+
+        let package = engine.prepare(source)
+        _ = engine.render(package: package, selection: nil, into: storage)
+
+        let quoteFragments = customFragments(in: textView).filter {
+            $0.blockKind == BlockVisual.quote.rawValue
+        }
+        #expect(quoteFragments.count == 3, "引用块的三行应各有一个自报 quote 的 fragment")
+        for (line, fragment) in quoteFragments.enumerated() {
+            #expect(
+                markerInkColumns(of: fragment) != nil,
+                "引用第 \(line + 1) 行没有落下任何墨：竖条在这一行断了"
+            )
+        }
+    }
+
+    /// 嵌套引用：一行上的两个 `>` 分属内外两层，各自折叠自己那一个。
+    ///
+    /// 旧实现里内外两层的 marker 都从行首空白之后起算，于是同一段字符被抢两次；
+    /// 现在每层只吃自己的 `>` 和紧随的一个空格。
+    @Test func nestedQuoteMarkersBelongToTheirOwnLevel() {
+        let source = "> 外层\n> > 内层"
+        let storage = NSTextStorage(string: source)
+        let package = engine.prepare(source)
+        _ = engine.render(package: package, selection: nil, into: storage)
+
+        let ns = source as NSString
+        let nestedLineStart = ns.range(of: "\n> > ").location + 1
+        // 两个 ">" 与它们各自后面的空格都要折叠。
+        for offset in 0..<4 {
+            #expect(isHidden(nestedLineStart + offset, in: storage),
+                    "嵌套引用行第 \(offset) 个字符没有折叠")
+        }
+        #expect(
+            storage.attribute(.museBlock, at: nestedLineStart, effectiveRange: nil) as? String
+                == BlockVisual.quote.rawValue
+        )
+        #expect(!isHidden(ns.range(of: "内层").location, in: storage))
+        #expect(storage.string == source)
+    }
 
     /// 列表正文列比普通段落正文列**靠右一个缩进步长**（对标 Typora：
     /// `ul, ol { padding-left: 30px }`），续行与首行正文同列。

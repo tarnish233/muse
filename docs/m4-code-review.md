@@ -676,7 +676,7 @@ let activePair = pendingPair?.source == string ? pendingPair : nil   // 同上
 
 **现象**：`insertText` 在 `:96` 有 `selectedRanges.count == 1` 才继续，但 `performSmartNewline` 只检查 `hasMarkedText()`，然后读 `selectedRange()`——那只返回主选区。多插入点（Option 拖拽）落在列表项里时，Enter 只续行第一个，`:90` 的 `setSelectedRange` 把其余所有选区折叠掉，其他位置的换行全部丢失；返回 `false` 本来会让 AppKit 在所有插入点正常插入。
 
-本次 diff 新增的 `docs/tech-plan.html:111` 明确声称「多选区…均回退给系统」。
+本次 diff 当时新增的 `docs/tech-plan.html` 明确声称「多选区…均回退给系统」。（该文件已于 2026-08-29 删除，技术方案只保留 `.md` 一份。行号 `:111` 在任何已提交版本里都对不上这句，写工单时引的应是未提交的中间状态，已无法核实。）
 
 **改法**：把 `selectedRanges.count == 1` 加进 `:82` 的 `guard`。
 

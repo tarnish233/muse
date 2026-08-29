@@ -37,6 +37,132 @@ import Testing
         #expect(engine.prepare("[x](y").tokens.allSatisfy { $0.kind != .link })
     }
 
+    // MARK: - 图片（M5）
+
+    @Test func imageBounds() throws {
+        let source = "![截图](assets/pic.png)" // 25 UTF-8 字节：! [ 截 图 ] ( 14 字符路径 )
+        let tokens = engine.prepare(source).tokens
+        let image = try #require(tokens.first { $0.kind == .image })
+        #expect(image.markerRange == 0..<2)            // ![
+        #expect(image.contentRange == 2..<8)           // 截图（CJK 各 3 字节）
+        #expect(image.closingMarkerRange == 8..<25)    // ]( 到 )
+        #expect(image.linkDestination == 10..<24)      // assets/pic.png
+        // 独占一行：整段折叠，图由绘制层画在撑高的行里。
+        #expect(image.isBlockImage)
+        #expect(image.markerVisibilityRanges == [0..<25])
+    }
+
+    /// 夹在正文中间的图片不是块图片：整段源码都保留（只被弱化成 marker 色）。
+    /// 折叠一半会留下 `![标签` 这种看起来像打错字的残句，而图并没有画出来。
+    @Test func inlineImageKeepsWholeSyntaxVisible() throws {
+        let source = "看这张 ![截图](a.png) 很清楚"
+        let tokens = engine.prepare(source).tokens
+        let image = try #require(tokens.first { $0.kind == .image })
+        #expect(image.isBlockImage == false)
+        #expect(image.inlineImageRange == nil)
+        #expect(image.markerVisibilityRanges.isEmpty)
+    }
+
+    /// 两侧只有空白仍算独占一行。
+    @Test func blockImageToleratesSurroundingWhitespace() throws {
+        let source = "文字\n\n  ![截图](a.png)  \n\n更多"
+        let image = try #require(engine.prepare(source).tokens.first { $0.kind == .image })
+        #expect(image.isBlockImage)
+    }
+
+    // MARK: - GFM 表格几何
+
+    /// 单元格墨迹与结构区（`|` + 填充空白）的还原。列宽度量只能用墨迹，
+    /// 填充空白在渲染态会被折叠。
+    @Test func tableCellInkAndStructuralRanges() throws {
+        //                       0         1         2
+        //                       0123456789012345678901
+        let source = "| ab | c |\n|---|---|\n| d | e |"
+        let tables = engine.prepare(source).tables
+        let table = try #require(tables.first)
+        #expect(table.headerLine == 0)
+        #expect(table.delimiterLine == 1)
+        #expect(table.lastLine == 2)
+        #expect(table.columnCount == 2)
+
+        let header = try #require(table.rows.first)
+        #expect(header.line == 0)
+        #expect(header.cells.count == 2)
+        // `| ab | c |`：首格内容 " ab "（含两侧空格），墨迹只有 "ab"。
+        #expect(header.cells[0].content == 1..<5)
+        #expect(header.cells[0].ink == 2..<4)
+        // 首格墨迹之前的结构区 = 行首的 `|` + 一个空格。
+        #expect(header.cells[0].leadingGap == 0..<2)
+        #expect(header.cells[0].trailingPipe == 5..<6)
+        // 次格墨迹之前的结构区 = 上一格尾部空格 + `|` + 本格头部空格。
+        #expect(header.cells[1].ink == 7..<8)
+        #expect(header.cells[1].leadingGap == 4..<7)
+        #expect(header.trailingGap == 8..<10)
+    }
+
+    /// 列对齐直接取 AST 的 `columnAlignments`，不重新解析 `:---:`。
+    @Test func tableColumnAlignments() throws {
+        let source = "| a | b | c | d |\n|---|:---|:---:|---:|\n| 1 | 2 | 3 | 4 |"
+        let table = try #require(engine.prepare(source).tables.first)
+        #expect(table.alignment(column: 0) == .leading)
+        #expect(table.alignment(column: 1) == .leading)
+        #expect(table.alignment(column: 2) == .center)
+        #expect(table.alignment(column: 3) == .trailing)
+    }
+
+    /// 表格 token 把行内结构区一并带上，显隐层因此能把 `|` 与填充空白折叠掉。
+    @Test func tableTokenCarriesStructuralMarkers() throws {
+        let source = "| ab | c |\n|---|---|\n| d | e |"
+        let package = engine.prepare(source)
+        let table = try #require(package.tokens.first { if case .table = $0.kind { return true } else { return false } })
+        let structural = try #require(package.tables.first).structuralRanges
+        #expect(!structural.isEmpty)
+        #expect(table.extraMarkerRanges == structural)
+        // marker 本体仍是分隔行整行。
+        #expect(table.markerRange == 11..<20)
+        for range in structural {
+            #expect(table.allMarkerRanges.contains(range))
+        }
+    }
+
+    @Test func imageInsideLinkProducesBothTokens() {
+        let source = "[![alt](a.png)](https://x.com)"
+        let tokens = engine.prepare(source).tokens
+        #expect(tokens.contains { $0.kind == .image })
+        #expect(tokens.contains { $0.kind == .link })
+    }
+
+    // MARK: - 表格（M5 只读呈现）
+
+    @Test func tableTokenSpansAllRowsWithDelimiterMarker() throws {
+        let source = "| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |"
+        let tokens = engine.prepare(source).tokens
+        let table = try #require(tokens.first {
+            if case .table = $0.kind { return true }
+            return false
+        })
+        #expect(table.line == 0)                       // 表头行
+        #expect(table.markerRange == 10..<19)          // 分隔行整行 |---|---|
+        guard case let .table(lastLine) = table.kind else {
+            Issue.record("unexpected kind")
+            return
+        }
+        #expect(lastLine == 3)
+        // 管道表格行内的粗体照常得到行内标记
+        let boldSource = "| x | y |\n|---|---|\n| **z** | w |"
+        #expect(engine.prepare(boldSource).tokens.contains { $0.kind == .strong })
+    }
+
+    @Test func fenceBodyPipeRowsDoNotBecomeTable() {
+        let source = "```\n| a | b |\n|---|---|\n```"
+        let tokens = engine.prepare(source).tokens
+        #expect(tokens.contains { $0.kind == .codeFence })
+        #expect(!tokens.contains {
+            if case .table = $0.kind { return true }
+            return false
+        })
+    }
+
     @Test func imageIsNotLinkified() {
         // 图片语法（M5 处理）不得被识别为链接
         let tokens = engine.prepare("![alt](img.png)").tokens

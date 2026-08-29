@@ -51,6 +51,30 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
 
     /// 编辑面（弱引用，用于读取选区与 marked text 状态）。
     public weak var textView: NSTextView?
+    /// 相对路径图片的解析基准（文档所在目录）。
+    ///
+    /// 必须每次渲染都传给引擎：块图片的呈现尺寸决定行高，是**属性**的一部分，
+    /// 不能等到绘制时才解析路径。文档另存/首次保存后由文档层更新。
+    public var imageBaseURL: URL? {
+        didSet {
+            guard imageBaseURL != oldValue, let storage = textStorage, let package = lastPackage else { return }
+            // 基准变了，原先解析失败的相对路径可能变得可解析（反之亦然）：
+            // 整篇重排一次属性，让图片的行高与块角色跟上。
+            isApplyingAttributes = true
+            suppressUndo {
+                _ = engine.render(
+                    package: package,
+                    selection: textView?.selectedRange(),
+                    mode: presentationMode,
+                    into: storage,
+                    imageBaseURL: imageBaseURL
+                )
+                textView?.needsDisplay = true
+            }
+            isApplyingAttributes = false
+            revealCache.removeAll(keepingCapacity: true)
+        }
+    }
     /// 唯一正文存储（弱引用；由文档装配）。
     public private(set) weak var textStorage: NSTextStorage?
     /// 文本被编辑后回调（文档层用它 updateChangeCount）。
@@ -247,7 +271,8 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
                 package: package,
                 selection: textView?.selectedRange(),
                 mode: presentationMode,
-                into: storage
+                into: storage,
+                imageBaseURL: imageBaseURL
             )
             textView?.needsDisplay = true
         }
@@ -297,8 +322,7 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
                     storage.beginEditing() // 批处理：一次编辑会话内写完全部翻转
                     firstWrite = false
                 }
-                storage.addAttributes(RenderEngine.markerVisibilityAttributes(state: entry.state),
-                                      range: entry.markerNS)
+                engine.apply(entry, imageBaseURL: imageBaseURL, into: storage)
                 writeCount += 1
             }
             newCache[key] = entry.state
@@ -323,7 +347,9 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
 
         for token in package.tokens {
             let forced = forceLines?.contains(token.line) == true
-            for range in token.allMarkerRanges {
+            // `markerVisibilityRanges`（而不是 allMarkerRanges）：块图片整段折叠，
+            // 只隐藏 `![` 与 `](目的地)` 会把标签留在正文里。
+            for range in token.markerVisibilityRanges {
                 let key = RevealKey(
                     line: token.line,
                     relOffset: range.lowerBound - package.lineStarts[token.line]
@@ -333,7 +359,26 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
                         storage.beginEditing()
                         firstWrite = false
                     }
-                    storage.addAttributes(hiddenAttributes, range: package.index.nsRange(range))
+                    let markerNS = package.index.nsRange(range)
+                    if token.inlineImageRange != nil {
+                        engine.applyInlineImageVisibility(
+                            state: .hidden,
+                            span: markerNS,
+                            markerSubRange: package.index.nsRange(token.markerRange),
+                            closingSubRange: token.closingMarkerRange.map(package.index.nsRange),
+                            imageBaseURL: imageBaseURL,
+                            into: storage
+                        )
+                    } else if let listDepth = token.listDepth {
+                        engine.applyMarkerVisibility(
+                            state: .hidden,
+                            markerNS: markerNS,
+                            listDepth: listDepth,
+                            into: storage
+                        )
+                    } else {
+                        storage.addAttributes(hiddenAttributes, range: markerNS)
+                    }
                     writeCount += 1
                 }
                 newCache[key] = .hidden

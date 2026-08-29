@@ -20,11 +20,23 @@ public struct RenderEngine {
         public let index: SourceIndex
         /// 每行起点的 UTF-8 字节偏移。
         public let lineStarts: [Int]
+        /// GFM 表格的源码几何，按表头行升序。列宽在应用样式时才算（要读字体）。
+        public let tables: [TableStructure]
 
-        public init(tokens: [Token], index: SourceIndex, lineStarts: [Int]) {
+        public init(
+            tokens: [Token],
+            index: SourceIndex,
+            lineStarts: [Int],
+            tables: [TableStructure] = []
+        ) {
             self.tokens = tokens
             self.index = index
             self.lineStarts = lineStarts
+            self.tables = tables
+        }
+
+        func table(headerLine: Int) -> TableStructure? {
+            tables.first { $0.headerLine == headerLine }
         }
     }
 
@@ -57,7 +69,12 @@ public struct RenderEngine {
         // AST 是语义与源码定位的唯一来源。即使文档没有链接或深层缩进，也必须
         // 构建语义层，避免同一 Markdown 在不同输入形态下走两套规则。
         let semantics = MarkdownSemantics(source, bytes: bytes, lines: sourceLines)
-        return Package(tokens: semantics.tokens, index: SourceIndex(utf8: bytes), lineStarts: lineStarts)
+        return Package(
+            tokens: semantics.tokens,
+            index: SourceIndex(utf8: bytes),
+            lineStarts: lineStarts,
+            tables: semantics.tables
+        )
     }
 
     // MARK: - 全量渲染（首次装载/基准）
@@ -66,17 +83,25 @@ public struct RenderEngine {
         package: Package,
         selection: NSRange?,
         mode: PresentationMode = .rendered,
-        into storage: NSTextStorage
+        into storage: NSTextStorage,
+        imageBaseURL: URL? = nil
     ) -> Stats {
         let full = NSRange(location: 0, length: storage.length)
 
+        let context = StyleContext(storage: storage, package: package, imageBaseURL: imageBaseURL)
         storage.beginEditing()
         storage.setAttributes(mode == .source ? sourceAttributes() : baseAttributes(), range: full)
         if mode == .rendered {
             for token in package.tokens {
-                applyStyle(token, package: package, into: storage)
+                applyStyle(token, package: package, into: storage, context: context)
             }
-            applyVisibility(package: package, selection: selection, into: storage, forceAll: true)
+            applyVisibility(
+                package: package,
+                selection: selection,
+                into: storage,
+                forceAll: true,
+                imageBaseURL: imageBaseURL
+            )
         }
         storage.endEditing()
 
@@ -97,7 +122,8 @@ public struct RenderEngine {
         previousPackage: Package?,
         utf16Range: NSRange,
         mode: PresentationMode = .rendered,
-        into storage: NSTextStorage
+        into storage: NSTextStorage,
+        imageBaseURL: URL? = nil
     ) -> ClosedRange<Int> {
         var dirtyLines = lineSpan(containing: utf16Range, package: package)
         let lastLine = package.lineStarts.count - 1
@@ -112,11 +138,12 @@ public struct RenderEngine {
         let spanEnd = package.index.utf16Offset(endUTF8)
         let span = NSRange(location: spanStart, length: spanEnd - spanStart)
 
+        let context = StyleContext(storage: storage, package: package, imageBaseURL: imageBaseURL)
         storage.beginEditing()
         storage.setAttributes(mode == .source ? sourceAttributes() : baseAttributes(), range: span)
         if mode == .rendered {
             for token in package.tokens where tokenLineRange(token, package: package).overlaps(dirtyLines) {
-                applyStyle(token, package: package, into: storage)
+                applyStyle(token, package: package, into: storage, context: context)
             }
         }
         storage.endEditing()
@@ -132,20 +159,23 @@ public struct RenderEngine {
         package: Package,
         previousPackage: Package?
     ) {
-        let oldFences = fenceRanges(of: previousPackage)
-        let newFences = fenceRanges(of: package)
         let oldQuotes = quoteLines(of: previousPackage)
         let newQuotes = quoteLines(of: package)
 
-        // 围栏整块：旧/新围栏与脏区相接（含相邻 1 行）→ 整块纳入。
+        // 多行块（围栏/表格）：旧/新块与脏区相接（含相邻 1 行）→ 整块纳入。
         // 重复直到稳定（围栏串接的场景），纯区间运算，必然终止。
+        //
+        // 区间表在循环外算一次：它不随脏区扩张而变，而每次重算是 O(token 数) 加两次
+        // 数组分配。表格也算多行块之后这张表几乎翻倍，放在循环里就成了输入热路径上
+        // 一笔白花的钱。
+        let blockRanges = multilineBlockRanges(of: previousPackage) + multilineBlockRanges(of: package)
         var extended = true
         while extended {
             extended = false
-            for fence in oldFences + newFences
-            where fence.lowerBound <= dirtyLines.upperBound + 1 && dirtyLines.lowerBound <= fence.upperBound + 1 {
-                guard !dirtyLines.contains(fence.lowerBound) else { continue }
-                dirtyLines = min(dirtyLines.lowerBound, fence.lowerBound)...max(dirtyLines.upperBound, fence.upperBound)
+            for range in blockRanges
+            where range.lowerBound <= dirtyLines.upperBound + 1 && dirtyLines.lowerBound <= range.upperBound + 1 {
+                guard !dirtyLines.contains(range.lowerBound) else { continue }
+                dirtyLines = min(dirtyLines.lowerBound, range.lowerBound)...max(dirtyLines.upperBound, range.upperBound)
                 extended = true
             }
         }
@@ -158,9 +188,13 @@ public struct RenderEngine {
         }
     }
 
-    private func fenceRanges(of package: Package?) -> [ClosedRange<Int>] {
+    /// 跨多行的结构块（围栏、表格）覆盖的行区间。
+    private func multilineBlockRanges(of package: Package?) -> [ClosedRange<Int>] {
         guard let package else { return [] }
-        return package.tokens.filter { $0.kind == .codeFence }.map { tokenLineRange($0, package: package) }
+        return package.tokens.compactMap { token -> ClosedRange<Int>? in
+            let range = tokenLineRange(token, package: package)
+            return range.lowerBound == range.upperBound ? nil : range
+        }
     }
 
     private func quoteLines(of package: Package?) -> Set<Int> {
@@ -188,6 +222,34 @@ public struct RenderEngine {
         public let markerRelOffset: Int
         public let markerNS: NSRange
         public let state: MarkerState
+        /// Only the structural marker of a list item carries depth. Inline
+        /// markers on that same line remain nil and cannot change indentation.
+        public let listDepth: Int?
+        /// 行内图片：整段区间（隐藏态折叠为附件图片）；非图片为 nil。
+        public let inlineImageRange: NSRange?
+        /// 行内图片的 `![` 与 `](目的地)` 子区间（回显时恢复源码字体）。
+        public let imageMarkerSubRange: NSRange?
+        public let imageClosingSubRange: NSRange?
+
+        init(
+            line: Int,
+            markerRelOffset: Int,
+            markerNS: NSRange,
+            state: MarkerState,
+            listDepth: Int?,
+            inlineImageRange: NSRange? = nil,
+            imageMarkerSubRange: NSRange? = nil,
+            imageClosingSubRange: NSRange? = nil
+        ) {
+            self.line = line
+            self.markerRelOffset = markerRelOffset
+            self.markerNS = markerNS
+            self.state = state
+            self.listDepth = listDepth
+            self.inlineImageRange = inlineImageRange
+            self.imageMarkerSubRange = imageMarkerSubRange
+            self.imageClosingSubRange = imageClosingSubRange
+        }
     }
 
     /// 纯函数：给定 package 与选区，计算所有 marker 的显隐状态。不触碰 storage。
@@ -197,12 +259,27 @@ public struct RenderEngine {
         mode: PresentationMode = .rendered
     ) -> [VisibilityEntry] {
         func makeEntries(_ token: Token, state: MarkerState) -> [VisibilityEntry] {
-            token.allMarkerRanges.map { range in
+            // 行内图片：整段一个条目，携带子区间供附件显隐与源码回显。
+            if let inline = token.inlineImageRange {
+                let spanNS = package.index.nsRange(inline)
+                return [VisibilityEntry(
+                    line: token.line,
+                    markerRelOffset: inline.lowerBound - package.lineStarts[token.line],
+                    markerNS: spanNS,
+                    state: state,
+                    listDepth: nil,
+                    inlineImageRange: spanNS,
+                    imageMarkerSubRange: package.index.nsRange(token.markerRange),
+                    imageClosingSubRange: token.closingMarkerRange.map(package.index.nsRange)
+                )]
+            }
+            return token.markerVisibilityRanges.map { range in
                 VisibilityEntry(
                     line: token.line,
                     markerRelOffset: range.lowerBound - package.lineStarts[token.line],
                     markerNS: package.index.nsRange(range),
-                    state: state
+                    state: state,
+                    listDepth: token.listDepth
                 )
             }
         }
@@ -226,12 +303,20 @@ public struct RenderEngine {
             let state: MarkerState
             if token.isBlockMarker {
                 let onCaret: Bool
-                if selection.length > 0 {
+                if case .taskListItem = token.kind {
+                    // 复选框**始终是复选框**（对标 Typora）：它是可点击的控件，
+                    // 光标经过就变回 `- [ ] ` 源码会让控件在编辑时消失，也让
+                    // 「点一下切换」失去落点。源码模式下逐字显示，由上面
+                    // `mode == .rendered` 的 guard 统一处理，与光标无关。
+                    onCaret = false
+                } else if selection.length > 0 {
                     // 跨行拖选时，所有与选区相交的块标记都应回显，而不是只看
                     // selection.location 所在行。命中与拖选仍完全交给 NSTextView。
                     onCaret = touches(blockRange(token, package: package), selection: selection)
-                } else if token.kind == .codeFence {
+                } else if case .codeFence = token.kind {
                     onCaret = tokenLineRange(token, package: package).contains(caretLine) // 光标在围栏块任意行
+                } else if case .table = token.kind {
+                    onCaret = tokenLineRange(token, package: package).contains(caretLine) // 光标在表格任意行
                 } else {
                     onCaret = token.line == caretLine
                 }
@@ -272,7 +357,168 @@ public struct RenderEngine {
         }
     }
 
+    /// Apply one marker visibility transition without moving the list's body
+    /// column. When source syntax is revealed, its measured advance is placed
+    /// into the existing marker lane by shifting only `firstLineHeadIndent`.
+    /// Hiding it restores the normal preview paragraph style.
+    func applyMarkerVisibility(
+        state: MarkerState,
+        markerNS: NSRange,
+        listDepth: Int?,
+        into storage: NSTextStorage
+    ) {
+        storage.addAttributes(Self.markerVisibilityAttributes(state: state), range: markerNS)
+        guard let listDepth else { return }
+
+        let source = storage.string as NSString
+        let paragraphRange = source.paragraphRange(for: markerNS)
+        // The paragraph geometry compensates the whole visible prefix
+        // (indentation + marker), not just the marker characters.
+        let prefixRange = NSRange(
+            location: paragraphRange.location,
+            length: markerNS.location - paragraphRange.location + markerNS.length
+        )
+        storage.addAttribute(
+            .paragraphStyle,
+            value: theme.listParagraph(
+                depth: listDepth,
+                sourcePrefixText: source.substring(with: prefixRange),
+                markerRevealed: state == .revealed
+            ),
+            range: paragraphRange
+        )
+    }
+
+    /// 行内图片的显隐应用。
+    ///
+    /// 隐藏态（光标不在这一行）：整段语法折叠成近零宽，块图片的行高与
+    /// `.museBlock` 保留，图由绘制层画在保留区里。
+    /// 回显态（光标进入）：撤掉块角色与撑高的行高、语法恢复回显字体，
+    /// 这一行退回普通文本——这是编辑图片路径的唯一入口。
+    ///
+    /// 块角色是从存储里**重建**的，而不是另存一份状态：`.museImageSize` 由样式层
+    /// 写在整行上、显隐层从不动它，所以任何一次翻转都能从存储自己读回来。
+    func applyInlineImageVisibility(
+        state: MarkerState,
+        span: NSRange,
+        markerSubRange: NSRange?,
+        closingSubRange: NSRange?,
+        imageBaseURL: URL?,
+        into storage: NSTextStorage
+    ) {
+        guard span.location >= 0, span.upperBound <= storage.length else { return }
+        let lineRange = (storage.string as NSString).paragraphRange(for: span)
+        let size = Self.imageSize(in: storage, at: span.location)
+
+        switch state {
+        case .hidden:
+            storage.addAttributes(Self.markerVisibilityAttributes(state: .hidden), range: span)
+            guard let size else { return }
+            storage.addAttributes([
+                .museBlock: BlockVisual.image.rawValue,
+                .paragraphStyle: theme.imageParagraph(height: size.height),
+            ], range: lineRange)
+
+        case .revealed:
+            if let markerSubRange {
+                storage.addAttributes(Self.markerVisibilityAttributes(state: .revealed), range: markerSubRange)
+            }
+            if let closingSubRange {
+                storage.addAttributes(Self.markerVisibilityAttributes(state: .revealed), range: closingSubRange)
+            }
+            // 标签回到正文样式：它不是语法，回显时不该跟着变成 marker 字体。
+            if let markerSubRange, let closingSubRange,
+               closingSubRange.location > markerSubRange.upperBound {
+                storage.addAttributes([
+                    .font: theme.baseFont(),
+                    .foregroundColor: theme.text,
+                ], range: NSRange(
+                    location: markerSubRange.upperBound,
+                    length: closingSubRange.location - markerSubRange.upperBound
+                ))
+            }
+            guard size != nil else { return }
+            storage.removeAttribute(.museBlock, range: lineRange)
+            storage.addAttributes([.paragraphStyle: theme.baseParagraph()], range: lineRange)
+        }
+    }
+
+    /// 整行上由样式层写下的图片呈现尺寸。
+    static func imageSize(in storage: NSAttributedString, at location: Int) -> NSSize? {
+        guard location >= 0, location < storage.length,
+              let numbers = storage.attribute(.museImageSize, at: location, effectiveRange: nil) as? [NSNumber],
+              numbers.count == 2 else { return nil }
+        return NSSize(width: numbers[0].doubleValue, height: numbers[1].doubleValue)
+    }
+
     // MARK: - 样式
+
+    /// 一次样式应用里可以复用的派生数据。
+    ///
+    /// 两样东西都是「按文档规模计费」的，而样式应用是按 token 逐个调用的：
+    ///
+    /// - `storage.string as NSString`：每次都要过一次 Swift↔ObjC 桥；表格、块图片、
+    ///   列表段落各自取一次，就变成 O(token 数 × 文档)。
+    /// - 图片路径解析：加载失败**不进缓存**（否则用户补上文件后就再也看不到），
+    ///   于是每张缺失的图每次渲染都要 stat 一次磁盘。
+    ///
+    /// 实测（Release，含表格与图片的 200KB 语料）：不做这层复用时属性应用 349ms、
+    /// 1MB 全管线 4025ms；做完是 245ms / 2151ms。
+    private final class StyleContext {
+        let imageBaseURL: URL?
+        private let storage: NSTextStorage
+        private let package: Package
+        private var cachedSource: NSString?
+        private var resolvedImages: [String: URL?] = [:]
+
+        init(storage: NSTextStorage, package: Package, imageBaseURL: URL?) {
+            self.storage = storage
+            self.package = package
+            self.imageBaseURL = imageBaseURL
+        }
+
+        var source: NSString {
+            if let cachedSource { return cachedSource }
+            let source = storage.string as NSString
+            cachedSource = source
+            return source
+        }
+
+        /// 落在 `span` 内、渲染态会被折叠的行内标记区间。
+        ///
+        /// `package.tokens` 本来就按 `markerRange.lowerBound` 升序，所以二分定位起点、
+        /// 顺序取到出界即可——不要在这里按整篇 filter/sort：那是 O(表数 × token 数)，
+        /// 实测把 200KB 的脏行增量应用从 0.5ms 拖到 17.8ms（输入热路径的预算是 16ms）。
+        func hiddenInlineRanges(in span: Range<Int>) -> [Range<Int>] {
+            let tokens = package.tokens
+            var low = 0
+            var high = tokens.count
+            while low < high {
+                let mid = (low + high) / 2
+                if tokens[mid].markerRange.lowerBound < span.lowerBound { low = mid + 1 } else { high = mid }
+            }
+            var result: [Range<Int>] = []
+            var index = low
+            while index < tokens.count, tokens[index].markerRange.lowerBound < span.upperBound {
+                let token = tokens[index]
+                if !token.isBlockMarker {
+                    result.append(contentsOf: token.allMarkerRanges)
+                }
+                index += 1
+            }
+            return result
+        }
+
+        /// 目的地 → 本地文件 URL，按次渲染记忆。缺失的图不会跨渲染缓存，
+        /// 用户补上文件后下一次渲染就能看到。
+        func imageURL(destination: String) -> URL? {
+            if let cached = resolvedImages[destination] { return cached }
+            let resolved = ImageResolver.resolvedURL(destination: destination, baseURL: imageBaseURL)
+                .flatMap { url -> URL? in ImageResolver.loadLocalImage(url: url) == nil ? nil : url }
+            resolvedImages[destination] = resolved
+            return resolved
+        }
+    }
 
     private func baseAttributes() -> [NSAttributedString.Key: Any] {
         [
@@ -290,7 +536,12 @@ public struct RenderEngine {
         ]
     }
 
-    private func applyStyle(_ token: Token, package: Package, into storage: NSTextStorage) {
+    private func applyStyle(
+        _ token: Token,
+        package: Package,
+        into storage: NSTextStorage,
+        context: StyleContext
+    ) {
         let index = package.index
 
         // 无内容 token（分隔线）在 content guard 之前处理。
@@ -320,23 +571,35 @@ public struct RenderEngine {
             .museListMarkerLength: NSNumber(value: markerNS.length),
         ]
 
+        func listParagraph(depth: Int) -> NSParagraphStyle {
+            let prefixRange = NSRange(
+                location: lineStart,
+                length: markerNS.location - lineStart + markerNS.length
+            )
+            return theme.listParagraph(
+                depth: depth,
+                sourcePrefixText: context.source.substring(with: prefixRange)
+            )
+        }
+
         switch token.kind {
         case .heading(let level):
             storage.addAttributes([
                 .font: theme.titleFont(level: level),
                 .paragraphStyle: theme.headingParagraph(level: level),
+                .museBlock: BlockVisual.heading.rawValue,
             ], range: wholeLine)
 
         case let .unorderedListItem(depth):
             storage.addAttributes(listMarkerAttributes.merging([
-                .paragraphStyle: theme.listParagraph(depth: depth),
+                .paragraphStyle: listParagraph(depth: depth),
                 .museBlock: BlockVisual.list.rawValue + ":u",
                 .museListDepth: NSNumber(value: depth),
             ]) { _, new in new }, range: wholeLine)
 
         case let .orderedListItem(depth, number):
             storage.addAttributes(listMarkerAttributes.merging([
-                .paragraphStyle: theme.listParagraph(depth: depth),
+                .paragraphStyle: listParagraph(depth: depth),
                 .museBlock: BlockVisual.list.rawValue + ":o",
                 .museListDepth: NSNumber(value: depth),
                 .museListNumber: NSNumber(value: number),
@@ -344,12 +607,12 @@ public struct RenderEngine {
 
         case let .taskListItem(depth, checked):
             storage.addAttributes(listMarkerAttributes.merging([
-                .paragraphStyle: theme.listParagraph(depth: depth),
+                .paragraphStyle: listParagraph(depth: depth),
                 .museBlock: BlockVisual.list.rawValue + ":t",
                 .museListDepth: NSNumber(value: depth),
                 .museTaskChecked: NSNumber(value: checked),
             ]) { _, new in new }, range: wholeLine)
-            // [ ] / [x] 用代码字体区分（点击切换留到 M4）。
+            // [ ] / [x] 用代码字体区分（源码模式下可见；渲染态被折叠字体覆盖）。
             storage.addAttributes([.font: theme.codeFont()], range: index.nsRange(token.markerRange))
 
         case .blockquote:
@@ -368,11 +631,13 @@ public struct RenderEngine {
         case .codeFence:
             // 闭栏行也纳入整块样式（开栏行用弱化色 + 背景作为语法提示，不隐藏）。
             var upper = token.contentRange?.upperBound ?? token.markerRange.upperBound
+            var lastBlockLine = token.line
             if let contentEnd = token.contentRange?.upperBound, contentEnd < package.index.utf8Length {
                 // 闭合行（content 终止处所在行）整行并入样式
                 let closeLine = lineIndex(atUTF8: contentEnd, package: package)
                 // lineEndUTF8 同时覆盖“闭栏行是最后一行”和“闭栏行后还有内容”两种情况。
                 upper = max(upper, lineEndUTF8(closeLine, package: package))
+                lastBlockLine = max(lastBlockLine, closeLine)
             }
             let fullRange = package.lineStarts[token.line]..<upper
             storage.addAttributes([
@@ -385,6 +650,31 @@ public struct RenderEngine {
                 .font: theme.codeFont(),
                 .foregroundColor: theme.markerText,
             ], range: index.nsRange(token.markerRange))
+
+            // 首/末行写块角色与段落样式：绘制层据此画带垂直内边距的圆角背景。
+            for line in token.line...lastBlockLine {
+                let isFirst = line == token.line
+                let isLast = line == lastBlockLine
+                let role = switch (isFirst, isLast) {
+                case (true, true): "open+close"
+                case (true, false): "open"
+                case (false, true): "close"
+                case (false, false): ""
+                }
+                var lineAttributes: [NSAttributedString.Key: Any] = [
+                    .paragraphStyle: theme.fenceParagraph(isFirstLine: isFirst, isLastLine: isLast)
+                ]
+                if !role.isEmpty {
+                    lineAttributes[.museBlockRole] = role
+                }
+                storage.addAttributes(
+                    lineAttributes,
+                    range: index.nsRange(package.lineStarts[line]..<lineEndUTF8(line, package: package))
+                )
+            }
+
+        case .table(let lastLine):
+            applyTableStyle(token, lastLine: lastLine, package: package, into: storage, context: context)
 
         case .strong:
             // 合并字形特征而非覆盖：嵌套（粗体里的斜体、斜体里的粗体）应得到组合样式。
@@ -424,29 +714,261 @@ public struct RenderEngine {
                 }
             }
 
+        case .image:
+            applyImageStyle(token, package: package, into: storage, context: context)
+
         case .rule:
             break // 已在 content guard 之前处理（分隔线无内容区间）
         }
     }
 
-    /// 全量写显隐（供 render 使用；增量路径由协调器 diff 后写入）。
-    private func applyVisibility(package: Package, selection: NSRange?, into storage: NSTextStorage, forceAll: Bool) {
-        let entries = computedVisibility(package: package, selection: selection)
-        for entry in entries {
-            storage.addAttributes(Self.markerVisibilityAttributes(state: entry.state), range: entry.markerNS)
+    // MARK: - 图片
+
+    /// 图片语法的样式与「块图片」判定。
+    ///
+    /// `![标签](目的地)` 独占一行时按块图片呈现：整行折叠、行高撑到图片的呈现
+    /// 高度、图形由 `MuseLayoutFragment` 画在这块保留区里。
+    ///
+    /// 为什么不用 `NSTextAttachment`：`.attachment` 只在 U+FFFC 上成立——
+    /// `NSTextStorage` 的属性修复（`endEditing` → `fixAttachmentAttribute`）会把它
+    /// 从任何其他字符上抹掉（实测见 `RendererTests.attachmentAttributeIsStrippedFromOrdinaryCharacter`）。
+    /// 而「只写属性、不改字符」不允许插入 U+FFFC，所以行内图片只能走绘制层，
+    /// 正是 tech-plan §4.7 给 Phase 2 定的首选路线。
+    ///
+    /// 夹在正文中间的图片（不独占一行）仍按语法样式呈现：撑高一整行去放一张
+    /// 图会毁掉这段的排版，标签保留可读、点击弹预览。
+    private func applyImageStyle(
+        _ token: Token,
+        package: Package,
+        into storage: NSTextStorage,
+        context: StyleContext
+    ) {
+        let index = package.index
+        let source = context.source
+        let markerNS = index.nsRange(token.markerRange)
+        let tailNS = token.closingMarkerRange.map(index.nsRange)
+        let span = NSRange(
+            location: markerNS.location,
+            length: (tailNS ?? markerNS).upperBound - markerNS.location
+        )
+        guard span.location >= 0, span.upperBound <= source.length else { return }
+
+        // 语法样式（两种呈现共用）：`![` 与 `](目的地)` 弱化，标签保持正文色。
+        storage.addAttributes([.foregroundColor: theme.mutedText], range: markerNS)
+        if let tailNS {
+            storage.addAttributes([.foregroundColor: theme.mutedText], range: tailNS)
         }
+        guard let destinationRange = token.linkDestination else { return }
+        let destination = source.substring(with: index.nsRange(destinationRange))
+        storage.addAttributes([.museImageDestination: destination], range: span)
+
+        guard token.isBlockImage else { return }
+        let lineNS = index.nsRange(
+            package.lineStarts[token.line]..<lineEndUTF8(token.line, package: package)
+        )
+        guard lineNS.length > 0, lineNS.upperBound <= source.length else { return }
+
+        // 样式层只写「输入」：目的地、解析后的路径、呈现尺寸。块角色与撑高的行高
+        // 由显隐层按状态**独家**决定（见 applyInlineImageVisibility）——两处都写过一版，
+        // 结果是任一处坏掉都被另一处补上，测试再也测不出问题。
+        var attributes: [NSAttributedString.Key: Any] = [.museImageDestination: destination]
+        let displaySize: NSSize
+        if let url = context.imageURL(destination: destination),
+           let image = ImageResolver.loadLocalImage(url: url) {
+            displaySize = ImageResolver.displaySize(for: image.size)
+            attributes[.museImagePath] = url.standardizedFileURL.path
+        } else {
+            // 加载不到（文件缺失或远程地址）：仍然按块呈现，绘制层画一个带
+            // 目的地文字的占位框——比把源码摊在正文里更能说明「这里是一张图」。
+            displaySize = Theme.imagePlaceholderSize
+        }
+        attributes[.museImageSize] = [
+            NSNumber(value: Double(displaySize.width)),
+            NSNumber(value: Double(displaySize.height)),
+        ]
+        storage.addAttributes(attributes, range: lineNS)
+    }
+
+    // MARK: - 表格
+
+    /// GFM 表格：列宽在这里算好写进属性，绘制层照着画单元格线与底色。
+    ///
+    /// 分工的理由是 fragment 只看得见自己那一行——列宽是**跨行**的最大值，
+    /// 绘制层没有能力算，只能由属性层算完随行携带（`.museTableColumns`）。
+    private func applyTableStyle(
+        _ token: Token,
+        lastLine: Int,
+        package: Package,
+        into storage: NSTextStorage,
+        context: StyleContext
+    ) {
+        let index = package.index
+        let fullRange = package.lineStarts[token.line]..<lineEndUTF8(lastLine, package: package)
+        // 表格用正文字体（对标 Typora：表格不是代码）；列对齐由 kern 负责，
+        // 不再依赖等宽字体去凑源码列。
+        storage.addAttributes([
+            .font: theme.baseFont(),
+            .foregroundColor: theme.text,
+            .museBlock: BlockVisual.table.rawValue,
+        ], range: index.nsRange(fullRange))
+
+        guard let structure = package.table(headerLine: token.line) else {
+            applyPlainTableStyle(from: token.line, to: lastLine, package: package, into: storage)
+            return
+        }
+
+        let layout = TableLayout.compute(
+            structure: structure,
+            source: context.source,
+            index: index,
+            // 单元格里的行内标记（`**`、`` ` `` 等）在渲染态是近零宽的，
+            // 度量列宽必须把它们排除掉。
+            hiddenRanges: context.hiddenInlineRanges(in: fullRange),
+            headerFont: theme.boldFont(),
+            bodyFont: theme.baseFont()
+        )
+        guard layout.isAlignable else {
+            // 结构区放不下 kern 的承载字符（完全不留空格的 `|a|b|` 写法）：
+            // 列对不齐时不画格线，避免线与文字错位——比硬画一个歪的表格好。
+            applyPlainTableStyle(from: token.line, to: lastLine, package: package, into: storage)
+            return
+        }
+        let boundaries = layout.columnBoundaries.map { NSNumber(value: Double($0)) }
+
+        for (rowIndex, row) in structure.rows.enumerated() {
+            let lineRange = index.nsRange(
+                package.lineStarts[row.line]..<lineEndUTF8(row.line, package: package)
+            )
+            var attributes: [NSAttributedString.Key: Any] = [
+                .paragraphStyle: theme.tableParagraph(isLast: row.line == lastLine),
+                .museTableColumns: boundaries,
+                .museTableRow: NSNumber(value: rowIndex),
+            ]
+            if rowIndex == 0 {
+                attributes[.font] = theme.boldFont()
+                attributes[.museBlockRole] = "head"
+            } else if row.line == lastLine {
+                attributes[.museBlockRole] = "close"
+            }
+            storage.addAttributes(attributes, range: lineRange)
+        }
+
+        // 分隔行（`|---|---|`）：整行是表格的 marker，隐藏态折叠成近零宽。
+        // 它**不能**带 minimumLineHeight，否则折叠后仍占一整行高度。
+        let delimiterStart = package.lineStarts[structure.delimiterLine]
+        let delimiterEnd = lineEndUTF8(structure.delimiterLine, package: package)
+        let delimiterRange = index.nsRange(delimiterStart..<delimiterEnd)
+        storage.addAttributes([
+            .paragraphStyle: theme.tableDelimiterParagraph(),
+            .foregroundColor: theme.markerText,
+            .museBlockRole: "delimiter",
+        ], range: delimiterRange)
+
+        // 列内边距挂在每段结构区的首字符上（结构区随 marker 显隐折叠成近零宽）。
+        for adjustment in layout.adjustments {
+            guard adjustment.range.length > 0,
+                  adjustment.range.location + adjustment.range.length <= storage.length else { continue }
+            storage.addAttribute(
+                .kern,
+                value: NSNumber(value: Double(adjustment.kern)),
+                range: adjustment.range
+            )
+        }
+    }
+
+    /// 无法对齐成网格时的保守呈现：整块弱化底色 + 表头加粗，不画格线。
+    private func applyPlainTableStyle(
+        from firstLine: Int,
+        to lastLine: Int,
+        package: Package,
+        into storage: NSTextStorage
+    ) {
+        let index = package.index
+        for line in firstLine...lastLine {
+            var attributes: [NSAttributedString.Key: Any] = [
+                .paragraphStyle: theme.tableParagraph(isLast: line == lastLine)
+            ]
+            if line == firstLine {
+                attributes[.font] = theme.boldFont()
+                attributes[.museBlockRole] = "head"
+            } else if line == firstLine + 1 {
+                attributes[.paragraphStyle] = theme.tableDelimiterParagraph()
+                attributes[.museBlockRole] = "delimiter"
+            } else if line == lastLine {
+                attributes[.museBlockRole] = "close"
+            }
+            storage.addAttributes(
+                attributes,
+                range: index.nsRange(package.lineStarts[line]..<lineEndUTF8(line, package: package))
+            )
+        }
+    }
+
+    /// 全量写显隐（供 render 使用；增量路径由协调器 diff 后写入）。
+    private func applyVisibility(
+        package: Package,
+        selection: NSRange?,
+        into storage: NSTextStorage,
+        forceAll: Bool,
+        imageBaseURL: URL?
+    ) {
+        for entry in computedVisibility(package: package, selection: selection) {
+            apply(entry, imageBaseURL: imageBaseURL, into: storage, skipHiddenListParagraph: true)
+        }
+    }
+
+    /// 应用一个显隐条目。
+    ///
+    /// 块图片、列表、普通 marker 三种条目的写入规则不同，而全量渲染与协调器的
+    /// 增量 reconcile 都要用同一套规则——分成两份实现过一次，结果是光标流从不
+    /// 走块图片那条路（图片行进出光标时不还原）。只留这一个入口。
+    ///
+    /// - Parameter skipHiddenListParagraph: 首次全量渲染时 `applyStyle` 已经写好
+    ///   了列表的隐藏态段落样式，大文档没必要为每一项重建一次；只有回显态需要
+    ///   在这里补偿行首原点。
+    public func apply(
+        _ entry: VisibilityEntry,
+        imageBaseURL: URL?,
+        into storage: NSTextStorage,
+        skipHiddenListParagraph: Bool = false
+    ) {
+        if let inline = entry.inlineImageRange {
+            applyInlineImageVisibility(
+                state: entry.state,
+                span: inline,
+                markerSubRange: entry.imageMarkerSubRange,
+                closingSubRange: entry.imageClosingSubRange,
+                imageBaseURL: imageBaseURL,
+                into: storage
+            )
+            return
+        }
+        if entry.listDepth != nil, !(skipHiddenListParagraph && entry.state == .hidden) {
+            applyMarkerVisibility(
+                state: entry.state,
+                markerNS: entry.markerNS,
+                listDepth: entry.listDepth,
+                into: storage
+            )
+            return
+        }
+        storage.addAttributes(Self.markerVisibilityAttributes(state: entry.state), range: entry.markerNS)
     }
 
     // MARK: - 区间工具
 
-    /// token 覆盖的行区间（代码围栏跨多行，其余 token 单行）。
+    /// token 覆盖的行区间（代码围栏、表格跨多行，其余 token 单行）。
     private func tokenLineRange(_ token: Token, package: Package) -> ClosedRange<Int> {
-        if token.kind == .codeFence {
+        switch token.kind {
+        case .codeFence:
             let end = token.contentRange?.upperBound ?? token.markerRange.upperBound
             let closeLine = lineIndex(atUTF8: end, package: package)
             return token.line...closeLine
+        case .table(let lastLine):
+            return token.line...lastLine
+        default:
+            return token.line...token.line
         }
-        return token.line...token.line
     }
 
     private func blockRange(_ token: Token, package: Package) -> NSRange {

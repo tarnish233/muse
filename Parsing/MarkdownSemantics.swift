@@ -44,6 +44,8 @@ public nonisolated struct MarkdownSemantics: Sendable {
             case taskList(depth: Int, checked: Bool)
             case blockquote(depth: Int)
             case codeFence(language: String?)
+            /// GFM 表格：line 为表头行，lastLine 为末行；分隔行恒为 line+1。
+            case table(lastLine: Int)
             case rule
         }
 
@@ -121,8 +123,17 @@ public nonisolated struct MarkdownSemantics: Sendable {
 
     public let lineKinds: [LineKind]
     public let links: [LinkSyntax]
+    public let images: [LinkSyntax]
     public let inlineMarkers: [InlineMarker]
     public let blocks: [BlockStructure]
+    /// GFM 表格的源码几何（单元格与 `|` 区间、列对齐），供渲染层算列宽。
+    public let tables: [TableStructure]
+    /// 「块图片」所在的行：整行只有一个 `![标签](目的地)`（两侧仅空白）。
+    ///
+    /// 独占一行是完整的判据，所以行号本身就是这个谓词——一行里若还有别的文字，
+    /// 这一行就不在集合里。渲染层据此把整行折叠成图片保留区，显隐层据此决定
+    /// 是整段折叠还是只折叠语法标记。
+    public let blockImageLines: Set<Int>
     /// AST 判定出的结构行，供 TokenScanner 在需要时扩大缩进识别范围。
     ///
     /// 例如 CommonMark 允许列表嵌套在 4 个以上空格之后；扫描器本身不复制块解析规则，
@@ -153,6 +164,14 @@ public nonisolated struct MarkdownSemantics: Sendable {
             case let .blockquote(depth):
                 return Token(kind: .blockquote(depth: depth), markerRange: block.marker,
                              contentRange: block.content, line: block.line)
+            case let .table(lastLine):
+                // 表格的「marker」是分隔行整行：随光标显隐（块级）。行内的结构区
+                // （`|` 与单元格填充空白）作为附加 marker 一并显隐——隐藏态由绘制层
+                // 画真实表格线，回显态露出源码。
+                let structural = tables.first { $0.headerLine == block.line }?.structuralRanges ?? []
+                return Token(kind: .table(lastLine: lastLine), markerRange: block.marker,
+                             contentRange: block.content, extraMarkerRanges: structural,
+                             line: block.line)
             case .codeFence:
                 return Token(kind: .codeFence, markerRange: block.marker,
                              closingMarkerRange: block.closingMarker, contentRange: block.content,
@@ -176,6 +195,11 @@ public nonisolated struct MarkdownSemantics: Sendable {
         result.append(contentsOf: links.map { link in
             Token(kind: .link, markerRange: link.openBracket, closingMarkerRange: link.tail,
                   contentRange: link.label, linkDestination: link.destination, line: link.line)
+        })
+        result.append(contentsOf: images.map { image in
+            Token(kind: .image, markerRange: image.openBracket, closingMarkerRange: image.tail,
+                  contentRange: image.label, linkDestination: image.destination,
+                  isBlockImage: blockImageLines.contains(image.line), line: image.line)
         })
         return result.sorted { lhs, rhs in
             if lhs.markerRange.lowerBound != rhs.markerRange.lowerBound {
@@ -226,6 +250,7 @@ public nonisolated struct MarkdownSemantics: Sendable {
         }
         self.lineKinds = lineKinds
         self.links = semanticWalker.links
+        self.images = semanticWalker.images
         self.inlineMarkers = semanticWalker.inlineMarkers.sorted {
             if $0.openMarker.lowerBound != $1.openMarker.lowerBound {
                 return $0.openMarker.lowerBound < $1.openMarker.lowerBound
@@ -236,6 +261,8 @@ public nonisolated struct MarkdownSemantics: Sendable {
             if $0.line != $1.line { return $0.line < $1.line }
             return $0.marker.lowerBound < $1.marker.lowerBound
         }
+        self.tables = semanticWalker.tables.sorted { $0.headerLine < $1.headerLine }
+        self.blockImageLines = semanticWalker.blockImageLines
         self.listItemLines = semanticWalker.listItemLines
         self.quoteLines = semanticWalker.quoteLines
         self.fenceLines = semanticWalker.fenceLines
@@ -253,6 +280,9 @@ public nonisolated struct MarkdownSemantics: Sendable {
         var inlineMarkers = [InlineMarker]()
         var blocks = [BlockStructure]()
         var links = [LinkSyntax]()
+        var images = [LinkSyntax]()
+        var tables = [TableStructure]()
+        var blockImageLines = Set<Int>()
         var listItemLines = Set<Int>()
         var quoteLines = Set<Int>()
         var fenceLines = Set<Int>()
@@ -280,6 +310,126 @@ public nonisolated struct MarkdownSemantics: Sendable {
 
         mutating func visitCodeBlock(_ codeBlock: CodeBlock) {
             appendCodeBlock(codeBlock)
+        }
+
+        /// GFM 表格。分隔行整行作为表格的 marker 参与显隐；表头恒可见。
+        /// 单元格内的行内标记照常由通用 visit 收集。
+        mutating func visitTable(_ table: Table) {
+            guard let range = byteRange(table), let headerLine = sourceLine(of: table),
+                  headerLine + 1 < lines.count
+            else {
+                descendInto(table)
+                return
+            }
+            // 末行按 AST 区间末字节所在行反推；文件末尾无换行时按行数组收口。
+            let lastLine = min(lineIndex(ofByte: max(range.upperBound - 1, 0)) ?? headerLine, lines.count - 1)
+            let delimiter = lines[headerLine + 1]
+            // content 必须非空（applyStyle 的 content guard）：用末行区间占位。
+            blocks.append(.init(
+                kind: .table(lastLine: max(lastLine, headerLine + 1)),
+                line: headerLine,
+                marker: delimiter.start..<delimiter.end,
+                content: delimiter.end..<max(delimiter.end, lines[max(lastLine, headerLine)].end)
+            ))
+            appendTableStructure(
+                table,
+                headerLine: headerLine,
+                lastLine: max(lastLine, headerLine + 1)
+            )
+            descendInto(table)
+        }
+
+        /// 把 AST 的单元格区间还原成源码几何：单元格取 `Table.Cell.range`，
+        /// `|` 在单元格边界上按字节核对。核对失败（源码省略了该处管线符）时
+        /// 记为 nil，渲染层据此少一个内边距承载点，不影响其余列。
+        private mutating func appendTableStructure(
+            _ table: Table,
+            headerLine: Int,
+            lastLine: Int
+        ) {
+            var rows: [TableStructure.Row] = []
+            if let headerRow = tableRow(cells: Array(table.head.cells)) {
+                rows.append(headerRow)
+            }
+            for bodyRow in table.body.rows {
+                if let row = tableRow(cells: Array(bodyRow.cells)) {
+                    rows.append(row)
+                }
+            }
+            guard !rows.isEmpty else { return }
+
+            let alignments = table.columnAlignments.map { alignment -> TableStructure.ColumnAlignment in
+                switch alignment {
+                case .center: return .center
+                case .right: return .trailing
+                case .left, .none: return .leading
+                }
+            }
+            tables.append(TableStructure(
+                headerLine: headerLine,
+                delimiterLine: headerLine + 1,
+                lastLine: lastLine,
+                alignments: alignments,
+                rows: rows
+            ))
+        }
+
+        private func tableRow(cells: [Table.Cell]) -> TableStructure.Row? {
+            guard let first = cells.first, let line = sourceLine(of: first) else { return nil }
+            var contents: [Range<Int>] = []
+            for cell in cells {
+                // colspan 0 的单元格被前一格覆盖，没有自己的源码区间。
+                guard cell.colspan > 0, let range = byteRange(cell) else { continue }
+                contents.append(range)
+            }
+            guard !contents.isEmpty else { return nil }
+
+            let bounds = lines[line]
+            // 结构区从行首的 `|`（若有）开始；没有行首管线符时从首格内容开始。
+            var gapStart = pipe(endingAt: contents[0].lowerBound)?.lowerBound ?? contents[0].lowerBound
+            var structureCells: [TableStructure.Cell] = []
+            structureCells.reserveCapacity(contents.count)
+            for content in contents {
+                let ink = inkRange(in: content)
+                structureCells.append(TableStructure.Cell(
+                    content: content,
+                    ink: ink,
+                    leadingGap: gapStart..<max(gapStart, ink.lowerBound),
+                    trailingPipe: pipe(startingAt: content.upperBound)
+                ))
+                gapStart = ink.upperBound
+            }
+            let rowEnd = min(
+                max(gapStart, structureCells[structureCells.count - 1].trailingPipe?.upperBound
+                    ?? contents[contents.count - 1].upperBound),
+                bounds.end
+            )
+            return TableStructure.Row(
+                line: line,
+                cells: structureCells,
+                trailingGap: gapStart..<rowEnd
+            )
+        }
+
+        /// 单元格内去掉两侧空白后的区间。全为空白时长度为 0。
+        private func inkRange(in content: Range<Int>) -> Range<Int> {
+            var lower = content.lowerBound
+            var upper = content.upperBound
+            let isBlank: (Int) -> Bool = { self.bytes[$0] == 0x20 || self.bytes[$0] == 0x09 }
+            while lower < upper, isBlank(lower) { lower += 1 }
+            while upper > lower, isBlank(upper - 1) { upper -= 1 }
+            return lower..<upper
+        }
+
+        /// `offset` 处正好是一个 `|` 时返回它的区间。
+        private func pipe(startingAt offset: Int) -> Range<Int>? {
+            guard offset >= 0, offset < bytes.count, bytes[offset] == 0x7C else { return nil }
+            return offset..<(offset + 1)
+        }
+
+        /// `offset` 前一个字节正好是 `|` 时返回它的区间。
+        private func pipe(endingAt offset: Int) -> Range<Int>? {
+            pipe(startingAt: offset - 1)
         }
 
         mutating func visitThematicBreak(_ thematicBreak: ThematicBreak) {
@@ -314,6 +464,40 @@ public nonisolated struct MarkdownSemantics: Sendable {
                                    line: sourceLine(of: link) ?? 0))
             }
             descendInto(link)
+        }
+
+        /// 图片 `![标签](目的地)`。边界解析复用链接的字节扫描：AST 区间以 `!`
+        /// 开头，跳过它之后就是 `[…](…)` 的形状。
+        mutating func visitImage(_ image: Image) {
+            guard let range = byteRange(image), let line = sourceLine(of: image),
+                  range.lowerBound + 1 < range.upperBound,
+                  bytes[range.lowerBound] == 0x21, bytes[range.lowerBound + 1] == 0x5B,
+                  let syntax = MarkdownSemantics.parseBounds(
+                    (range.lowerBound + 1)..<range.upperBound, bytes: bytes)
+            else {
+                descendInto(image)
+                return
+            }
+            images.append(.init(
+                openBracket: range.lowerBound..<(range.lowerBound + 2),
+                label: syntax.label,
+                tail: syntax.tail,
+                destination: syntax.destination,
+                line: line
+            ))
+            if isSoleContentOfLine(range, line: line) {
+                blockImageLines.insert(line)
+            }
+            descendInto(image)
+        }
+
+        /// 语法区间是否独占整行（两侧只允许空格与制表符）。
+        private func isSoleContentOfLine(_ range: Range<Int>, line: Int) -> Bool {
+            let bounds = lines[line]
+            guard range.lowerBound >= bounds.start, range.upperBound <= bounds.end else { return false }
+            let isBlank: (UInt8) -> Bool = { $0 == 0x20 || $0 == 0x09 }
+            return bytes[bounds.start..<range.lowerBound].allSatisfy(isBlank)
+                && bytes[range.upperBound..<bounds.end].allSatisfy(isBlank)
         }
 
         mutating func defaultVisit(_ markup: Markup) {

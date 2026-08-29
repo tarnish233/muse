@@ -26,6 +26,7 @@ struct EditorView: NSViewRepresentable {
         textView.autoresizingMask = [.width]
         textView.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
         textView.textContainer?.widthTracksTextView = true
+        textView.previewBaseURL = document.fileURL?.deletingLastPathComponent()
         scrollView.documentView = textView
 
         textView.delegate = context.coordinator
@@ -40,6 +41,10 @@ struct EditorView: NSViewRepresentable {
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         // 只同步派生的呈现模式；正文仍由 NSTextStorage 独占，禁止从 SwiftUI 回写。
         document.renderer.setPresentationMode(isSourceMode ? .source : .rendered)
+        // 另存为/首次保存后文档 URL 可能变化，相对路径图片的解析基准随之更新。
+        if let textView = scrollView.documentView as? EditorTextView {
+            textView.previewBaseURL = document.fileURL?.deletingLastPathComponent()
+        }
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate {

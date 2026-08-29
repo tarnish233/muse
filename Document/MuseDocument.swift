@@ -24,6 +24,25 @@ public final class MuseDocument: NSDocument {
         buffer.textStorage.replaceCharacters(in: full, with: SampleMarkdown.text)
     }
 
+    /// 相对路径图片的解析基准（文档所在目录）。
+    ///
+    /// 图片的呈现尺寸决定行高，属于**属性**，所以基准必须在渲染时就在手上——
+    /// 不能留给绘制层临时解析。未保存的文档没有目录，`ImageResolver` 会退回主包
+    /// 资源，示例文档自带的图因此开箱可见。
+    ///
+    /// 挂在 `fileURL` 上而不是 `read(from:)` 里：打开、另存为、自动保存搬家都会
+    /// 改 `fileURL`，这是唯一覆盖全部路径的那一处。跳一次 MainActor 而不用
+    /// `assumeIsolated`——AppKit 的异步保存路径不保证在主线程回写，宁可晚一轮，
+    /// 不要冒断言崩溃的风险。
+    nonisolated public override var fileURL: URL? {
+        didSet {
+            let directory = fileURL?.deletingLastPathComponent()
+            Task { @MainActor [weak self] in
+                self?.renderer.imageBaseURL = directory
+            }
+        }
+    }
+
     // 以下重写均为 nonisolated（NSDocument 的声明在主线程外也可见），
     // 文档读写由 AppKit 在主线程调度，内部用 assumeIsolated 回到 MainActor 访问 buffer。
 

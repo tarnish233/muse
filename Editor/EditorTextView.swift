@@ -50,7 +50,9 @@ final class EditorTextView: NSTextView {
             .underlineStyle: NSUnderlineStyle.single.rawValue,
         ]
 
-        textView.textContainerInset = NSSize(width: 20, height: 16)
+        // 左侧 28pt 纯粹是正文的左页边距。列表 marker 的悬挂 lane 落在列表自己的
+        // 缩进步长里（见 Theme.listIndentStep），不再借用这块页边距。
+        textView.textContainerInset = NSSize(width: 28, height: 16)
         return textView
     }
 
@@ -66,5 +68,115 @@ final class EditorTextView: NSTextView {
             layoutManager.textViewportLayoutController.layoutViewport()
         }
         needsDisplay = true
+    }
+
+    // MARK: - 复选框光标
+
+    /// 复选框上换成小手光标（对标 Typora：它是可点的控件，不是文字）。
+    ///
+    /// AppKit 按「后加的矩形在上」解析光标区，所以先让 `NSTextView` 铺好它的
+    /// I 型光标，再把复选框那几块盖上去。
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        for rect in taskCheckboxCursorRects() {
+            addCursorRect(rect, cursor: .pointingHand)
+        }
+    }
+
+    /// 可见区域内每个复选框的矩形，视图坐标。
+    ///
+    /// 落点与命中判定共用 `taskCheckboxHitTarget()`——鼠标变小手的范围因此**恒等于**
+    /// 真正能点中的范围，不会出现「显示可点却点不动」。
+    ///
+    /// 只走可见区间：从视口顶端那个 fragment 起枚举，越过视口底端立刻收手，
+    /// 于是长文档里这条路的代价与文档长度无关。
+    func taskCheckboxCursorRects() -> [CGRect] {
+        guard let layoutManager = textLayoutManager else { return [] }
+        let inset = textContainerOrigin
+        let visible = visibleRect
+        guard !visible.isEmpty else { return [] }
+
+        let topInContainer = visible.minY - inset.y
+        guard let first = layoutManager.textLayoutFragment(
+            for: CGPoint(x: 0, y: max(0, topInContainer))
+        ) else { return [] }
+
+        var rects: [CGRect] = []
+        layoutManager.enumerateTextLayoutFragments(
+            from: first.rangeInElement.location,
+            options: [.ensuresLayout]
+        ) { fragment in
+            let frame = fragment.layoutFragmentFrame
+            if frame.minY + inset.y > visible.maxY { return false }
+            if let fragment = fragment as? MuseLayoutFragment,
+               let target = fragment.taskCheckboxHitTarget() {
+                rects.append(target.frame.offsetBy(dx: inset.x, dy: inset.y))
+            }
+            return true
+        }
+        return rects
+    }
+
+    /// 复选框位置只随「重排」和「滚动」变化，两者都不改文本视图自身的 bounds，
+    /// 所以 AppKit 不会自动重算光标区——这里显式失效。
+    private func invalidateCheckboxCursorRects() {
+        window?.invalidateCursorRects(for: self)
+    }
+
+    override func layout() {
+        super.layout()
+        invalidateCheckboxCursorRects()
+    }
+
+    /// 观察 clip view 的 bounds 变化来接住滚动。
+    ///
+    /// 刻意用 selector 版的注册：NotificationCenter 对它持零化弱引用，视图析构时
+    /// 登记自动失效，不需要在 `deinit` 里注销——而 Swift 6 的 nonisolated deinit
+    /// 本来就碰不到非 Sendable 的 token。
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        NotificationCenter.default.removeObserver(
+            self, name: NSView.boundsDidChangeNotification, object: nil
+        )
+        guard let clipView = enclosingScrollView?.contentView else { return }
+        clipView.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(clipViewBoundsDidChange),
+            name: NSView.boundsDidChangeNotification,
+            object: clipView
+        )
+    }
+
+    @objc private func clipViewBoundsDidChange() {
+        invalidateCheckboxCursorRects()
+    }
+
+    // MARK: - 图片预览（M5）
+
+    /// 相对路径图片的解析基准（文档所在目录），由 EditorView 挂接时写入。
+    var previewBaseURL: URL?
+
+    private var imagePreviewPopover: NSPopover?
+
+    /// 点击点所在字符带 `.museImageDestination` 属性时返回目的地字符串。
+    func imageDestination(at point: CGPoint) -> String? {
+        guard let storage = textStorage, storage.length > 0 else { return nil }
+        let index = min(max(0, characterIndex(for: point)), storage.length - 1)
+        return storage.attribute(.museImageDestination, at: index, effectiveRange: nil) as? String
+    }
+
+    /// 在点击处弹出图片预览。transient 行为：点击别处自动关闭。
+    func showImagePreview(destination: String, at point: CGPoint) {
+        imagePreviewPopover?.close()
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.contentViewController = ImagePreviewController(
+            destination: destination,
+            baseURL: previewBaseURL
+        )
+        popover.contentSize = NSSize(width: 380, height: 280)
+        popover.show(relativeTo: NSRect(origin: point, size: .zero), of: self, preferredEdge: .maxY)
+        imagePreviewPopover = popover
     }
 }

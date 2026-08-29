@@ -5,6 +5,10 @@ import Testing
 /// M0 性能基准：20KB / 200KB（混合中文 + markdown 构造）的
 /// 「扫描 + 索引」与「属性批量应用」耗时。目标（v0.2 4.6）不作为断言门槛，
 /// 只记录基线数据；断言上限为"不死循环/明显退化"的粗防线。
+///
+/// 语料刻意把**表格与块图片**也算进去：这两种块的样式要跨行量列宽、要解析图片
+/// 路径，是全篇里最贵的一档。语料里每 ~150 字节就有一张表，比任何真实文档都密集，
+/// 因此这里的数字是上界而不是典型值。
 @Suite(.serialized) @MainActor struct PerformanceTests {
     let clock = ContinuousClock()
 
@@ -28,6 +32,13 @@ import Testing
         ```swift
         func sample() -> Int { return 42 } // 代码块
         ```
+
+        | 列 A | 列 B | 列 C |
+        |---|:---:|---:|
+        | 即时渲染 | ✅ | 42 |
+        | table row 中英混排 | ok | 1024 |
+
+        ![块图片](corpus-image.png)
 
         ---
 
@@ -58,7 +69,14 @@ import Testing
             _ = RenderEngine().render(package: package, selection: NSRange(location: 0, length: 0), into: storage)
         }
         print("[PERF] 1MB 全管线: \(ms(parseDuration)) ms, 字数: \(source.utf16.count)")
-        #expect(ms(parseDuration) < 3000) // 仅防明显退化
+        // 仅防明显退化。Debug 下 swift-markdown 带编译器插桩，解析本身就占大头
+        // （实测 200KB 解析 Debug 110ms vs Release 86ms），产品门槛以 Release 为准。
+        // 语料在表格/块图片加入后变密，实测 Release 2149ms / Debug 3016ms。
+        #if DEBUG
+        #expect(ms(parseDuration) < 5000)
+        #else
+        #expect(ms(parseDuration) < 3000)
+        #endif
     }
 
     @Test func perfDirtyApply200KB() {

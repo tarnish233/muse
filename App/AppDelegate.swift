@@ -65,6 +65,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         editMenu.addItem(withTitle: "拷贝", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
         editMenu.addItem(withTitle: "粘贴", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         editMenu.addItem(withTitle: "全选", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editMenu.addItem(.separator())
+
+        // 原生查找替换：action 走响应链到 NSTextView，tag 是 NSTextFinder.Action。
+        let findItem = NSMenuItem()
+        editMenu.addItem(findItem)
+        let findMenu = NSMenu(title: "查找")
+        func finderAction(_ title: String, _ key: String, _ tag: NSTextFinder.Action,
+                          modifiers: NSEvent.ModifierFlags = [.command]) -> NSMenuItem {
+            let item = NSMenuItem(
+                title: title,
+                action: #selector(NSTextView.performTextFinderAction(_:)),
+                keyEquivalent: key
+            )
+            item.tag = tag.rawValue
+            item.keyEquivalentModifierMask = modifiers
+            return item
+        }
+        findMenu.addItem(finderAction("查找…", "f", .showFindInterface))
+        findMenu.addItem(finderAction("查找并替换…", "f", .showReplaceInterface,
+                                      modifiers: [.command, .option]))
+        findMenu.addItem(.separator())
+        findMenu.addItem(finderAction("下一个", "g", .nextMatch))
+        findMenu.addItem(finderAction("上一个", "g", .previousMatch,
+                                      modifiers: [.command, .shift]))
+        findItem.submenu = findMenu
+
         editMenuItem.submenu = editMenu
 
         let viewMenuItem = NSMenuItem()

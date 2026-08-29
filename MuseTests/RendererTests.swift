@@ -1020,6 +1020,33 @@ import Testing
         #expect(abs(unchecked[2] - unchecked[0]) < 0.03, "未勾选态应中性：\(unchecked)")
     }
 
+    /// 小手光标的范围必须**恒等于**真正能点中的范围。
+    ///
+    /// 两者分开算过一次就会漂：显示可点却点不动，或者反过来。这里断言每个光标矩形
+    /// 的中心都被点击命中判定接受，且数量与任务项数一致。
+    @Test func taskCheckboxCursorRectsMatchTheClickableRegion() throws {
+        let source = "- [ ] 待办一\n- [x] 完成\n普通段落\n- [ ] 待办二"
+        let storage = NSTextStorage(string: source)
+        let textView = EditorTextView.make(textStorage: storage)
+        textView.frame = NSRect(x: 0, y: 0, width: 480, height: 400)
+        textView.textContainer?.containerSize = NSSize(
+            width: 480, height: CGFloat.greatestFiniteMagnitude)
+
+        let package = engine.prepare(source)
+        _ = engine.render(package: package, selection: nil, into: storage)
+        let layoutManager = try #require(textView.textLayoutManager)
+        layoutManager.ensureLayout(for: layoutManager.documentRange)
+
+        let rects = textView.taskCheckboxCursorRects()
+        #expect(rects.count == 3, "三个任务项应各有一块小手区域，实得 \(rects.count)")
+        for rect in rects {
+            let center = CGPoint(x: rect.midX, y: rect.midY)
+            #expect(
+                textView.taskCheckboxToggleRange(at: center) != nil,
+                "光标矩形 \(rect) 的中心点击不中复选框"
+            )
+        }
+    }
 
     /// 复选框始终是复选框：光标落在任务行、甚至整行被拖选，都不把 `- [ ] `
     /// 变回源码（对标 Typora）。

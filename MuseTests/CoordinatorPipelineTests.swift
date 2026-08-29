@@ -392,4 +392,51 @@ import Testing
         #expect(totalMarkers > 5_000) // 语料确认有大量 marker
         #expect(coordinator.lastReconcileWriteCount < totalMarkers / 10)
     }
+
+    // MARK: - 真实管线下的列表续行（缺陷 17）
+    //
+    // TypingBehaviorsTests 里的用例都用同步预渲染或干脆不渲染来构造两种极端。
+    // 这一条挂真实 RenderCoordinator、走真实的 Task.detached 解析与主线程应用，
+    // 断言「渲染有没有追上都必须能续行」——这正是手动验收本来要看的东西，
+    // 而且可重复。
+
+    @Test func listContinuesWithRealRendererWhetherOrNotStyleHasLanded() async throws {
+        let body = PerformanceTests.corpus(kb: 200) + "\n正文段落\n"
+        let storage = NSTextStorage(string: body)
+        let coordinator = RenderCoordinator()
+        coordinator.attach(storage: storage)
+        coordinator.onTextEdited = {}
+        let textView = EditorTextView.make(textStorage: storage)
+        textView.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
+        let window = NSWindow(
+            contentRect: textView.frame,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = textView
+        coordinator.textView = textView
+        defer { window.contentView = nil }
+
+        // 首轮渲染落地，模拟「打开文档后开始编辑」。
+        storage.replaceCharacters(in: NSRange(location: 0, length: 0), with: "")
+        #expect(await waitForApplied(coordinator, atLeast: 1, timeoutMs: 60_000))
+
+        // A) 逐字输入后**立刻**回车：200KB 上派生属性还没追上（实测 343ms）。
+        textView.setSelectedRange(NSRange(location: (storage.string as NSString).length, length: 0))
+        for character in "- alpha" {
+            textView.insertText(String(character), replacementRange: NSRange(location: NSNotFound, length: 0))
+        }
+        let beforeStyleLands = textView.performSmartNewline()
+        #expect(beforeStyleLands, "渲染未追上时也必须续行")
+        #expect(storage.string.hasSuffix("- alpha\n- "))
+
+        // B) 等派生属性落地后再回车，走的是权威属性那条路。
+        textView.insertText("beta", replacementRange: NSRange(location: NSNotFound, length: 0))
+        let revision = coordinator.appliedRevision
+        #expect(await waitForApplied(coordinator, atLeast: revision + 1, timeoutMs: 60_000))
+        let afterStyleLands = textView.performSmartNewline()
+        #expect(afterStyleLands, "属性落地后同样必须续行")
+        #expect(storage.string.hasSuffix("- alpha\n- beta\n- "))
+    }
 }

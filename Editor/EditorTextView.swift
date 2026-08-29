@@ -8,6 +8,24 @@ final class EditorTextView: NSTextView {
     /// 块级视觉的 fragment 工厂（layoutManager.delegate 是 unowned，需强引用持有）。
     private var fragmentProvider: MuseLayoutFragmentProvider?
 
+    /// Closer inserted by Muse for the active symmetric pair. Its validity is
+    /// tied to the view's edit epoch: any other edit invalidates the pair, so
+    /// locations can never go stale (缺陷 13：取代整篇字符串快照的 O(n) 比较).
+    private struct PendingPair {
+        let marker: String
+        let openerLocation: Int
+        let closerLocation: Int
+        let epoch: Int
+    }
+    private var pendingPair: PendingPair?
+    /// 每次真实文本变化自增（didChangeText 是 NSTextView 所有编辑路径的汇合点）。
+    private var editEpoch = 0
+
+    override func didChangeText() {
+        editEpoch += 1
+        super.didChangeText()
+    }
+
     static func make(textStorage: NSTextStorage) -> EditorTextView {
         // TextKit 2 标准手工栈：NSTextStorage → NSTextContentStorage → NSTextLayoutManager → NSTextContainer。
         let contentStorage = NSTextContentStorage()
@@ -150,6 +168,398 @@ final class EditorTextView: NSTextView {
 
     @objc private func clipViewBoundsDidChange() {
         invalidateCheckboxCursorRects()
+    }
+
+    // MARK: - M4 editing behavior
+
+    /// Called from the NSTextView delegate command hook. Returning false lets
+    /// AppKit perform its normal newline command unchanged.
+    func performSmartNewline(selectedRanges ranges: [NSValue]? = nil) -> Bool {
+        pendingPair = nil
+        let ranges = ranges ?? selectedRanges
+        guard let selection = ranges.first?.rangeValue else { return false }
+        guard hasMarkedText() == false,
+              ranges.count == 1,
+              let blockContext = typingBlockContext(at: selection.location),
+              let edit = TypingBehaviors.newlineEdit(
+                in: string as NSString,
+                selection: selection,
+                blockContext: blockContext
+              )
+        else { return false }
+
+        breakUndoCoalescing()
+        let manager = undoManager
+        manager?.beginUndoGrouping()
+        super.insertText(edit.replacement, replacementRange: edit.range)
+        setSelectedRange(edit.selectionAfter)
+        manager?.endUndoGrouping()
+        breakUndoCoalescing()
+        return true
+    }
+
+    /// Block context for the line holding `location`, or `nil` when there is no
+    /// line to classify.
+    ///
+    /// Rendered attributes are authoritative where they exist, but they trail the
+    /// keystroke by far more than the pause before a user presses Enter —
+    /// measured 37.9ms at 20KB, 343ms at 200KB and 1.83s at 1MB from the last
+    /// keystroke to `.museBlock` landing. Requiring them made a freshly typed
+    /// list item fail to continue, so resolution happens in three tiers: an
+    /// authoritative veto, an authoritative accept, then the line's own shape.
+    private func typingBlockContext(at location: Int) -> TypingBehaviors.BlockContext? {
+        let source = string as NSString
+        guard source.length > 0 else { return nil }
+
+        if let index = lineContentIndex(in: source, at: location) {
+            let block = textStorage?.attribute(.museBlock, at: index, effectiveRange: nil) as? String
+
+            // Veto tier. A code fence owns `.museBlock` across the whole block
+            // including its line terminators, and text typed inside inherits it
+            // through typingAttributes, so it is present even on a brand-new
+            // interior line and even before that line has been re-rendered
+            // (verified against real AppKit). This is what keeps the shape
+            // fallback below from injecting a bullet into someone's code.
+            if block == BlockVisual.codeFence.rawValue || block == BlockVisual.rule.rawValue {
+                return .other
+            }
+
+            // Accept tier. A container block owns `.museBlock` for the whole line,
+            // so `> - item` reports "quote" — but the quote only writes that one
+            // key, leaving the list marker attributes intact underneath. They are
+            // therefore the reliable structural signal, and reading them is what
+            // makes lists inside blockquotes continue.
+            if textStorage?.attribute(.museListMarkerLocation, at: index, effectiveRange: nil) != nil {
+                let depth = (textStorage?.attribute(.museListDepth, at: index, effectiveRange: nil) as? NSNumber)?.intValue ?? 0
+                return .list(depth: depth)
+            }
+            if block == BlockVisual.heading.rawValue {
+                return .heading
+            }
+        }
+
+        // 属性还没落地（或从未渲染）。上面的否决层已经承担了「行自己回答不了」的
+        // 那个问题——围栏——剩下的按行形状判断是安全的。
+        return TypingBehaviors.lineShapeContext(in: source, at: location)
+    }
+
+    /// An index guaranteed to sit inside the line's own contents.
+    ///
+    /// `.museBlock` for a list or heading stops at the line's last content
+    /// character, so a caret parked on the terminator of `- item\nnext` would
+    /// otherwise read the *following* block's attributes and misclassify.
+    private func lineContentIndex(in source: NSString, at location: Int) -> Int? {
+        let clamped = max(0, min(location, source.length))
+        let line = source.lineRange(for: NSRange(location: clamped, length: 0))
+        var end = NSMaxRange(line)
+        while end > line.location {
+            let character = source.character(at: end - 1)
+            guard character == 0x0A || character == 0x0D else { break }
+            end -= 1
+        }
+        guard end > line.location else { return nil }
+        return min(max(clamped, line.location), end - 1)
+    }
+
+    override func insertText(_ insertString: Any, replacementRange: NSRange) {
+        guard hasMarkedText() == false,
+              selectedRanges.count == 1,
+              let plainString = insertString as? String
+        else {
+                pendingPair = nil
+            super.insertText(insertString, replacementRange: replacementRange)
+            return
+        }
+
+        let effectiveRange = replacementRange.location == NSNotFound
+            ? selectedRange()
+            : replacementRange
+        let activePair = pendingPair?.epoch == editEpoch ? pendingPair : nil
+        let allowMarkerUpgrade = canUpgrade(
+            activePair,
+            with: plainString,
+            at: effectiveRange
+        )
+        let allowCloserSkip = allowMarkerUpgrade == false
+            && effectiveRange.length == 0
+            && activePair?.marker.hasPrefix(plainString) == true
+            && activePair?.closerLocation == effectiveRange.location
+        pendingPair = nil
+        guard let edit = TypingBehaviors.pairEdit(
+            in: string as NSString,
+            input: plainString,
+            selection: effectiveRange,
+            allowMarkerUpgrade: allowMarkerUpgrade,
+            allowCloserSkip: allowCloserSkip
+        ) else {
+            super.insertText(insertString, replacementRange: replacementRange)
+            pendingPair = updatedPendingPair(
+                activePair,
+                afterReplacing: effectiveRange,
+                with: plainString
+            )
+            return
+        }
+
+        if edit.replacement.isEmpty == false {
+            breakUndoCoalescing()
+            let manager = undoManager
+            manager?.beginUndoGrouping()
+            super.insertText(edit.replacement, replacementRange: edit.range)
+            setSelectedRange(edit.selectionAfter)
+            manager?.endUndoGrouping()
+            breakUndoCoalescing()
+        } else {
+            breakUndoCoalescing()
+            setSelectedRange(edit.selectionAfter)
+            breakUndoCoalescing()
+            if allowCloserSkip, let activePair {
+                let marker = activePair.marker as NSString
+                let consumedLength = (plainString as NSString).length
+                if consumedLength < marker.length {
+                    pendingPair = PendingPair(
+                        marker: marker.substring(from: consumedLength),
+                        openerLocation: activePair.openerLocation,
+                        closerLocation: edit.selectionAfter.location,
+                        epoch: editEpoch
+                    )
+                }
+            }
+        }
+        let markerLength = (plainString as NSString).length
+        if allowMarkerUpgrade, let activePair {
+            pendingPair = PendingPair(
+                marker: activePair.marker + plainString,
+                openerLocation: activePair.openerLocation,
+                closerLocation: edit.selectionAfter.location,
+                epoch: editEpoch
+            )
+        } else if effectiveRange.length == 0,
+                  edit.replacement == plainString + plainString,
+                  edit.selectionAfter.location == effectiveRange.location + markerLength
+        {
+            pendingPair = PendingPair(
+                marker: plainString,
+                openerLocation: effectiveRange.location,
+                closerLocation: edit.selectionAfter.location,
+                epoch: editEpoch
+            )
+        }
+    }
+
+    /// Consecutive marker input upgrades only the empty pair Muse just opened.
+    /// `*|*` has one supported upgrade (`**|**`); backtick runs may grow to any
+    /// length so code spans can safely contain shorter backtick runs.
+    private func canUpgrade(
+        _ pair: PendingPair?,
+        with input: String,
+        at range: NSRange
+    ) -> Bool {
+        guard let pair,
+              range.length == 0,
+              range.location == pair.closerLocation,
+              pair.closerLocation == pair.openerLocation + (pair.marker as NSString).length
+        else { return false }
+
+        if input == "*" { return pair.marker == "*" }
+        if input == "`" { return pair.marker.allSatisfy { $0 == "`" } }
+        return false
+    }
+
+    override func deleteBackward(_ sender: Any?) {
+        let selection = selectedRange()
+        guard hasMarkedText() == false,
+              selectedRanges.count == 1,
+              selection.length == 0,
+              let pair = pendingPair,
+              pair.epoch == editEpoch
+        else {
+            super.deleteBackward(sender)
+            return
+        }
+
+        let markerLength = (pair.marker as NSString).length
+        let pairRange = NSRange(location: pair.openerLocation, length: markerLength * 2)
+        guard selection.location == pair.closerLocation,
+              pair.closerLocation == pair.openerLocation + markerLength,
+              NSMaxRange(pairRange) <= (string as NSString).length
+        else {
+            super.deleteBackward(sender)
+            return
+        }
+
+        pendingPair = nil
+        guard let textStorage,
+              shouldChangeText(in: pairRange, replacementString: "")
+        else { return }
+
+        let deletedPair = textStorage.attributedSubstring(from: pairRange)
+        breakUndoCoalescing()
+        let manager = undoManager
+        manager?.beginUndoGrouping()
+        manager?.registerUndo(withTarget: self) { textView in
+            textView.insertText(
+                deletedPair,
+                replacementRange: NSRange(location: pairRange.location, length: 0)
+            )
+            textView.setSelectedRange(NSRange(location: pair.closerLocation, length: 0))
+        }
+        textStorage.replaceCharacters(in: pairRange, with: "")
+        didChangeText()
+        setSelectedRange(NSRange(location: pair.openerLocation, length: 0))
+        manager?.endUndoGrouping()
+        breakUndoCoalescing()
+    }
+
+    private func updatedPendingPair(
+        _ pair: PendingPair?,
+        afterReplacing range: NSRange,
+        with replacement: String
+    ) -> PendingPair? {
+        guard let pair,
+              range.length == 0,
+              range.location >= pair.openerLocation + (pair.marker as NSString).length,
+              range.location <= pair.closerLocation
+        else { return nil }
+
+        let closerLocation = pair.closerLocation + (replacement as NSString).length
+        let source = string as NSString
+        let closerRange = NSRange(location: closerLocation, length: (pair.marker as NSString).length)
+        guard NSMaxRange(closerRange) <= source.length,
+              source.substring(with: closerRange) == pair.marker
+        else { return nil }
+        return PendingPair(
+            marker: pair.marker,
+            openerLocation: pair.openerLocation,
+            closerLocation: closerLocation,
+            epoch: editEpoch
+        )
+    }
+
+    /// Enter. Owning the command here rather than in the delegate's
+    /// `doCommandBy` hook means every host of this view gets list continuation,
+    /// and the production entry point is the one the tests drive.
+    override func insertNewline(_ sender: Any?) {
+        guard performSmartNewline() else {
+            super.insertNewline(sender)
+            return
+        }
+    }
+
+    /// ⌃Return. `NSTextView`'s implementation inserts `NSLineSeparatorCharacter`
+    /// (U+2028, verified) — cmark does not treat that as a line break and
+    /// `MuseDocument` writes it straight back to disk, so redirect it to a plain
+    /// newline. No list continuation: ⌃Return and ⌥Return are the deliberate
+    /// escape hatch for "just give me a clean newline".
+    override func insertLineBreak(_ sender: Any?) {
+        insertText("\n", replacementRange: NSRange(location: NSNotFound, length: 0))
+    }
+
+    /// Whether a mouse event should be considered for a checkbox toggle at all.
+    ///
+    /// Split out from `mouseDown` so it can be tested directly: driving the full
+    /// `mouseDown` for a rejected event reaches `super`, which starts AppKit's
+    /// mouse-tracking loop and blocks waiting for a mouse-up that a unit test
+    /// never sends.
+    ///
+    /// Only the chords that change what a click means are excluded. Testing
+    /// `flags.isEmpty` over `deviceIndependentFlagsMask` (0xFFFF0000) instead
+    /// also demands Caps Lock, fn, the numeric keypad and the reserved high bits
+    /// all be clear — Caps Lock alone was silently swallowing every click.
+    static func isCheckboxToggleCandidate(_ event: NSEvent) -> Bool {
+        let blockingChords: NSEvent.ModifierFlags = [.command, .option, .control, .shift]
+        return event.type == .leftMouseDown
+            && event.clickCount == 1
+            && event.modifierFlags.isDisjoint(with: blockingChords)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        pendingPair = nil
+        let point = convert(event.locationInWindow, from: nil)
+        if Self.isCheckboxToggleCandidate(event),
+           hasMarkedText() == false,
+           isEditable,
+           taskCheckboxToggleRange(at: point) != nil
+        {
+            // Focus first, then edit. The old order evaluated the toggle inside the
+            // `if` condition and only became first responder afterwards, so a
+            // focusing click arriving from the sidebar mutated the document while
+            // the view was not even the responder.
+            window?.makeFirstResponder(self)
+            if toggleTaskCheckbox(at: point) { return }
+        }
+        if Self.isCheckboxToggleCandidate(event),
+           hasMarkedText() == false,
+           let destination = imageDestination(at: point)
+        {
+            window?.makeFirstResponder(self)
+            showImagePreview(destination: destination, at: point)
+            return
+        }
+        super.mouseDown(with: event)
+    }
+
+    /// Standard text replacement for the checkbox hit by `point`. The source
+    /// length stays unchanged, so the existing selection remains valid.
+    @discardableResult
+    func toggleTaskCheckbox(at point: CGPoint) -> Bool {
+        pendingPair = nil
+        guard let range = taskCheckboxToggleRange(at: point) else { return false }
+        let current = (string as NSString).substring(with: range)
+        guard current == " " || current.lowercased() == "x" else { return false }
+        let replacement = current == " " ? "x" : " "
+        // `shouldChangeText` 是 AppKit 问「这段文本能不能改」的官方入口：它既覆盖
+        // `isEditable`，也把否决权交给 delegate。不要用手写的 isEditable 检查代替，
+        // 那只覆盖其中一半。
+        guard shouldChangeText(in: range, replacementString: replacement) else { return false }
+
+        let selection = selectedRange()
+        breakUndoCoalescing()
+        let manager = undoManager
+        manager?.beginUndoGrouping()
+        super.insertText(replacement, replacementRange: range)
+        setSelectedRange(selection)
+        manager?.endUndoGrouping()
+        breakUndoCoalescing()
+        return true
+    }
+
+    /// Uses the actual TextKit 2 fragments and the same marker frame as the
+    /// renderer. No TextKit 1 layout manager or duplicate hit geometry exists.
+    func taskCheckboxToggleRange(at point: CGPoint) -> NSRange? {
+        guard let layoutManager = textLayoutManager,
+              let contentManager = layoutManager.textContentManager
+        else { return nil }
+
+        let containerPoint = CGPoint(
+            x: point.x - textContainerOrigin.x,
+            y: point.y - textContainerOrigin.y
+        )
+        // 悬挂式 marker 画在容器原点左侧的留白里，点击落点可能解析不到
+        // fragment；按同一行带在正文区内重新解析一次，交给 hit frame 精确判定。
+        var resolved = layoutManager.textLayoutFragment(for: containerPoint)
+        if resolved == nil {
+            resolved = layoutManager.textLayoutFragment(for: CGPoint(
+                x: (textContainer?.size.width ?? 0) / 2,
+                y: containerPoint.y
+            ))
+        }
+        guard let fragment = resolved as? MuseLayoutFragment,
+              let target = fragment.taskCheckboxHitTarget(),
+              target.frame.contains(containerPoint)
+        else { return nil }
+
+        // 只需要元素起点：`offset(from:to:)` 要走一趟内容树，算元素长度是白花的
+        // 第二趟——它算出来从未被用到。
+        let elementStart = contentManager.offset(
+            from: contentManager.documentRange.location,
+            to: fragment.rangeInElement.location
+        )
+        let location = elementStart + target.toggleRange.location
+        guard location >= 0, location + target.toggleRange.length <= (self.string as NSString).length else {
+            return nil
+        }
+        return NSRange(location: location, length: target.toggleRange.length)
     }
 
     // MARK: - 图片预览（M5）

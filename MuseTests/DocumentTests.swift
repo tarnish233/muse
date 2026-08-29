@@ -31,6 +31,72 @@ import Testing
         }
     }
 
+    // MARK: - 行终止符（缺陷 P3 / D5）
+    //
+    // 存储层一律 LF，编辑层因此只需要认一种终止符；文件原本的终止符在写回时还原，
+    // 这样 Windows 协作者的 CRLF 文件保存后字节不变，不会变成整文件 diff。
+
+    @Test(arguments: ["\r\n", "\r"])
+    func nonLFTerminatorsAreNormalizedInStorageAndRestoredOnWrite(terminator: String) throws {
+        let document = MuseDocument()
+        let lines = ["# 标题", "", "- 列表项", "正文"]
+        let onDisk = lines.joined(separator: terminator) + terminator
+        try document.read(from: Data(onDisk.utf8), ofType: markdownType)
+
+        // 存储里只有 LF：编辑层不必懂 CRLF。
+        #expect(document.buffer.string == lines.joined(separator: "\n") + "\n")
+        #expect(document.buffer.string.contains("\r") == false)
+
+        // 写回时还原成文件原本的终止符，字节级往返一致。
+        let written = try document.data(ofType: markdownType)
+        #expect(written == Data(onDisk.utf8))
+    }
+
+    @Test func lfDocumentsStayLFOnWrite() throws {
+        let document = MuseDocument()
+        let source = "# 标题\n\n- 列表项\n"
+        try document.read(from: Data(source.utf8), ofType: markdownType)
+
+        let written = try document.data(ofType: markdownType)
+        #expect(written == Data(source.utf8))
+    }
+
+    /// 编辑之后写回，新插入的 LF 也要跟着还原成 CRLF——否则文件会变成混合终止符。
+    @Test func editsInheritTheDocumentTerminatorOnWrite() throws {
+        let document = MuseDocument()
+        try document.read(from: Data("- item\r\n".utf8), ofType: markdownType)
+        let storage = document.buffer.textStorage
+        storage.replaceCharacters(in: NSRange(location: storage.length, length: 0), with: "- next\n")
+
+        let written = try document.data(ofType: markdownType)
+        #expect(written == Data("- item\r\n- next\r\n".utf8))
+        #expect(String(data: written, encoding: .utf8)?.contains("\n\n") == false)
+    }
+
+    /// 混合终止符按**多数**归类，不是按第一处出现——否则一个 99% 是 LF、
+    /// 只有一处 CRLF 的文件会被整体改写成 CRLF。
+    @Test func mixedTerminatorsFollowTheMajority() throws {
+        let mostlyLF = "a\nb\nc\r\nd\ne\n"
+        #expect(MuseDocument.dominantLineEnding(in: mostlyLF) == .lf)
+
+        let mostlyCRLF = "a\r\nb\r\nc\nd\r\n"
+        #expect(MuseDocument.dominantLineEnding(in: mostlyCRLF) == .crlf)
+
+        // 平票时取最早出现的那一种。
+        #expect(MuseDocument.dominantLineEnding(in: "a\r\nb\n") == .crlf)
+        #expect(MuseDocument.dominantLineEnding(in: "a\nb\r\n") == .lf)
+
+        // 没有终止符、以及 NEL/LS/PS（都不是 CommonMark 的换行）都落到 LF。
+        #expect(MuseDocument.dominantLineEnding(in: "no newline") == .lf)
+        #expect(MuseDocument.dominantLineEnding(in: "a\u{2028}b\u{0085}c") == .lf)
+
+        // 归一之后统一成主流终止符，这是刻意的保真度取舍。
+        let document = MuseDocument()
+        try document.read(from: Data(mostlyLF.utf8), ofType: markdownType)
+        #expect(document.buffer.string == "a\nb\nc\nd\ne\n")
+        #expect(try document.data(ofType: markdownType) == Data("a\nb\nc\nd\ne\n".utf8))
+    }
+
     @Test func roundTripPreservesSource() throws {
         let document = MuseDocument()
         let source = "# 标题\n\n**粗体** 与 `code`\n- 列表\n"
@@ -100,6 +166,21 @@ import Testing
 
         let reopened = try MuseDocument(contentsOf: paths.file, ofType: markdownType)
         #expect(reopened.buffer.string == edited)
+    }
+
+    /// M6 崩溃恢复的自动化守卫：in-place autosave 是 AppKit 崩溃恢复的载体
+    /// （崩溃后由系统从 autosave 版本恢复），其开关必须保持开启。
+    @Test func crashRecoveryRidesOnAutosaveInPlace() {
+        #expect(MuseDocument.autosavesInPlace)
+        #expect(MuseDocument.readableTypes.contains("net.daringfireball.markdown"))
+        #expect(MuseDocument.writableTypes.contains("net.daringfireball.markdown"))
+    }
+
+    /// 崩溃后 reopen 不应把恢复的草稿标成脏文档（与启动时示例同理）。
+    @Test func reopenedDocumentIsCleanAfterRead() throws {
+        let document = MuseDocument()
+        try load("# 恢复的草稿\n\n正文", into: document)
+        #expect(document.isDocumentEdited == false)
     }
 
     @Test func renderingDoesNotMarkDocumentDirty() throws {

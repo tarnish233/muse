@@ -97,13 +97,27 @@
 <body>
 <main>
   <header>
-    <p class="eyebrow">技术提案 · v0.6 · 2026-08-28</p>
+    <p class="eyebrow">技术提案 · v0.9 · 2026-08-28</p>
     <h1><span>#</span> Muse 技术方案</h1>
-    <p class="lede">一款极简即时渲染 Markdown 编辑器（对标 Typora），纯 macOS 原生实现。v0.6 已收口 M3 光标交互：保留 NSTextView 原生方向键、鼠标与选区语义，并在同一正文上加入安全的源码模式。</p>
+    <p class="lede">一款极简即时渲染 Markdown 编辑器（对标 Typora），纯 macOS 原生实现。v0.9 已关闭连续输入的整篇装饰退化，并抑制已取消解析任务争抢 CPU。</p>
     <div class="meta">
       <span>macOS 14+</span><span>Swift 6</span><span>AppKit · TextKit 2</span><span>SwiftUI</span><span>swift-markdown</span>
     </div>
   </header>
+
+  <section class="callout">
+    <h2><span class="num">M2</span>连续输入渲染管线修复（2026-08-28）</h2>
+    <p><code>RenderCoordinator</code> 不再在第二次未落地编辑后退化成整篇装饰。pending dirty range 始终维护在当前正文的 UTF-16 坐标系，支持前方插入平移、重叠删除收缩、多处编辑合并，并只在对应 revision 成功应用后清空。</p>
+    <p>swift-markdown 的同步解析不合作响应取消，因此新增 8ms 输入 burst 去抖；零间隔 11 键只启动一次最新快照解析，避免多个已取消任务并行争抢 CPU。</p>
+    <p>新增 6 项坐标、结构、真实管线与 200KB 性能回归；<strong>186 tests / 10 suites</strong> 全绿。Release 实测 200KB 单键 54.0ms、连续 11 键最后一键 66.7ms，最终 dirty 仅 12 / 132171 UTF-16 单元。</p>
+  </section>
+
+  <section class="callout">
+    <h2><span class="num">M4</span>第二批自动化完成（2026-08-28）</h2>
+    <p>列表 Enter 支持续项、任务状态继承、有序源码序号保持与空项退出；第二批新增多层缩进、引用内任务项和连续有序列表回归，插入新项不会重排后续兄弟项。</p>
+    <p>反引号 pair 可逐次升级为任意长度；包裹选区时按内容里的最长反引号 run 加一，选择最短安全 delimiter。三反引号、四反引号与波浪线围栏（含 info string）均验证不会在围栏体内误注入列表 marker。</p>
+    <p>任务 checkbox、列表与 pair 均补齐 redo；marked text 期间智能换行回退给系统；可访问值保持完整 Markdown 源码。没有引入新依赖，<strong>180 tests / 10 suites</strong> 全绿。M4 仍保持进行中，剩余真实中文 IME、真实窗口 checkbox 与 VoiceOver 人工 gate。</p>
+  </section>
 
   <section class="callout">
     <h2><span class="num">M3</span>光标交互收口（2026-08-28）</h2>
@@ -223,7 +237,7 @@
     <p>marker 字符始终保留，只改变视觉属性。列表/任务 marker 使用近零宽属性，块级视觉则通过自定义 <code>NSTextLayoutFragment</code> 绘制。M0 必测中文、emoji、组合字符、嵌套强调、跨行选区、换行、鼠标、方向键和 VoiceOver。</p>
 
     <h3>4.3 块级编辑行为</h3>
-    <p>列表续行/退出、标题断开、保守自动配对和块识别全部通过标准文本替换接口进入文档 undo manager。任务 checkbox 点击切换属于 M4：命中图形后将源码 <code>[ ]</code>/<code>[x]</code> 标准替换为一次 undo 操作；当前只绘制 checkbox，尚未提供点击切换。自动配对必须尊重选区、转义、已有闭合符号与 marked text；优先使用 NSTextView 的命令和替换入口，不直接吞掉所有 <code>keyDown</code>。</p>
+    <p>列表续行/退出、标题断开和保守自动配对均通过标准文本替换接口进入文档 undo manager。任务 checkbox 复用 fragment 的真实绘制几何命中，将源码 <code>[ ]</code>/<code>[x]</code> 标准替换为一次 undo 操作。自动配对尊重选区、转义、已有闭合符号与 marked text；使用 NSTextView 的命令和替换入口，不吞掉所有 <code>keyDown</code>。</p>
 
     <h3>4.4 中文输入法</h3>
     <p><code>hasMarkedText</code> 为真时，不对 marked range 应用可能影响输入与布局的属性；上屏后再建立 revision。后台解析不能抢占主线程。人工矩阵覆盖拼音、双拼、五笔和系统英文输入，以及强调、链接、列表、代码围栏内的 Enter/Escape/方向键。</p>
@@ -297,7 +311,7 @@
           <tr><td>M1 骨架</td><td>1 周</td><td>单一 text storage 所有权；open/save/autosave；SwiftUI 外壳</td></tr>
           <tr><td>M2 解析与渲染</td><td>1.5～2 周</td><td>SourceIndex、AST、revision 管线；Unicode 与未闭合语法测试；块级视觉 fragment 绘制</td></tr>
           <tr><td>M3 光标交互 · ✅ 通过</td><td>1.5～2 周</td><td>marker 回显、系统原生方向键/鼠标、跨行选区、同一正文源码模式；无 TextKit 1 fallback</td></tr>
-          <tr><td>M4 块行为</td><td>1 周</td><td>列表/标题行为；任务 checkbox 点击将源码 <code>[ ]</code>/<code>[x]</code> 标准替换；自动配对；复合操作一次撤销</td></tr>
+          <tr><td>M4 块行为 · 🚧 进行中</td><td>1 周</td><td>第二批自动化完成：多反引号、任意围栏、嵌套/连续列表、redo、marked text 与可访问值；真实 IME、checkbox 与 VoiceOver 人工 gate 待验收</td></tr>
           <tr><td>M5 收尾功能</td><td>1 周</td><td>图片预览、查找替换、源码模式打磨、（候选）表格渲染</td></tr>
           <tr><td>M6 稳定与发布准备</td><td>1～2 周</td><td>IME、autosave/reopen、恢复、性能、VoiceOver、主题与回归测试</td></tr>
         </tbody>
@@ -318,7 +332,7 @@
           <tr><td>IME 与异步渲染互相干扰</td><td class="priority p0">P0</td><td>跳过 marked range；快照 + revision；中文输入矩阵</td></tr>
           <tr><td>文档与 text view 双重真相</td><td class="priority p0">P0</td><td>EditorBuffer.textStorage 是唯一正文</td></tr>
           <tr><td>派生属性污染 undo</td><td class="priority p1">P1</td><td>undo 只记录源码；撤销后重算渲染</td></tr>
-          <tr><td>200KB 输入卡顿</td><td class="priority p1">P1</td><td>基准、后台解析、revision、变化块更新、block index</td></tr>
+          <tr><td>200KB 输入卡顿</td><td class="priority p1">P1</td><td>当前坐标 dirty range、revision、8ms burst 去抖、变化块更新与真实性能探针</td></tr>
           <tr><td>TextKit 2 意外降级</td><td class="priority p1">P1</td><td>显式创建；禁止 layoutManager；监听 fallback</td></tr>
           <tr><td>行内图片破坏源码 1:1</td><td class="priority p1">P1</td><td>MVP 使用悬浮/侧边预览</td></tr>
           <tr><td>表格、公式、高亮拖慢首版</td><td class="priority p2">P2</td><td>留在 Phase 2</td></tr>
@@ -340,7 +354,7 @@
           <li>undo 后正文、selection、渲染一致</li>
           <li>IME 候选、上屏、取消、Enter</li>
           <li>鼠标、方向键、跨 marker 选区</li>
-          <li>任务 checkbox 点击切换 <code>[ ]</code>/<code>[x]</code> 与一次 undo（M4；当前未实现）</li>
+          <li>任务 checkbox 点击切换 <code>[ ]</code>/<code>[x]</code> 与一次 undo（M4 首批自动化已覆盖）</li>
           <li>VoiceOver、Reduce Motion、高对比度</li>
         </ul>
       </div>
@@ -348,7 +362,8 @@
         <h3>性能与文档生命周期</h3>
         <ul>
           <li>20KB、200KB、1MB 固定语料</li>
-          <li>旧 revision 不覆盖新内容</li>
+          <li>旧 revision 不覆盖新内容，插入/删除后 dirty range 坐标正确</li>
+          <li>200KB 连续输入保持局部装饰，burst 只解析最新快照</li>
           <li>打开、保存、Save As、autosave、reopen</li>
           <li>外部文件变化与崩溃恢复</li>
           <li>多窗口/多文档 text storage 隔离</li>
@@ -363,14 +378,19 @@
     <ul>
       <li><a href="https://developer.apple.com/videos/play/wwdc2022/10090/">Apple：What's new in TextKit and text views</a></li>
       <li><a href="https://developer.apple.com/documentation/appkit/textkit">Apple：TextKit</a></li>
+      <li><a href="https://developer.apple.com/documentation/appkit/nstextviewdelegate/textview(_:docommandby:)">Apple：NSTextViewDelegate text command hook</a></li>
       <li><a href="https://developer.apple.com/documentation/appkit/nstextattachment">Apple：NSTextAttachment</a></li>
       <li><a href="https://github.com/swiftlang/swift-markdown">swift-markdown</a></li>
       <li><a href="https://github.com/swiftlang/swift-markdown/blob/main/Sources/Markdown/Infrastructure/SourceLocation.swift">swift-markdown SourceLocation</a></li>
+      <li><a href="https://github.com/MarkEdit-app/MarkEdit">MarkEdit：CodeMirror Markdown 命令与围栏交互参考</a></li>
+      <li><a href="https://github.com/coteditor/CotEditor">CotEditor：原生 AppKit 成对输入参考</a></li>
+      <li><a href="https://github.com/krzyzanowskim/STTextView">STTextView：TextKit 2 参考实现与缺陷清单</a></li>
+      <li><a href="https://github.com/CodeEditApp/CodeEditTextView">CodeEditTextView：自研编辑排版路线参考</a></li>
     </ul>
   </section>
 
   <footer>
-    <strong>下一步：</strong>进入 M4，实现列表续行/退出、标题行为、checkbox 图形命中、源码 <code>[ ]</code>/<code>[x]</code> 标准文本替换、自动配对和一次撤销；同时继续关闭 M0-3 的中文 IME 与 VoiceOver 人工 gate。当前 Debug、Release 均为 120 tests / 8 suites。
+    <strong>下一步：</strong>完成 M4 人工 gate：真实中文输入法候选/上屏/取消/Enter，真实窗口 checkbox 点击与 undo/redo，以及 VoiceOver 对隐藏 marker 的逐项朗读。当前 186 tests / 10 suites；连续输入的整篇装饰退化已关闭。
   </footer>
 </main>
 </body>

@@ -227,6 +227,7 @@ import Testing
 
     @Test func locationTracksSavedURLAndRendererBase() async {
         let document = MuseDocument()
+        document.fileType = markdownType
         let file = FileManager.default.temporaryDirectory
             .appending(path: "MuseLocationTests")
             .appending(path: "note.md")
@@ -242,6 +243,7 @@ import Testing
 
     @Test func rapidFileURLChangesApplyOnlyLatestLocation() async {
         let document = MuseDocument()
+        document.fileType = markdownType
         let root = FileManager.default.temporaryDirectory.appending(path: "MuseRapidLocationTests")
         let first = root.appending(path: "first.md")
         let second = root.appending(path: "second.md")
@@ -260,6 +262,7 @@ import Testing
 
     @Test func locationUsesStandardizedFileURL() async {
         let document = MuseDocument()
+        document.fileType = markdownType
         let root = FileManager.default.temporaryDirectory
         let unstandardized = root
             .appending(path: "folder")

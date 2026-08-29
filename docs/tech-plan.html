@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Muse 技术方案 v0.6</title>
+<title>Muse 技术方案 v1.3</title>
 <style>
   :root {
     color-scheme: light dark;
@@ -97,13 +97,33 @@
 <body>
 <main>
   <header>
-    <p class="eyebrow">技术提案 · v0.9 · 2026-08-28</p>
+    <p class="eyebrow">技术提案 · v1.3 · 2026-08-29</p>
     <h1><span>#</span> Muse 技术方案</h1>
-    <p class="lede">一款极简即时渲染 Markdown 编辑器（对标 Typora），纯 macOS 原生实现。v0.9 已关闭连续输入的整篇装饰退化，并抑制已取消解析任务争抢 CPU。</p>
+    <p class="lede">一款极简即时渲染 Markdown 编辑器（对标 Typora），纯 macOS 原生实现。v1.3 把排版、列表缩进与任务复选框按 Typora 实机截图校准，图片与表格改为真机可见的呈现，引用块的竖条不再断在第一行。</p>
     <div class="meta">
       <span>macOS 14+</span><span>Swift 6</span><span>AppKit · TextKit 2</span><span>SwiftUI</span><span>swift-markdown</span>
     </div>
   </header>
+
+  <section class="callout">
+    <h2><span class="num">v1.3</span>引用块连续性与任务复选框（2026-08-29）</h2>
+    <p><code>appendBlockQuote</code> 原先只在 BlockQuote 的<strong>首行</strong>产出一个 token，而 <code>.museBlock</code> 是绘制层按 fragment 读的——TextKit 2 里一个段落 = 一行 = 一个 fragment。于是第二行同时缺竖条、底色与折叠 <code>&gt;</code> 的人，引用块在第一行就断了。现改为逐行产出，行号统一走 <code>lineSpan(of:)</code>，token 的行与 <code>quoteLines</code> 同源。顺带修掉嵌套引用的既有缺陷：旧代码每层 marker 都从 <code>syntaxStart</code> 起算，<code>&gt; &gt; x</code> 的两层指向同一个 <code>&gt;</code>。已知残留：嵌套引用仍只画一条竖条、不额外缩进。</p>
+    <p>任务复选框按 Typora 实机截图实测重做，四项：任务标记<strong>不再随光标或拖选回显源码</strong>（它是可点击的控件，回显会让控件在编辑时消失、也让「点一下切换」失去落点；源码模式照旧逐字显示）；从 <code>☐</code>/<code>☑</code> 字形改为自绘圆角方框（12pt、圆角 2.5pt、描边 1.5pt/<code>#808080</code>、勾选填充 <code>#3478F6</code> + 白勾、方框到文字 9pt）；复选框上换小手光标，范围直接取 <code>taskCheckboxHitTarget()</code>，变小手的范围恒等于点得动的范围；完成项<strong>不改文字颜色</strong>（实测 Typora 勾选行与未勾选行文字色相同）。</p>
+    <p>两条被实测推翻的做法记录在此，免得再走：系统控件不行——macOS 26 把 <code>NSButton</code> 未勾选态改成实心浅灰块，而 WebKit 画 <code>input[type=checkbox]</code> 用它自己那套仿平台绘制、并不实例化 <code>NSButton</code>；跟随 <code>controlAccentColor</code> 也不行——本机它解析为 <code>#007AFF</code>，与 Typora 的 <code>#3478F6</code> 差 52 个红色分量。<strong>236 tests / 12 suites</strong> 全绿。</p>
+  </section>
+
+  <section class="callout">
+    <h2><span class="num">v1.2</span>排版与列表缩进对标 Typora（2026-08-29）</h2>
+    <p>排版按 Typora 默认主题（github.css）校准：body 行高 1.6（CJK 折算 multiple 1.35）、段距 0.8em 折算 11pt、标题字号 [36/28/24/20/16/16] 且上下 margin 加大、hr 加粗到 2px、引用竖线 4px 浅灰。代码围栏改为带垂直内边距的圆角通宽背景：<code>Theme.fenceParagraph</code> 撑出段落间距，绘制层经 <code>.museBlockRole</code> 反向延伸背景并画单侧圆角。</p>
+    <p>列表改用 <code>list-style-position: outside</code> 模型：<code>Theme.listIndentStep = 28</code>，整块列表比正文靠右一步，marker 悬挂在这一步撑出的 padding 里。这<strong>推翻了 v1.0 的几何</strong>——让 depth 1 的正文列等于 0 会把 marker lane 挤进文本容器的左页边距，列表看着比正文更靠左；而且回显 <code>-&nbsp;</code> 需要 18pt 却没有余量，TextKit 2 钳掉负行起点后整行右移，点进/点出顶层列表每次都跳一下。</p>
+    <p>marker 横向落点改为<strong>墨迹右缘贴正文列</strong>，回归相应从「量左缘 + 几何盒」改为「量位图墨迹右缘」：三层 •/◦/▪ 字形宽度不同（实测 •→◦ 差 9pt），左缘的差里含字形宽度差，右缘才是几何契约。</p>
+  </section>
+
+  <section class="callout">
+    <h2><span class="num">v1.1</span>图片与表格的真机修复（2026-08-29）</h2>
+    <p>v1.0 声称的「图片行内呈现」与「表格只读呈现」在真机上都不成立。图片用 <code>.attachment</code> 实现，而它只在 <code>NSAttachmentCharacter</code>（U+FFFC）上成立——<code>NSTextStorage</code> 的属性修复会把它从任何其他字符上抹掉，而「只写属性、不改字符」不允许插入该字符，所以一个像素都画不出来。现改为：独占一行的图片用 <code>minimumLineHeight</code> 预留行高、由 <code>MuseLayoutFragment</code> 绘制，加载不到的画带目的地文字的虚线占位框；<code>MuseDocument.fileURL</code> 的 didSet 把文档目录送到 <code>RenderCoordinator.imageBaseURL</code>，相对路径不再一律解析失败。</p>
+    <p>表格旧实现只是「等宽字体 + 通宽底色」，而等宽字体并不能让中文/emoji/ASCII 混排对齐（实测 <code>.monospacedSystemFont(13)</code>：<code>M</code> 8.04pt、<code>中</code> 12.90pt、<code>🎉</code> 19.00pt——<code>中</code> 并不是 ASCII 的两倍）。不许改字符就不能插制表符去用 <code>tabStops</code>，TextKit 2 也没有 TextKit 1 的字形替换钩子，<code>NSTextTable</code> 只在 TextKit 1 下生效。现在列宽由属性层实测量出、以 <code>.kern</code> 落在结构区首字符上，格线由绘制层画。</p>
+  </section>
 
   <section class="callout">
     <h2><span class="num">M2</span>连续输入渲染管线修复（2026-08-28）</h2>
@@ -148,7 +168,7 @@
       <ol>
         <li><code>NSTextStorage</code> 是编辑期唯一可变文本；<code>NSDocument</code> 不维护第二份可变正文。</li>
         <li>保存内容永远是完整 Markdown 源码；AST、token、渲染属性、图片与主题都是派生状态。</li>
-        <li>swift-markdown 负责语义 AST，<code>MarkdownTokenScanner</code> 只补编辑中的未闭合语法。</li>
+        <li>swift-markdown 负责语义 AST，<code>TokenScanner</code> 只补编辑中的未闭合语法。</li>
         <li><code>SourceIndex</code> 显式转换 UTF-8 源码位置与 UTF-16 <code>NSRange</code>。</li>
         <li>marker 零宽布局必须先通过 M0 的选区、换行、IME 与辅助功能验证。</li>
         <li>undo/redo 只记录源码修改；文本撤销后重新生成渲染。</li>
@@ -185,19 +205,26 @@
 │ MuseDocument → EditorBuffer → NSTextStorage          │
 │                    唯一可变文本                       │
 ├──────────────────────────────────────────────────────┤
-│ SwiftUI 外壳：窗口 · 侧栏 · 工具栏 · 设置 · 状态     │
+│ SwiftUI 外壳                                         │
+│ 窗口内容 · 侧栏 · 工具栏 · 设置 · 状态               │
 ├──────────────────────────────────────────────────────┤
 │ EditorTextView（NSTextView + TextKit 2）              │
 │ 原生输入 · 选区 · 滚动 · 查找 · 拼写检查 · undo       │
 ├──────────────────────────────────────────────────────┤
+│ Render Pipeline（后台）                              │
 │ String Snapshot + revision                           │
-│   ├─ SourceIndex：UTF-8 → UTF-16                     │
-│   ├─ swift-markdown：语义 AST                         │
-│   └─ MarkdownTokenScanner：精确 token                 │
+│   ├─ swift-markdown：AST = 语义 + 精确源码区间        │
+│   ├─ MarkerDeriver：父子区间相减 → marker 字节边界    │
+│   ├─ TokenScanner：仅补未闭合语法（编辑中态）         │
+│   └─ SourceIndex：UTF-8 → UTF-16 NSRange             │
 │                    ↓                                 │
 │ RenderSnapshot(revision, spans, markers, blocks)     │
 │                    ↓ 仅接受最新 revision             │
-│ 主线程批量应用派生属性                                │
+├──────────────────────────────────────────────────────┤
+│ 主线程输出（两层，缺一不可）                          │
+│   ├─ 属性层：字体/颜色/段落/marker 显隐 → NSTextStorage│
+│   └─ 绘制层：MuseLayoutFragment 画块级视觉            │
+│        由存储上的 .museBlock 属性驱动                 │
 └──────────────────────────────────────────────────────┘</pre>
 
     <h3>数据所有权</h3>
@@ -217,27 +244,32 @@
 
     <h3>目录结构</h3>
     <pre>muse/
-├─ App/          AppDelegate · AppShellView
-├─ Document/     MuseDocument · EditorBuffer
-├─ Editor/       EditorTextView · EditorView · Coordinator
-├─ Parsing/      MarkdownParser · TokenScanner · SourceIndex
-├─ Rendering/    RenderPipeline · RenderSnapshot · Engine · Theme
-├─ Behaviors/    TypingBehaviors
-└─ Tests/        SourceIndex · TokenScanner · Renderer · Behavior
-                 IMEIntegration · Performance</pre>
+├─ App/          AppDelegate（菜单/查找替换）· EditorWindowController · Settings
+├─ Document/     MuseDocument · EditorBuffer · RenderCoordinator · SampleMarkdown
+├─ Editor/       EditorTextView · EditorView · TypingBehaviors · ImagePreview
+│                WindowControlsGeometry · 自绘标题栏与三列外壳 · Workspace/
+├─ Parsing/      MarkdownSemantics · TokenScanner · LineBlockKind · TableStructure
+│                Token · SourceIndex
+├─ Rendering/    RenderEngine（属性层）· BlockLayoutFragment（绘制层）
+│                ImageResolver · TableLayout · Theme
+└─ MuseTests/    SourceIndex · TokenScanner · MarkdownSemantics · Renderer
+                 TableRendering · TypingBehaviors · VisualSnapshot
+                 WindowControlsGeometry · CoordinatorPipeline · Document
+                 Workspace · Performance</pre>
   </section>
 
   <section>
     <h2><span class="num">04</span>核心难点与对策</h2>
 
     <h3>4.1 源码区间：UTF-8、UTF-16 与 token</h3>
-    <p>swift-markdown 的 <code>SourceLocation</code> 使用 1-based 行号和 UTF-8 字节列；AppKit 使用 UTF-16。<code>SourceIndex</code> 为每行缓存两套起点并执行边界检查。AST 负责语义与精确源码区间，<code>MarkdownTokenScanner</code> 只补编辑中的未闭合语法；RenderEngine 最终只接收 UTF-16 <code>NSRange</code>。</p>
+    <p>swift-markdown 的 <code>SourceLocation</code> 使用 1-based 行号和 UTF-8 字节列；AppKit 使用 UTF-16。<code>SourceIndex</code> 为每行缓存两套起点并执行边界检查。AST 负责语义与精确源码区间，<code>TokenScanner</code> 只补编辑中的未闭合语法；RenderEngine 最终只接收 UTF-16 <code>NSRange</code>。</p>
 
     <h3>4.2 marker 隐藏与光标回显</h3>
     <p>marker 字符始终保留，只改变视觉属性。列表/任务 marker 使用近零宽属性，块级视觉则通过自定义 <code>NSTextLayoutFragment</code> 绘制。M0 必测中文、emoji、组合字符、嵌套强调、跨行选区、换行、鼠标、方向键和 VoiceOver。</p>
+    <p><strong>任务 checkbox 是「跟随光标回显」的唯一例外</strong>：它是可点击的控件，光标经过就变回 <code>- [ ] </code> 源码会让控件在编辑时消失，也让「点一下切换」失去落点。源码模式仍然逐字显示——那条路与光标无关。</p>
 
     <h3>4.3 块级编辑行为</h3>
-    <p>列表续行/退出、标题断开和保守自动配对均通过标准文本替换接口进入文档 undo manager。任务 checkbox 复用 fragment 的真实绘制几何命中，将源码 <code>[ ]</code>/<code>[x]</code> 标准替换为一次 undo 操作。自动配对尊重选区、转义、已有闭合符号与 marked text；使用 NSTextView 的命令和替换入口，不吞掉所有 <code>keyDown</code>。</p>
+    <p>列表续行/退出、标题行为和保守自动配对均通过标准文本替换接口进入文档 undo manager。<strong>标题内容起点 Enter 在标题上方插入空段落</strong>并把光标留在那里，标题本体完整保留（引用内的标题会带上 <code>&gt;</code> 前缀），空标题则退出标题。任务 checkbox 复用 fragment 的真实绘制几何命中，将源码 <code>[ ]</code>/<code>[x]</code> 标准替换为一次 undo 操作。自动配对尊重选区、转义、已有闭合符号与 marked text；使用 <code>NSResponder</code> 的命令入口（覆写 <code>insertNewline(_:)</code> 等）与标准替换入口，不吞掉所有 <code>keyDown</code>。属性尚未落地时的行归属回退到 swift-markdown 的单行解析（<code>LineBlockKind</code>，实测 14µs），不自己实现行级 CommonMark 规则。</p>
 
     <h3>4.4 中文输入法</h3>
     <p><code>hasMarkedText</code> 为真时，不对 marked range 应用可能影响输入与布局的属性；上屏后再建立 revision。后台解析不能抢占主线程。人工矩阵覆盖拼音、双拼、五笔和系统英文输入，以及强调、链接、列表、代码围栏内的 Enter/Escape/方向键。</p>
@@ -260,12 +292,18 @@
     <p>200KB 不达标时，自建 block index，只重扫受影响块，并低频使用全量 AST 校准；不依赖 swift-markdown 的公开增量解析能力。</p>
 
     <h3>4.7 图片</h3>
-    <p>常规 <code>NSTextAttachment</code> 与“源码字符不变”存在冲突。MVP 只提供图片语法样式、路径解析和悬浮/侧边预览；真正行内图片进入 Phase 2，再选择自定义 layout fragment、额外预览行/overlay，或明确引入显示文本与源码映射。</p>
+    <p><strong><code>NSTextAttachment</code> 这条路是死的，不是「暂时不做」。</strong><code>.attachment</code> 只在 <code>NSAttachmentCharacter</code>（U+FFFC）上成立：加在普通字符上时，<code>NSTextStorage</code> 的属性修复会在 <code>endEditing</code> 之后把它抹掉（不在编辑会话内则立刻就没），而「只写属性、不改字符」不允许插入 U+FFFC。回归守卫见 <code>attachmentAttributeIsStrippedFromOrdinaryCharacter</code>。</p>
+    <p>现在：<strong>独占一行的图片直接呈现在正文里</strong>——属性层用 <code>minimumLineHeight</code> 预留行高，<code>MuseLayoutFragment</code> 在撑高的行里画图，加载不到的画带目的地文字的虚线占位框，整段源码折叠。夹在正文中间的图片<strong>什么都不折叠</strong>：那一段不会被撑高去放图，折叠掉一半语法只会留下 <code>![标签</code> 这种看起来像打错字的残句；整段源码保留、由样式层弱化成 marker 色，点击仍然弹预览（<code>ImagePreview</code>，支持相对文档目录、<code>~</code> 与 http(s)）。相对路径的基准由 <code>MuseDocument.fileURL</code> 的 didSet 送到 <code>RenderCoordinator.imageBaseURL</code>——它必须每次渲染都传给引擎，因为块图片的呈现尺寸决定行高，是<strong>属性</strong>的一部分，不能等到绘制时才解析路径。</p>
 
-    <h3>4.8 块级视觉：绘制层</h3>
-    <p>列表圆点/序号/复选框、引用竖线、代码块背景和分隔线必须通过自定义 <code>NSTextLayoutFragment</code> 绘制。2026-08-27 截图复查发现：软换行 marker 不能按整个 paragraph fragment 高度居中，必须锚定首个 <code>NSTextLineFragment</code> 的真实 line geometry；二级无序 marker 不能只依赖字体 fallback 的 <code>◦</code>，否则可能视觉上仍是实心点。当前实现由 AST 写入的 <code>.museListDepth</code> 驱动 glyph 判定，并用矢量实心圆/空心圆/方块绘制；同层有序/无序 marker 使用段落缩进推导的固定槽位，有序文本按 Core Text glyph path bounds 补偿可见左边界，多位序号在槽内适配且不移动正文列。</p>
-    <p>任务 checkbox 的 checked marker 使用系统 accent 色，unchecked marker 使用外观感知的 <code>secondaryLabelColor</code>，浅色/深色均由调色板解析。本轮只完成颜色与绘制，不实现点击切换；图形命中、源码 <code>[ ]</code>/<code>[x]</code> 标准文本替换和一次撤销列入 M4。</p>
-    <p>本轮新增 6 项真实 TextKit 2/位图回归测试；最新 Debug 全量证据为 <strong>109 tests / 7 suites</strong>，其中 <code>RendererTests</code> 为 <strong>33 项</strong>。</p>
+    <h3>4.8 表格：列对齐只能靠 kern</h3>
+    <p>源码里的表格列是按<strong>字符个数</strong>对齐的，而中文/emoji/ASCII 在任何字体下宽度都不成整数比——实测 <code>.monospacedSystemFont(13)</code>：<code>M</code> 8.04pt、<code>中</code> 12.90pt、<code>🎉</code> 19.00pt，<code>中</code> 并不是 ASCII 的两倍，等宽字体也救不了。既然不许改字符，就不能插制表符去用 <code>tabStops</code>；TextKit 2 也没有 TextKit 1 的字形替换钩子（<code>NSGlyphProperty.elastic</code>），<code>NSTextTable</code> 更是只在 TextKit 1 下生效。</p>
+    <p>所以列宽由属性层实测量出，以 <code>.kern</code> 落在结构区（<code>|</code> 与填充空白）的首字符上，把每一列撑到同一边界；绘制层按 <code>.museTableColumns</code> 画单元格边框、表头底色与隔行底色。<code>TableStructure</code> 只描述「源码里什么在哪」（单元格墨迹、结构区、列对齐），区间取自 swift-markdown 的 <code>Table</code> AST——不是第二套表格解析；<code>TableLayout</code> 负责需要读字体的排版度量。光标进入表格时回显源码且不画格线；分隔行整行作为块级 marker 随光标显隐。表格的<strong>可视化编辑</strong>仍留 Phase 2。</p>
+
+    <h3>4.9 块级视觉：绘制层</h3>
+    <p>列表圆点/序号/复选框、引用竖线、代码块背景和分隔线必须通过自定义 <code>NSTextLayoutFragment</code> 绘制。2026-08-27 截图复查发现：软换行 marker 不能按整个 paragraph fragment 高度居中，必须锚定首个 <code>NSTextLineFragment</code> 的真实 line geometry；二级无序 marker 不能只依赖字体 fallback 的 <code>◦</code>，否则可能视觉上仍是实心点。当前实现由 AST 写入的 <code>.museListDepth</code> 驱动 glyph 判定，并用矢量实心圆/空心圆/方块绘制（矢量形状的墨迹盒由 <code>ListMarkerGeometry.unorderedInkBox</code> 统一给出，绘制与落点同源）。代码围栏的通宽背景经 <code>.museBlockRole</code> 反向延伸出段落间距、并只在首末行画单侧圆角。</p>
+    <p>列表 marker 的横向落点是<strong>墨迹右缘贴正文列</strong>（<code>list-style-position: outside</code> 模型）：<code>Theme.listIndentStep = 28</code>，深度 d 的正文列落在 d × 28，marker 悬挂在上一层与本层正文列之间那一步里。<code>markerLaneWidth</code> 只作为「宽到什么程度要缩字号」的预算，多位序号在预算内缩放且不移动正文列。正文列不能取 <code>layoutFragmentFrame.minX</code>（行首源码缩进已从行起点里扣掉，那是行起点不是正文列），而要向第一行问 marker 之后第一个字符的落点。</p>
+    <p>任务 checkbox 自绘圆角方框，几何与配色由 Typora 实机截图实测：checked 用 <code>#3478F6</code> 填充 + 白勾，unchecked 用 <code>#808080</code> 描边 + 白底，两者都按浅色/深色外观解析。<strong>不是 <code>☐</code>/<code>☑</code> 字形</strong>（字体回退下又细又方，圆角/勾形/填充都不可控），<strong>也不是系统控件</strong>（macOS 26 把 <code>NSButton</code> 未勾选态改成实心浅灰块，而 WebKit 画 <code>input[type=checkbox]</code> 用它自己那套仿平台绘制、并不实例化 <code>NSButton</code>）。落点、点击命中与小手光标区共用 <code>ListMarkerGeometry.taskCheckboxBox</code>，所以「变小手的范围」恒等于「点得动的范围」。完成项不改文字颜色。</p>
+    <p>块级视觉的回归断言必须经由 <code>layoutManager</code> 真实生产的 fragment，并落到位图像素上——例如三行引用必须有三个 fragment 各自自报引用视觉且都有墨迹，复选框两态用 marker 区域的<strong>均色</strong>而不是单点取样（方框正中会落在白勾上）。当前全量证据为 <strong>236 tests / 12 suites</strong>。</p>
     <p>独立 Debug App 窗口的本轮列表/checkbox 外观人工复查已通过；完整 M0-3 的 IME、VoiceOver、零宽 marker 与外观热切换清单仍需逐项执行。</p>
   </section>
 
@@ -277,9 +315,10 @@
         <ul>
           <li>标题、粗体、斜体、删除线、行内代码</li>
           <li>链接样式、点击打开、光标回显</li>
-          <li>图片语法与悬浮/侧边预览</li>
-          <li>无序、有序和任务列表的渲染（含嵌套层级与分级符号；checkbox 点击切换留到 M4）</li>
+          <li>图片语法样式、路径解析；独占一行的图片行内呈现，其余走点击预览</li>
+          <li>无序、有序和任务列表的渲染（含嵌套层级与分级符号；checkbox 可点击切换）</li>
           <li>代码围栏、引用、分隔线</li>
+          <li>GFM 表格只读呈现（kern 对齐网格）</li>
           <li>亮暗主题</li>
           <li>打开、保存、autosave、undo、源码模式</li>
           <li>查找替换与拼写检查</li>
@@ -289,8 +328,8 @@
       <div class="panel phase">
         <h3>不做 · Phase 2</h3>
         <ul>
-          <li>真正的零占位行内图片</li>
-          <li>表格可视化编辑</li>
+          <li>夹在正文中间的行内图片零占位呈现</li>
+          <li>表格可视化编辑（列宽拖拽、增删行列）</li>
           <li>数学公式</li>
           <li>代码块语法高亮</li>
           <li>大纲 / TOC</li>
@@ -311,9 +350,9 @@
           <tr><td>M1 骨架</td><td>1 周</td><td>单一 text storage 所有权；open/save/autosave；SwiftUI 外壳</td></tr>
           <tr><td>M2 解析与渲染</td><td>1.5～2 周</td><td>SourceIndex、AST、revision 管线；Unicode 与未闭合语法测试；块级视觉 fragment 绘制</td></tr>
           <tr><td>M3 光标交互 · ✅ 通过</td><td>1.5～2 周</td><td>marker 回显、系统原生方向键/鼠标、跨行选区、同一正文源码模式；无 TextKit 1 fallback</td></tr>
-          <tr><td>M4 块行为 · 🚧 进行中</td><td>1 周</td><td>第二批自动化完成：多反引号、任意围栏、嵌套/连续列表、redo、marked text 与可访问值；真实 IME、checkbox 与 VoiceOver 人工 gate 待验收</td></tr>
-          <tr><td>M5 收尾功能</td><td>1 周</td><td>图片预览、查找替换、源码模式打磨、（候选）表格渲染</td></tr>
-          <tr><td>M6 稳定与发布准备</td><td>1～2 周</td><td>IME、autosave/reopen、恢复、性能、VoiceOver、主题与回归测试</td></tr>
+          <tr><td>M4 块行为 · 🚧 进行中</td><td>1 周</td><td>自动化完成（含缺陷 13 收口）：列表续行/退出、标题上方插入空段落、自动配对、checkbox 点击与一次撤销；真实 IME、真实窗口 checkbox 与 VoiceOver 人工 gate 待验收</td></tr>
+          <tr><td>M5 收尾功能 · 🚧 进行中</td><td>1 周</td><td>查找替换、排版对标 Typora、表格对齐网格、块图片行内呈现均已真机复查；剩余待验收项为源码模式打磨</td></tr>
+          <tr><td>M6 稳定与发布准备 · 🚧 进行中</td><td>1～2 周</td><td>可自动化项完成：autosave 落盘、reopen 还原、崩溃恢复配置守卫、亮/暗主题与块视觉像素回归、性能达标；剩余 gate 为真实 IME 矩阵与 VoiceOver 人工验收</td></tr>
         </tbody>
       </table>
     </div>
@@ -327,15 +366,18 @@
         <thead><tr><th>风险</th><th>等级</th><th>对策</th></tr></thead>
         <tbody>
           <tr><td>UTF-8 与 UTF-16 range 错位</td><td class="priority p0">P0</td><td>独立 SourceIndex；中文、emoji、组合字符、多行测试</td></tr>
+          <tr><td>视图级绘制在 layer-backed TextKit 2 上无效</td><td class="priority p0">P0</td><td>块级视觉一律走自定义 <code>NSTextLayoutFragment</code>；断言必须经由 <code>layoutManager</code> 真实生产的 fragment（§4.9）</td></tr>
           <tr><td>AST 缺少精确 marker token</td><td class="priority p0">P0</td><td>AST + TokenScanner；覆盖转义、嵌套和未闭合语法</td></tr>
           <tr><td>零宽 marker 破坏布局或辅助功能</td><td class="priority p0">P0</td><td>M0 验证，失败时降级为弱化显示</td></tr>
           <tr><td>IME 与异步渲染互相干扰</td><td class="priority p0">P0</td><td>跳过 marked range；快照 + revision；中文输入矩阵</td></tr>
           <tr><td>文档与 text view 双重真相</td><td class="priority p0">P0</td><td>EditorBuffer.textStorage 是唯一正文</td></tr>
           <tr><td>派生属性污染 undo</td><td class="priority p1">P1</td><td>undo 只记录源码；撤销后重算渲染</td></tr>
           <tr><td>200KB 输入卡顿</td><td class="priority p1">P1</td><td>当前坐标 dirty range、revision、8ms burst 去抖、变化块更新与真实性能探针</td></tr>
+          <tr><td>fragment 内解析动态色导致暗色模式失效</td><td class="priority p1">P1</td><td>不在 fragment 内取 <code>NSColor.cgColor</code>（<code>NSAppearance.current</code> 为 nil 时静默回落亮色）；改用共享的已解析 <code>CGColor</code> 调色板</td></tr>
+          <tr><td>测试绕过真实渲染路径产生假绿</td><td class="priority p1">P1</td><td>渲染测试必须走 <code>NSTextLayoutManager</code> / <code>NSTextStorage</code> 真实路径；禁止直接调用绘制函数断言像素</td></tr>
           <tr><td>TextKit 2 意外降级</td><td class="priority p1">P1</td><td>显式创建；禁止 layoutManager；监听 fallback</td></tr>
-          <tr><td>行内图片破坏源码 1:1</td><td class="priority p1">P1</td><td>MVP 使用悬浮/侧边预览</td></tr>
-          <tr><td>表格、公式、高亮拖慢首版</td><td class="priority p2">P2</td><td>留在 Phase 2</td></tr>
+          <tr><td>行内图片破坏源码 1:1</td><td class="priority p1">P1</td><td>已解决：<code>.attachment</code> 只在 U+FFFC 上成立（实测被属性修复抹掉），改走 §4.9 的 fragment 绘制 + <code>minimumLineHeight</code> 预留行高，一个字符都不插入</td></tr>
+          <tr><td>公式、高亮拖慢首版</td><td class="priority p2">P2</td><td>留在 Phase 2；表格已以只读呈现落地（§4.8）</td></tr>
         </tbody>
       </table>
     </div>
@@ -349,12 +391,14 @@
         <ul>
           <li>ASCII、中文、emoji、ZWJ、组合附加符</li>
           <li>嵌套、相邻、转义、未闭合 marker</li>
-          <li>列表 marker 首个视觉行锚定、AST depth 分级符号与任务 checkbox 外观颜色</li>
-          <li>CRLF、LF、空文档、超长单行</li>
+          <li>列表 marker 墨迹右缘贴正文列、AST depth 分级符号与任务 checkbox 外观</li>
+          <li>多行引用的每一行都有竖条与底色（像素守卫）</li>
+          <li>表格列在中文/emoji/ASCII 混排下对齐</li>
+          <li>CRLF、LF、空文档、超长单行（读入归一、写回还原）</li>
           <li>undo 后正文、selection、渲染一致</li>
           <li>IME 候选、上屏、取消、Enter</li>
           <li>鼠标、方向键、跨 marker 选区</li>
-          <li>任务 checkbox 点击切换 <code>[ ]</code>/<code>[x]</code> 与一次 undo（M4 首批自动化已覆盖）</li>
+          <li>任务 checkbox 点击切换 <code>[ ]</code>/<code>[x]</code> 与一次 undo；小手光标范围恒等于命中范围</li>
           <li>VoiceOver、Reduce Motion、高对比度</li>
         </ul>
       </div>
@@ -390,7 +434,7 @@
   </section>
 
   <footer>
-    <strong>下一步：</strong>完成 M4 人工 gate：真实中文输入法候选/上屏/取消/Enter，真实窗口 checkbox 点击与 undo/redo，以及 VoiceOver 对隐藏 marker 的逐项朗读。当前 186 tests / 10 suites；连续输入的整篇装饰退化已关闭。
+    <strong>下一步：</strong>完成 M4/M5/M6 共同的人工 gate：用真实中文输入法覆盖候选、上屏、取消与 Enter；在真实窗口复核 checkbox 点击、图片预览弹层、⌘F 查找栏与 undo/redo；用 VoiceOver 逐项确认隐藏 marker 不重复、不遗漏正文；在 App 内切换系统外观复核暗色块视觉。当前自动化证据为 236 tests / 12 suites，离屏视觉快照确认真实渲染路径非空白。
   </footer>
 </main>
 </body>

@@ -2,7 +2,7 @@
 
 一款极简即时渲染 Markdown 编辑器（对标 Typora），纯 macOS 原生实现。
 
-- 版本：v0.9 · 2026-08-28
+- 版本：v1.3 · 2026-08-29
 - 目标平台：macOS 14+
 - 技术栈：Swift 6 · AppKit（TextKit 2）· SwiftUI · swift-markdown
 
@@ -290,7 +290,9 @@ selectionDidChange
 muse/
 ├─ Muse.xcodeproj
 ├─ App/
-│  ├─ AppDelegate.swift
+│  ├─ AppDelegate.swift             # 菜单：源码模式、查找替换响应链
+│  ├─ EditorWindowController.swift  # 实测标准窗口按钮几何并注入 chrome
+│  ├─ Settings/                     # 偏好面板
 │  └─ main.swift
 ├─ Document/
 │  ├─ MuseDocument.swift
@@ -298,9 +300,11 @@ muse/
 │  ├─ RenderCoordinator.swift     # 两条更新流的调度
 │  └─ SampleMarkdown.swift
 ├─ Editor/
-│  ├─ EditorTextView.swift        # TextKit 2 手工栈 + fragment 工厂挂接
-│  ├─ EditorView.swift            # NSViewRepresentable 桥
-│  ├─ TypingBehaviors.swift       # M4 列表/标题/自动配对决策
+│  ├─ EditorTextView.swift         # TextKit 2 手工栈 + fragment 工厂挂接
+│  ├─ EditorView.swift             # NSViewRepresentable 桥
+│  ├─ TypingBehaviors.swift        # M4 列表/标题/自动配对决策
+│  ├─ ImagePreview.swift           # 行内/远程图片的点击预览 popover
+│  ├─ WindowControlsGeometry.swift # 实测标准窗口按钮位置，供标题栏对齐
 │  ├─ EditorShellView.swift        # 自绘标题栏、三列、宽度与开合动画
 │  ├─ CodexDocumentTitlebar.swift  # 中央文稿标题栏
 │  ├─ CodexTitlebarButton.swift    # 扁平 ghost 开关
@@ -312,17 +316,25 @@ muse/
 ├─ Parsing/
 │  ├─ MarkdownSemantics.swift     # swift-markdown AST → 语义 + marker 区间
 │  ├─ TokenScanner.swift          # 仅未闭合语法（编辑中态）
+│  ├─ LineBlockKind.swift         # 单行块归属，属性未落地时的续行判定
+│  ├─ TableStructure.swift        # GFM 表格的源码几何（单元格/`|`/对齐）
 │  ├─ Token.swift
 │  └─ SourceIndex.swift           # UTF-8 ↔ UTF-16
 ├─ Rendering/
 │  ├─ RenderEngine.swift          # 属性层
 │  ├─ BlockLayoutFragment.swift   # 绘制层（MuseLayoutFragment）
+│  ├─ ImageResolver.swift         # 图片目的地 → URL / NSImage
+│  ├─ TableLayout.swift           # 表格列边界与 kern 撑开量
 │  └─ Theme.swift
 └─ MuseTests/
    ├─ SourceIndexTests.swift
    ├─ TokenScannerTests.swift
    ├─ MarkdownSemanticsTests.swift
    ├─ RendererTests.swift
+   ├─ TableRenderingTests.swift
+   ├─ TypingBehaviorsTests.swift
+   ├─ VisualSnapshotTests.swift
+   ├─ WindowControlsGeometryTests.swift
    ├─ CoordinatorPipelineTests.swift
    ├─ DocumentTests.swift
    ├─ WorkspaceTests.swift

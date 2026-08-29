@@ -94,6 +94,84 @@ import Testing
         #expect(isBold(storage.attribute(.font, at: yRange.location, effectiveRange: nil) as? NSFont))
     }
 
+    @Test func dirtyAccumulatorRebasesPendingRangeAcrossEarlierInsertion() {
+        // 旧文档长度 30；已有 dirty = 20..<24。随后在 2 插入 3 个 UTF-16 单元，
+        // 旧 dirty 必须平移为 23..<27，再与本次 2..<5 合并。
+        let accumulated = RenderCoordinator.accumulatingDirtyRange(
+            pending: NSRange(location: 20, length: 4),
+            editedRange: NSRange(location: 2, length: 3),
+            changeInLength: 3,
+            currentLength: 33
+        )
+
+        #expect(accumulated == NSRange(location: 2, length: 25))
+    }
+
+    @Test func dirtyAccumulatorContractsWhenDeletionOverlapsPendingRange() {
+        // 旧 dirty = 10..<18；删除旧文档 13..<17 后，仍存活的 dirty 是 10..<14。
+        let accumulated = RenderCoordinator.accumulatingDirtyRange(
+            pending: NSRange(location: 10, length: 8),
+            editedRange: NSRange(location: 13, length: 0),
+            changeInLength: -4,
+            currentLength: 26
+        )
+
+        #expect(accumulated == NSRange(location: 10, length: 4))
+    }
+
+    /// 同一 main-actor turn 内的逐字输入必须只提交连续的小范围，而不是整篇兜底。
+    @Test func consecutiveTypingAppliesAccumulatedCurrentCoordinateRange() async {
+        let source = "prefix paragraph\nplain target line\nsuffix paragraph"
+        let storage = NSTextStorage(string: source)
+        let coordinator = RenderCoordinator()
+        coordinator.attach(storage: storage)
+        coordinator.onTextEdited = {}
+
+        storage.replaceCharacters(in: NSRange(location: 0, length: storage.length), with: source)
+        #expect(await waitForApplied(coordinator, atLeast: 1))
+
+        let insertion = (storage.string as NSString).range(of: "target").location
+        let typed = "**X**"
+        let startRevision = coordinator.appliedRevision
+        for (offset, character) in typed.enumerated() {
+            storage.replaceCharacters(
+                in: NSRange(location: insertion + offset, length: 0),
+                with: String(character)
+            )
+        }
+
+        #expect(await waitForApplied(coordinator, atLeast: startRevision + typed.count))
+        #expect(coordinator.lastAppliedDirtyRange == NSRange(location: insertion, length: typed.utf16.count))
+        #expect(coordinator.lastAppliedDirtyRange?.length != storage.length)
+
+        let x = (storage.string as NSString).range(of: "X").location
+        #expect(isBold(storage.attribute(.font, at: x, effectiveRange: nil) as? NSFont))
+    }
+
+    /// 先把后方标成 dirty，再在前方插入：最终范围必须包含重基后的后方端点。
+    @Test func earlierInsertionRebasesPendingPipelineRange() async {
+        let source = "front\nplain middle\nplain tail"
+        let storage = NSTextStorage(string: source)
+        let coordinator = RenderCoordinator()
+        coordinator.attach(storage: storage)
+        coordinator.onTextEdited = {}
+
+        storage.replaceCharacters(in: NSRange(location: 0, length: storage.length), with: source)
+        #expect(await waitForApplied(coordinator, atLeast: 1))
+
+        let tail = (storage.string as NSString).range(of: "tail").location
+        let startRevision = coordinator.appliedRevision
+        storage.replaceCharacters(in: NSRange(location: tail, length: 0), with: "**Y**")
+        storage.replaceCharacters(in: NSRange(location: 0, length: 0), with: "0123456789")
+
+        #expect(await waitForApplied(coordinator, atLeast: startRevision + 2))
+        let expectedEnd = tail + "**Y**".utf16.count + "0123456789".utf16.count
+        #expect(coordinator.lastAppliedDirtyRange == NSRange(location: 0, length: expectedEnd))
+
+        let y = (storage.string as NSString).range(of: "Y").location
+        #expect(isBold(storage.attribute(.font, at: y, effectiveRange: nil) as? NSFont))
+    }
+
     /// 字符编辑后、解析应用前：光标流不得用旧 package 写属性（复审 P1-2）。
     @Test func stalePackageGuardSkipsCursorFlow() async {
         let storage = NSTextStorage(string: "**粗**\n正文")
@@ -264,6 +342,32 @@ import Testing
         #expect(storage.attribute(.backgroundColor, at: code.location, effectiveRange: nil) != nil)
         // 字符不受渲染影响
         #expect(storage.string == source + typed)
+    }
+
+    /// 围栏闭合与紧随其后的行内编辑连续发生时，旧 package 仍须扩张结构脏带。
+    @Test func rapidFenceClosureKeepsStructuralExpansion() async {
+        let source = "```\ncode line\n\nparagraph"
+        let storage = NSTextStorage(string: source)
+        let coordinator = RenderCoordinator()
+        coordinator.attach(storage: storage)
+        coordinator.onTextEdited = {}
+
+        storage.replaceCharacters(in: NSRange(location: 0, length: storage.length), with: source)
+        #expect(await waitForApplied(coordinator, atLeast: 1))
+        let oldParagraph = (storage.string as NSString).range(of: "paragraph")
+        #expect(storage.attribute(.backgroundColor, at: oldParagraph.location, effectiveRange: nil) != nil)
+
+        let startRevision = coordinator.appliedRevision
+        storage.replaceCharacters(in: NSRange(location: oldParagraph.location, length: 0), with: "```\n")
+        let paragraph = (storage.string as NSString).range(of: "paragraph")
+        storage.replaceCharacters(in: NSRange(location: paragraph.location, length: paragraph.length),
+                                  with: "**paragraph**")
+
+        #expect(await waitForApplied(coordinator, atLeast: startRevision + 2))
+        let content = (storage.string as NSString).range(of: "paragraph")
+        #expect(storage.attribute(.backgroundColor, at: content.location, effectiveRange: nil) == nil)
+        #expect(isBold(storage.attribute(.font, at: content.location, effectiveRange: nil) as? NSFont))
+        #expect(coordinator.lastAppliedDirtyLines?.upperBound ?? 0 >= 3)
     }
 
     /// P1-4：插入字符不破坏 marker diff 的稳定身份。

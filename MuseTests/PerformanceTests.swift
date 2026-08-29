@@ -128,6 +128,55 @@ import Testing
         #expect(latency < 200)
     }
 
+    /// 缺陷 18：200KB 上同一轮连续输入不得再次把 dirty 请求退化成整篇。
+    /// 这里用范围插桩验证装饰工作量，并打印最后一键到属性落地的真实端到端时间；
+    /// 时间仅作为观测值，避免把机器负载差异写成脆弱断言。
+    @Test @MainActor func perfCoordinatorContinuousTypingKeepsDirtyRangeLocal200KB() async {
+        let source = Self.corpus(kb: 200)
+        let storage = NSTextStorage(string: source)
+        let coordinator = RenderCoordinator()
+        coordinator.attach(storage: storage)
+        coordinator.onTextEdited = {}
+
+        storage.replaceCharacters(in: NSRange(location: 0, length: storage.length), with: source)
+        var waited = 0
+        while coordinator.appliedRevision < 1, waited < 30_000 {
+            try? await Task.sleep(for: .milliseconds(2)); waited += 2
+        }
+        #expect(coordinator.appliedRevision >= 1)
+
+        let typed = "incremental"
+        let nsSource = storage.string as NSString
+        let half = nsSource.length / 2
+        let nextLine = nsSource.range(
+            of: "\n",
+            range: NSRange(location: half, length: nsSource.length - half)
+        )
+        var insertion = nextLine.location == NSNotFound ? half : nextLine.location + 1
+        let startRevision = coordinator.appliedRevision
+        let startPreparationCount = coordinator.parsePreparationCount
+        for character in typed {
+            storage.replaceCharacters(in: NSRange(location: insertion, length: 0), with: String(character))
+            insertion += 1
+        }
+        let lastKey = clock.now
+
+        waited = 0
+        while coordinator.appliedRevision < startRevision + typed.count, waited < 30_000 {
+            try? await Task.sleep(for: .milliseconds(2)); waited += 2
+        }
+        let latency = ms(lastKey.duration(to: clock.now))
+        let dirty = coordinator.lastAppliedDirtyRange
+        print("[PERF] 200KB 连续输入最后一键→属性落地: \(latency) ms | dirty: \(String(describing: dirty)) / \(storage.length)")
+
+        #expect(coordinator.appliedRevision >= startRevision + typed.count)
+        #expect(coordinator.parsePreparationCount == startPreparationCount + 1)
+        // NSTextStorage 在行首插入时可能把相邻换行一并计入 didProcessEditing 范围；
+        // 允许常数级边界扩张，但绝不能随文档规模增长。
+        #expect((dirty?.length ?? storage.length) <= typed.utf16.count + 2)
+        #expect((dirty?.length ?? storage.length) < storage.length / 100)
+    }
+
     private func measure(kb: Int) throws {
         let source = Self.corpus(kb: kb)
         let engine = RenderEngine()

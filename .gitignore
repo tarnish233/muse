@@ -11,3 +11,7 @@ xcuserdata/
 # 临时
 *.log
 *.profraw
+
+# Claude Code（本地产物与个人配置；.claude/settings.json 等共享配置不在此列）
+.claude/worktrees/
+.claude/settings.local.json

@@ -163,7 +163,7 @@ import Testing
     }
 
     @Test func sourceModeShowsLiteralMarkdownWithoutBlockDecorations() {
-        let source = "# Title\n- item\n**bold**"
+        let source = "# Title\n- item\n\n---\n**bold**"
         let storage = NSTextStorage(string: source)
         let package = engine.prepare(source)
 
@@ -178,6 +178,9 @@ import Testing
         #expect(font(at: 0, in: storage) == theme.codeFont())
         #expect(font(at: (source as NSString).range(of: "bold").location, in: storage) == theme.codeFont())
         #expect(storage.attribute(.museBlock, at: (source as NSString).range(of: "- ").location, effectiveRange: nil) == nil)
+        let rule = (source as NSString).range(of: "---")
+        #expect(font(at: rule.location, in: storage) == theme.codeFont())
+        #expect(storage.attribute(.museBlock, at: rule.location, effectiveRange: nil) == nil)
     }
 
     @Test func renderedModeRestoresPreviewAfterSourceMode() {
@@ -425,6 +428,33 @@ import Testing
         #expect(paragraph?.paragraphSpacing == 16) // Typora hr：上下 margin 16px
         // 块标记随样式写入，绘制层据此画真实横线
         #expect(storage.attribute(.museBlock, at: 5, effectiveRange: nil) as? String == BlockVisual.rule.rawValue)
+    }
+
+    @Test func ruleSourceNeverRevealsUnderCaretOrSelection() {
+        let source = "上一段\n\n---\n\n下一段"
+        let storage = NSTextStorage(string: source)
+        let package = engine.prepare(source)
+        let marker = (source as NSString).range(of: "---")
+        _ = engine.render(
+            package: package,
+            selection: NSRange(location: 0, length: 0),
+            into: storage
+        )
+
+        let coordinator = RenderCoordinator()
+        coordinator.adoptPackage(package)
+        for selection in [
+            NSRange(location: marker.location + 1, length: 0),
+            marker,
+        ] {
+            coordinator.updateMarkerVisibility(selection: selection, into: storage)
+            for location in marker.location..<marker.upperBound {
+                #expect(isHidden(location, in: storage))
+            }
+            #expect(storage.attribute(.museBlock, at: marker.location, effectiveRange: nil) as? String
+                    == BlockVisual.rule.rawValue)
+            #expect(storage.string == source)
+        }
     }
 
     // MARK: - 图片（块呈现）

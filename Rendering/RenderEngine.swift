@@ -561,7 +561,12 @@ public struct RenderEngine {
             let state: MarkerState
             if token.isBlockMarker {
                 let onCaret: Bool
-                if case .taskListItem = token.kind {
+                if case .rule = token.kind {
+                    // 水平分隔线在渲染模式下始终保持为横线。它没有可编辑的
+                    // 正文内容，光标或选区经过时回显 `---` 只会让预览与源码
+                    // 重叠；需要逐字编辑时由显式源码模式统一负责。
+                    onCaret = false
+                } else if case .taskListItem = token.kind {
                     // 复选框**始终是复选框**（对标 Typora）：它是可点击的控件，
                     // 光标经过就变回 `- [ ] ` 源码会让控件在编辑时消失，也让
                     // 「点一下切换」失去落点。源码模式下逐字显示，由上面

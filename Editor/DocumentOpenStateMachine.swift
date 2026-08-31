@@ -61,9 +61,10 @@ final class DocumentOpenStateMachine {
 
     static func shouldClosePreviousDocument(
         isSameDocument: Bool,
-        remainingWindowControllerCount: Int
+        remainingWindowControllerCount: Int,
+        isDocumentEdited: Bool
     ) -> Bool {
-        !isSameDocument && remainingWindowControllerCount == 0
+        !isSameDocument && remainingWindowControllerCount == 0 && !isDocumentEdited
     }
 
     func requestOpen(at url: URL, currentURL: URL?) -> Step {

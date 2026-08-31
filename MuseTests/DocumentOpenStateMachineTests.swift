@@ -145,18 +145,44 @@ import Testing
         #expect(decision.disposition == .discardNewDocumentAndPresentError)
     }
 
-    @Test func previousDocumentClosesOnlyWhenNoControllersRemain() {
+    @Test func previousDocumentClosesOnlyWhenCleanAndNoControllersRemain() {
         #expect(DocumentOpenStateMachine.shouldClosePreviousDocument(
             isSameDocument: false,
-            remainingWindowControllerCount: 0
+            remainingWindowControllerCount: 0,
+            isDocumentEdited: false
         ))
         #expect(!DocumentOpenStateMachine.shouldClosePreviousDocument(
             isSameDocument: false,
-            remainingWindowControllerCount: 1
+            remainingWindowControllerCount: 1,
+            isDocumentEdited: false
         ))
         #expect(!DocumentOpenStateMachine.shouldClosePreviousDocument(
             isSameDocument: true,
-            remainingWindowControllerCount: 0
+            remainingWindowControllerCount: 0,
+            isDocumentEdited: false
+        ))
+        #expect(!DocumentOpenStateMachine.shouldClosePreviousDocument(
+            isSameDocument: false,
+            remainingWindowControllerCount: 0,
+            isDocumentEdited: true
+        ))
+    }
+
+    @Test func editAfterCloseApprovalInvalidatesTheLaterCloseDecision() {
+        var isDocumentEdited = false
+        #expect(DocumentOpenStateMachine.shouldClosePreviousDocument(
+            isSameDocument: false,
+            remainingWindowControllerCount: 0,
+            isDocumentEdited: isDocumentEdited
+        ))
+
+        // 模拟 openDocument 的异步窗口内，用户又向旧文档输入了字符。adopt 必须
+        // 使用此刻的实时状态，不能沿用开始加载前 canClose 的结果。
+        isDocumentEdited = true
+        #expect(!DocumentOpenStateMachine.shouldClosePreviousDocument(
+            isSameDocument: false,
+            remainingWindowControllerCount: 0,
+            isDocumentEdited: isDocumentEdited
         ))
     }
 

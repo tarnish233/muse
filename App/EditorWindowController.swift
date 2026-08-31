@@ -223,9 +223,12 @@ final class EditorWindowController: NSWindowController {
         window?.title = document.displayName
         window?.makeKeyAndOrderFront(nil)
 
+        // canClose 在异步 open 开始前完成；加载期间旧文档仍可编辑，所以这里必须
+        // 重新读取实时 dirty 状态，不能用先前的关闭许可直接 close。
         if DocumentOpenStateMachine.shouldClosePreviousDocument(
             isSameDocument: previousDocument === document,
-            remainingWindowControllerCount: previousDocument.windowControllers.count
+            remainingWindowControllerCount: previousDocument.windowControllers.count,
+            isDocumentEdited: previousDocument.isDocumentEdited
         ) {
             previousDocument.close()
         }

@@ -27,6 +27,7 @@ final class ProjectWorkspace {
     private var securityScopedURLs: Set<URL> = []
     private var refreshTasks: [URL: Task<Void, Never>] = [:]
     private var refreshGenerations: [URL: Int] = [:]
+    private var unresolvedProjectStoreError: Error?
 
     init(
         defaults: UserDefaults = .standard,
@@ -208,9 +209,15 @@ final class ProjectWorkspace {
     }
 
     private func restoreProjects() {
-        guard let data = projectStore.load(),
-              let stored = try? JSONDecoder().decode([StoredProject].self, from: data)
-        else { return }
+        guard let data = projectStore.load() else { return }
+        let stored: [StoredProject]
+        do {
+            stored = try JSONDecoder().decode([StoredProject].self, from: data)
+        } catch {
+            unresolvedProjectStoreError = error
+            report([error.localizedDescription])
+            return
+        }
 
         var restoredProjects: [WorkspaceProject] = []
         var restoredBookmarks: [URL: Data] = [:]
@@ -271,6 +278,9 @@ final class ProjectWorkspace {
     }
 
     private func saveSnapshot(projects: [WorkspaceProject], bookmarks: [URL: Data]) throws {
+        if let unresolvedProjectStoreError {
+            throw unresolvedProjectStoreError
+        }
         let stored = try projects.map { project -> StoredProject in
             guard let bookmark = bookmarks[project.rootURL.standardizedFileURL] else {
                 throw WorkspaceOperationError.incompleteProjectBookmarks

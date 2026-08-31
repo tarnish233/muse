@@ -198,11 +198,36 @@ import Testing
         #expect(MuseDocument.readableTypes.contains("public.text") == false)
     }
 
-    /// 崩溃后 reopen 不应把恢复的草稿标成脏文档（与启动时示例同理）。
-    @Test func reopenedDocumentIsCleanAfterRead() throws {
+    @Test func newUntitledDocumentWithSampleIsCleanAfterMakingWindowControllers() {
+        let previousFactory = MuseDocument.windowControllerFactory
+        MuseDocument.windowControllerFactory = nil
+        defer { MuseDocument.windowControllerFactory = previousFactory }
+
         let document = MuseDocument()
-        try load("# 恢复的草稿\n\n正文", into: document)
+        #expect(document.isDocumentEdited)
+
+        document.makeWindowControllers()
+
         #expect(document.isDocumentEdited == false)
+    }
+
+    @Test func autosavedRecoveryRemainsDirtyAfterMakingWindowControllers() throws {
+        let previousFactory = MuseDocument.windowControllerFactory
+        MuseDocument.windowControllerFactory = nil
+        defer { MuseDocument.windowControllerFactory = previousFactory }
+
+        let document = MuseDocument()
+        document.autosavedContentsFileURL = FileManager.default.temporaryDirectory
+            .appending(path: "MuseRecovered-\(UUID().uuidString).md")
+        try load("# 恢复的草稿\n\n正文", into: document)
+        // `init(for:withContentsOf:ofType:)` 会在 read 后做同一笔 change-count 更新；
+        // 这里显式模拟它，让测试只聚焦 makeWindowControllers 不得擦掉恢复态。
+        document.updateChangeCount(.changeReadOtherContents)
+        #expect(document.isDocumentEdited)
+
+        document.makeWindowControllers()
+
+        #expect(document.isDocumentEdited)
     }
 
     @Test func renderingDoesNotMarkDocumentDirty() throws {

@@ -144,6 +144,47 @@ import Testing
         #expect(try decodedBookmarks(store.saved[0]) == [oldFirst, refreshedSecond])
     }
 
+    @Test func corruptStoredProjectsAreReportedAndPreservedWhenAddingProject() throws {
+        let root = try makeDirectory(named: "CorruptStore")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let original = Data("not valid project JSON".utf8)
+        let store = StoreRecorder(data: original)
+        let workspace = ProjectWorkspace(
+            bookmarking: WorkspaceBookmarking(
+                create: { _ in Data([7]) },
+                resolve: { _ in throw TestFailure.expected }
+            ),
+            projectStore: store.store
+        )
+
+        #expect(workspace.presentedError != nil)
+
+        _ = try? workspace.addProject(at: root)
+
+        #expect(store.data == original)
+    }
+
+    @Test func missingStoredProjectsAreSilentAndDoNotBlockSaving() throws {
+        let root = try makeDirectory(named: "MissingStore")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let bookmark = Data([7])
+        let store = StoreRecorder()
+        let workspace = ProjectWorkspace(
+            bookmarking: WorkspaceBookmarking(
+                create: { _ in bookmark },
+                resolve: { _ in throw TestFailure.expected }
+            ),
+            projectStore: store.store
+        )
+
+        #expect(workspace.presentedError == nil)
+
+        try workspace.addProject(at: root)
+
+        #expect(store.saved.count == 1)
+        #expect(try decodedBookmarks(store.saved[0]) == [bookmark])
+    }
+
     @Test func addingProjectCommitsOnlyAfterBookmarkCreationSucceeds() throws {
         let root = try makeDirectory(named: "BookmarkFailure")
         defer { try? FileManager.default.removeItem(at: root) }

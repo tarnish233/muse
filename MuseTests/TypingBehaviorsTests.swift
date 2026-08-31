@@ -10,6 +10,11 @@ import Testing
         let expectedCaret: Int
     }
 
+    struct LineEndingTransferCase: Sendable {
+        let source: String
+        let expected: String
+    }
+
     private func host(_ textView: EditorTextView, size: NSSize = NSSize(width: 320, height: 160)) -> NSWindow {
         textView.frame = NSRect(origin: .zero, size: size)
         let window = NSWindow(
@@ -91,6 +96,111 @@ import Testing
             textView.insertText(String(character), replacementRange: NSRange(location: NSNotFound, length: 0))
             RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.001))
         }
+    }
+
+    private func temporaryDocumentURL() throws -> (directory: URL, file: URL) {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MusePasteTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        return (directory, directory.appendingPathComponent("note.md"))
+    }
+
+    private func autosave(_ document: MuseDocument, to url: URL) async throws {
+        document.fileURL = url
+        document.fileType = "net.daringfireball.markdown"
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            document.autosave(withImplicitCancellability: false) { error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume(returning: ())
+                }
+            }
+        }
+    }
+
+    @Test(arguments: [
+        LineEndingTransferCase(source: "alpha\r\nbeta", expected: "alpha\nbeta"),
+        LineEndingTransferCase(source: "alpha\rbeta", expected: "alpha\nbeta"),
+        LineEndingTransferCase(source: "alpha\u{2028}beta", expected: "alpha\nbeta"),
+    ])
+    func pastedTextUsesOnlyLF(testCase: LineEndingTransferCase) {
+        let storage = NSTextStorage()
+        let textView = EditorTextView.make(textStorage: storage)
+        let window = host(textView)
+        defer {
+            window.contentView = nil
+            NSPasteboard.general.clearContents()
+        }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(testCase.source, forType: .string)
+
+        textView.paste(nil)
+
+        #expect(storage.string == testCase.expected)
+    }
+
+    @Test func pastingExistingLFKeepsLineBreak() {
+        let storage = NSTextStorage()
+        let textView = EditorTextView.make(textStorage: storage)
+        let window = host(textView)
+        defer {
+            window.contentView = nil
+            NSPasteboard.general.clearContents()
+        }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString("alpha\nbeta", forType: .string)
+
+        textView.paste(nil)
+
+        #expect(storage.string == "alpha\nbeta")
+    }
+
+    @Test(arguments: [
+        LineEndingTransferCase(source: "alpha\r\nbeta", expected: "alpha\nbeta"),
+        LineEndingTransferCase(source: "alpha\rbeta", expected: "alpha\nbeta"),
+        LineEndingTransferCase(source: "alpha\u{2028}beta", expected: "alpha\nbeta"),
+    ])
+    func droppedTextUsesOnlyLF(testCase: LineEndingTransferCase) {
+        let pasteboard = NSPasteboard(name: .init("MuseTests.Drop.\(UUID().uuidString)"))
+        pasteboard.clearContents()
+        pasteboard.setString(testCase.source, forType: .string)
+        let storage = NSTextStorage()
+        let textView = EditorTextView.make(textStorage: storage)
+        let window = host(textView)
+        defer { window.contentView = nil }
+
+        let accepted = textView.readSelection(from: pasteboard, type: .string)
+
+        #expect(accepted)
+        #expect(storage.string == testCase.expected)
+    }
+
+    @Test func pastedCRLFDoesNotBecomeDoubleCarriageReturnOnCRLFSave() async throws {
+        let paths = try temporaryDocumentURL()
+        defer { try? FileManager.default.removeItem(at: paths.directory) }
+
+        let document = MuseDocument()
+        try document.read(
+            from: Data("first\r\n".utf8),
+            ofType: "net.daringfireball.markdown"
+        )
+        let textView = EditorTextView.make(textStorage: document.buffer.textStorage)
+        let window = host(textView)
+        defer {
+            window.contentView = nil
+            NSPasteboard.general.clearContents()
+        }
+        textView.setSelectedRange(NSRange(location: document.buffer.textStorage.length, length: 0))
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString("second\r\nthird", forType: .string)
+
+        textView.paste(nil)
+        try await autosave(document, to: paths.file)
+
+        let bytes = try Data(contentsOf: paths.file)
+        #expect(bytes == Data("first\r\nsecond\r\nthird".utf8))
+        #expect(bytes.range(of: Data([0x0D, 0x0D, 0x0A])) == nil)
     }
 
     @Test(

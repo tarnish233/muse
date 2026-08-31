@@ -225,17 +225,22 @@ public final class MuseDocument: NSDocument {
 
     // MARK: - 窗口
 
+    private func clearInitialSampleChangeCountIfNeeded() {
+        guard fileURL == nil, autosavedContentsFileURL == nil else { return }
+        updateChangeCount(.changeCleared)
+    }
+
     public override func makeWindowControllers() {
         guard let factory = Self.windowControllerFactory else {
             // MuseKit 也可在无 UI 宿主中使用（例如序列化/性能测试）。
             // App 宿主通过 windowControllerFactory 注入实际 SwiftUI 外壳。
-            updateChangeCount(.changeCleared)
+            clearInitialSampleChangeCountIfNeeded()
             return
         }
 
         addWindowController(factory(self))
 
         // 启动时填入的示例不算未保存修改。
-        updateChangeCount(.changeCleared)
+        clearInitialSampleChangeCountIfNeeded()
     }
 }

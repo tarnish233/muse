@@ -388,10 +388,10 @@ import Testing
         #expect(storage.attribute(.backgroundColor, at: codeRange.location, effectiveRange: nil) == nil)
     }
 
-    /// 结构标记的光标行回显（Typora 模式）：与 App 完全一致的路径——
-    /// 编辑回调 → 后台解析 → applyDirty + reconcileVisibility（forceLines）。
-    /// 不在光标行的列表/任务标记为 hidden（近零宽），围栏/引用折叠。
-    @Test func structuralMarkersFollowCaretThroughCoordinatorPath() async {
+    /// 与 App 完全一致的显隐路径：编辑回调 → 后台解析 → applyDirty +
+    /// reconcileVisibility（forceLines）。普通列表与任务列表始终保持渲染态，
+    /// 围栏等可编辑块仍随光标回显源码。
+    @Test func alwaysRenderedListsAndEditableBlocksFollowCaretThroughCoordinatorPath() async {
         let source = SampleMarkdown.text
         let storage = NSTextStorage(string: source)
         let coordinator = RenderCoordinator()
@@ -421,10 +421,18 @@ import Testing
         coordinator.updateMarkerVisibility(selection: caret, into: storage)
         #expect((font(heading.location)?.pointSize ?? 100) < 1)
 
-        // 光标移到有序列表行 → 标记回显（有色）
+        // 光标移到有序列表行 → 仍保持渲染 marker，不摊回 `1. ` 源码。
         coordinator.updateMarkerVisibility(selection: NSRange(location: ordered.location, length: 0), into: storage)
-        #expect(font(ordered.location) == revealedFont)
-        #expect(alpha(ordered.location) > 0)
+        #expect((font(ordered.location)?.pointSize ?? 100) < 1)
+        #expect(alpha(ordered.location) == 0)
+        #expect(storage.attribute(.museBlock, at: ordered.location, effectiveRange: nil) as? String
+                == BlockVisual.list.rawValue + ":o")
+
+        // 围栏仍是可编辑结构：光标进入代码块后开栏符正常回显。
+        let code = (source as NSString).range(of: "func hello")
+        coordinator.updateMarkerVisibility(selection: NSRange(location: code.location, length: 0), into: storage)
+        #expect(font(fence.location) == revealedFont)
+        #expect(alpha(fence.location) > 0)
     }
 
     /// 插入围栏闭合符：围栏结束，原"围栏到 EOF"的段落行要清掉旧代码背景（陈旧样式扫描）。

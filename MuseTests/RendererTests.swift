@@ -107,8 +107,8 @@ import Testing
     }
 
     @Test func structuralMarkersFollowCaret() {
-        // Typora 模式：结构标记只在光标所在行/块内回显；列表/任务在光标行外
-        // 近零宽隐藏，图形符号由绘制层画；引用/围栏折叠隐藏。
+        // 标题、引用、围栏等可编辑结构按光标回显；普通列表与任务列表始终保持
+        // 渲染 marker，源码近零宽隐藏，图形符号由绘制层画。
         let source = "- 甲\n1. 乙\n- [ ] 丙\n> 引\n```\n代码\n```"
         let storage = NSTextStorage(string: source)
         let package = engine.prepare(source)
@@ -146,7 +146,7 @@ import Testing
         #expect(storage.string == source)
     }
 
-    @Test func crossLineSelectionRevealsEverySelectedBlockMarker() {
+    @Test func crossLineSelectionRevealsOnlySelectedEditableBlockMarkers() {
         let source = "- first\n> quote\nplain\n1. outside"
         let storage = NSTextStorage(string: source)
         let package = engine.prepare(source)
@@ -156,14 +156,15 @@ import Testing
 
         _ = engine.render(package: package, selection: selection, into: storage)
 
-        #expect(!isHidden((source as NSString).range(of: "- ").location, in: storage))
+        // 普通列表保持渲染视觉；引用仍允许回显以编辑其 marker。
+        #expect(isHidden((source as NSString).range(of: "- ").location, in: storage))
         #expect(!isHidden((source as NSString).range(of: "> ").location, in: storage))
         #expect(isHidden((source as NSString).range(of: "1. ").location, in: storage))
         #expect(storage.string == source)
     }
 
     @Test func sourceModeShowsLiteralMarkdownWithoutBlockDecorations() {
-        let source = "# Title\n- item\n\n---\n**bold**"
+        let source = "# Title\n\n- item\n\n1. ordered\n\n---\n\n**bold**"
         let storage = NSTextStorage(string: source)
         let package = engine.prepare(source)
 
@@ -177,7 +178,12 @@ import Testing
         #expect(storage.string == source)
         #expect(font(at: 0, in: storage) == theme.codeFont())
         #expect(font(at: (source as NSString).range(of: "bold").location, in: storage) == theme.codeFont())
-        #expect(storage.attribute(.museBlock, at: (source as NSString).range(of: "- ").location, effectiveRange: nil) == nil)
+        let unordered = (source as NSString).range(of: "- ")
+        let ordered = (source as NSString).range(of: "1. ")
+        #expect(font(at: unordered.location, in: storage) == theme.codeFont())
+        #expect(font(at: ordered.location, in: storage) == theme.codeFont())
+        #expect(storage.attribute(.museBlock, at: unordered.location, effectiveRange: nil) == nil)
+        #expect(storage.attribute(.museBlock, at: ordered.location, effectiveRange: nil) == nil)
         let rule = (source as NSString).range(of: "---")
         #expect(font(at: rule.location, in: storage) == theme.codeFont())
         #expect(storage.attribute(.museBlock, at: rule.location, effectiveRange: nil) == nil)
@@ -454,6 +460,35 @@ import Testing
             #expect(storage.attribute(.museBlock, at: marker.location, effectiveRange: nil) as? String
                     == BlockVisual.rule.rawValue)
             #expect(storage.string == source)
+        }
+    }
+
+    @Test func orderedAndUnorderedListSourceNeverRevealsUnderCaretOrSelection() {
+        for (source, markerText, blockSuffix) in [
+            ("- 无序项", "- ", ":u"),
+            ("* 无序项", "* ", ":u"),
+            ("1. 有序项", "1. ", ":o"),
+            ("123. 有序项", "123. ", ":o"),
+        ] {
+            let ns = source as NSString
+            let marker = ns.range(of: markerText)
+            let content = ns.range(of: "项")
+            for selection in [
+                NSRange(location: content.location, length: 0),
+                NSRange(location: marker.location, length: 0),
+                NSRange(location: 0, length: ns.length),
+            ] {
+                let storage = NSTextStorage(string: source)
+                let package = engine.prepare(source)
+                _ = engine.render(package: package, selection: selection, into: storage)
+
+                for location in marker.location..<marker.upperBound {
+                    #expect(isHidden(location, in: storage))
+                }
+                #expect(storage.attribute(.museBlock, at: marker.location, effectiveRange: nil) as? String
+                        == BlockVisual.list.rawValue + blockSuffix)
+                #expect(storage.string == source)
+            }
         }
     }
 
@@ -1361,7 +1396,7 @@ import Testing
         #expect(storage.string == source)
     }
 
-    @Test func revealedListSourceMarkerKeepsEveryContentColumnStable() throws {
+    @Test func listContentColumnStaysStableAcrossCaretAndSelection() throws {
         let sources = [
             "- 目标", "* 目标", "+ 目标",
             "1. 目标", "10. 目标", "100. 目标", "10000. 目标",
@@ -1371,7 +1406,7 @@ import Testing
             "1. 一级\n   1. 二级\n      1. 目标",
         ]
 
-        func snapshot(_ source: String, selection: NSRange?) throws -> (contentX: CGFloat, markerX: CGFloat, prefixWidth: CGFloat) {
+        func contentX(_ source: String, selection: NSRange?) throws -> CGFloat {
             let storage = NSTextStorage(string: source)
             let textView = EditorTextView.make(textStorage: storage)
             textView.frame = NSRect(x: 0, y: 0, width: 480, height: 240)
@@ -1381,54 +1416,37 @@ import Testing
             _ = engine.render(package: package, selection: selection, into: storage)
             let resolved = try listFragment(containing: "目标", in: textView)
             let firstLine = try #require(resolved.fragment.textLineFragments.first)
-            let markerX = resolved.fragment.layoutFragmentFrame.minX
-                + firstLine.locationForCharacter(at: 0).x
             let contentX = resolved.fragment.layoutFragmentFrame.minX
                 + firstLine.locationForCharacter(at: resolved.location).x
-            // 行首到内容之间的可见前缀宽度：缩进按正文字体（两种状态一致），
-            // marker 源码按回显等宽字体。
-            let visiblePrefix = resolved.paragraph.substring(to: resolved.location)
-            let indentPart = visiblePrefix.prefix { $0 == " " || $0 == "\t" }
-            let markerPart = visiblePrefix.drop { $0 == " " || $0 == "\t" }
-            let prefixWidth = ((String(indentPart)) as NSString)
-                .size(withAttributes: [.font: Theme.standard.baseFont()]).width
-                + ((String(markerPart)) as NSString)
-                    .size(withAttributes: [.font: Theme.standard.revealedMarkerFont()]).width
-            if selection != nil {
-                let caretXs = (0...resolved.location).map {
-                    firstLine.locationForCharacter(at: $0).x
-                }
-                #expect(contentX > markerX, "source marker has no visible lane: \(source)")
-                #expect(zip(caretXs, caretXs.dropFirst()).allSatisfy { $0 <= $1 }, "caret order: \(source)")
-            }
             #expect(storage.string == source)
-            return (contentX, markerX, prefixWidth)
+            return contentX
         }
 
         for source in sources {
-            let contentLocation = (source as NSString).range(of: "目标").location
-            let hidden = try snapshot(source, selection: nil)
-            let revealed = try snapshot(
+            let ns = source as NSString
+            let contentLocation = ns.range(of: "目标").location
+            let initial = try contentX(source, selection: nil)
+            let underCaret = try contentX(
                 source,
                 selection: NSRange(location: contentLocation, length: 0)
             )
-            let hiddenAgain = try snapshot(source, selection: nil)
+            let underSelection = try contentX(
+                source,
+                selection: NSRange(location: 0, length: ns.length)
+            )
+            let final = try contentX(source, selection: nil)
 
-            // 回显正文列：优先保持隐藏列；前缀放不下时右移（TextKit 2 不接受负行起点），
-            // 收起后必须精确回到原列。
-            let expectedRevealedContentX = max(hidden.contentX, revealed.markerX + revealed.prefixWidth)
-            #expect(abs(revealed.contentX - expectedRevealedContentX) < 0.5, "source: \(source)")
-            #expect(abs(hiddenAgain.contentX - hidden.contentX) < 0.5, "source: \(source)")
-            #expect(revealed.markerX >= -0.5, "source marker clipped: \(source)")
+            // 列表 marker 始终保持渲染态，光标和拖选都不该改变正文列。
+            #expect(abs(underCaret - initial) < 0.5, "caret: \(source)")
+            #expect(abs(underSelection - initial) < 0.5, "selection: \(source)")
+            #expect(abs(final - initial) < 0.5, "final: \(source)")
         }
     }
 
     /// 点进列表行不该让正文横向跳动。
     ///
-    /// 修复前一级列表的内容列在 0，回显 `- ` 需要 18pt 却没有余量，TextKit 2 钳掉
-    /// 负行起点后整行右移 18pt——每次点进/点出列表都跳一下。内容列改成一步缩进
-    /// （28pt）之后常见前缀都放得下，位移为零。任务项从不回显源码（复选框始终
-    /// 是复选框），所以 `- [ ] ` 这个 6 字符前缀也不再有位移可言。
+    /// 普通列表与任务列表现在都始终保留渲染 marker，光标进入正文只能移动插入点，
+    /// 不能改变 marker lane 或正文列。
     @Test func caretEnteringCommonListItemDoesNotShiftContent() throws {
         for source in [
             "- 目标", "* 目标", "+ 目标", "1. 目标", "- 一级\n  - 目标",
@@ -1449,13 +1467,13 @@ import Testing
                     + firstLine.locationForCharacter(at: resolved.location).x
             }
             let caret = NSRange(location: (source as NSString).range(of: "目标").location, length: 0)
-            let revealed = try contentX(selection: caret)
-            let hidden = try contentX(selection: nil)
-            #expect(abs(revealed - hidden) < 0.5, "点进 \"\(source)\" 时正文列跳动了")
+            let underCaret = try contentX(selection: caret)
+            let initial = try contentX(selection: nil)
+            #expect(abs(underCaret - initial) < 0.5, "点进 \"\(source)\" 时正文列跳动了")
         }
     }
 
-    @Test func coordinatorRevealAndHideKeepEveryListContentColumnStable() throws {
+    @Test func coordinatorSelectionChangesKeepEveryListContentColumnStable() throws {
         let listSources = [
             "- 目标", "10. 目标", "100. 目标",
             "- [ ] 目标", "- [x] 目标",
@@ -1477,7 +1495,7 @@ import Testing
                 into: storage
             )
 
-            let hiddenX = try listContentX(containing: "目标", in: textView)
+            let initialX = try listContentX(containing: "目标", in: textView)
             let coordinator = RenderCoordinator()
             coordinator.adoptPackage(package)
             let contentLocation = (source as NSString).range(of: "目标").location
@@ -1485,21 +1503,20 @@ import Testing
                 selection: NSRange(location: contentLocation, length: 0),
                 into: storage
             )
-            let revealedX = try listContentX(containing: "目标", in: textView)
-            // 回显允许右移（前缀放不下时），但不允许左移。
-            #expect(revealedX >= hiddenX - 0.5, "source: \(source)")
+            let underCaretX = try listContentX(containing: "目标", in: textView)
+            #expect(abs(underCaretX - initialX) < 0.5, "source: \(source)")
 
             coordinator.updateMarkerVisibility(
                 selection: NSRange(location: plainLocation, length: 0),
                 into: storage
             )
-            let hiddenAgainX = try listContentX(containing: "目标", in: textView)
-            #expect(abs(hiddenAgainX - hiddenX) < 0.5, "source: \(source)")
+            let finalX = try listContentX(containing: "目标", in: textView)
+            #expect(abs(finalX - initialX) < 0.5, "source: \(source)")
             #expect(storage.string == source)
         }
     }
 
-    @Test func revealedListSourceKeepsSoftWrapContinuationStable() throws {
+    @Test func selectionChangesKeepTaskSoftWrapContinuationStable() throws {
         let source = "- [ ] 目标" + String(repeating: " 很长的列表正文", count: 24)
         let target = (source as NSString).range(of: "目标").location
 
@@ -1520,12 +1537,10 @@ import Testing
             )
         }
 
-        let hidden = try positions(selection: nil)
-        let revealed = try positions(selection: NSRange(location: target, length: 0))
-        // 任务前缀宽于正文列时回显右移；收起后回到原列（回归由
-        // revealedListSourceMarkerKeepsEveryContentColumnStable 覆盖）。
-        #expect(revealed.content >= hidden.content - 0.5)
-        #expect(abs(revealed.continuation - hidden.continuation) < 0.5)
+        let initial = try positions(selection: nil)
+        let underCaret = try positions(selection: NSRange(location: target, length: 0))
+        #expect(abs(underCaret.content - initial.content) < 0.5)
+        #expect(abs(underCaret.continuation - initial.continuation) < 0.5)
     }
 
     @Test func orderedMarkersUseStableLaneAndFitLargeNumbers() throws {

@@ -546,6 +546,15 @@ public struct RenderEngine {
             .hidden
         }
 
+        func staysRenderedUnderSelection(_ kind: Token.Kind) -> Bool {
+            switch kind {
+            case .rule, .unorderedListItem, .orderedListItem, .taskListItem, .table:
+                return true
+            default:
+                return false
+            }
+        }
+
         guard mode == .rendered else {
             return package.tokens.flatMap { makeEntries($0, state: .revealed) }
         }
@@ -561,21 +570,11 @@ public struct RenderEngine {
             let state: MarkerState
             if token.isBlockMarker {
                 let onCaret: Bool
-                if case .rule = token.kind {
-                    // 水平分隔线在渲染模式下始终保持为横线。它没有可编辑的
-                    // 正文内容，光标或选区经过时回显 `---` 只会让预览与源码
-                    // 重叠；需要逐字编辑时由显式源码模式统一负责。
-                    onCaret = false
-                } else if case .taskListItem = token.kind {
-                    // 复选框**始终是复选框**（对标 Typora）：它是可点击的控件，
-                    // 光标经过就变回 `- [ ] ` 源码会让控件在编辑时消失，也让
-                    // 「点一下切换」失去落点。源码模式下逐字显示，由上面
-                    // `mode == .rendered` 的 guard 统一处理，与光标无关。
-                    onCaret = false
-                } else if case .table = token.kind {
-                    // 表格在渲染模式下始终是可直接编辑的网格（对标 Obsidian
-                    // 1.5 Table Editor）。光标进入单元格时不能把 `|`、填充空格和
-                    // 分隔行摊回源码；完整 Markdown 只在显式源码模式里显示。
+                if staysRenderedUnderSelection(token.kind) {
+                    // 分隔线、普通列表、任务列表和表格在渲染模式下始终保留
+                    // 各自的直接编辑视觉。光标或选区经过时不摊回 `---`、
+                    // `- `、`1. `、`- [ ] ` 或表格分隔符；需要逐字编辑 marker
+                    // 时由显式源码模式统一负责。
                     onCaret = false
                 } else if selection.length > 0 {
                     // 跨行拖选时，所有与选区相交的块标记都应回显，而不是只看
@@ -1315,8 +1314,8 @@ public struct RenderEngine {
     /// 走块图片那条路（图片行进出光标时不还原）。只留这一个入口。
     ///
     /// - Parameter skipHiddenListParagraph: 首次全量渲染时 `applyStyle` 已经写好
-    ///   了列表的隐藏态段落样式，大文档没必要为每一项重建一次；只有回显态需要
-    ///   在这里补偿行首原点。
+    ///   了列表的隐藏态段落样式，大文档没必要为每一项重建一次。显式调用方若
+    ///   应用其他状态，仍从这里同步 marker 与段落几何。
     public func apply(
         _ entry: VisibilityEntry,
         imageBaseURL: URL?,

@@ -938,6 +938,41 @@ final class EditorTextView: NSTextView {
         return true
     }
 
+    /// Structural Tab behavior shared by unordered, ordered, and task lists.
+    /// The source edit is one grouped replacement so indentation and its inverse
+    /// each occupy exactly one undo step. Non-list contexts deliberately return
+    /// false; the command entry points then make Tab/Shift-Tab a no-op instead of
+    /// inserting literal tab characters into Markdown.
+    func performListIndent(
+        backward: Bool,
+        selectedRanges ranges: [NSValue]? = nil
+    ) -> Bool {
+        pendingPair = nil
+        let ranges = ranges ?? selectedRanges
+        guard hasMarkedText() == false,
+              ranges.count == 1,
+              let selection = ranges.first?.rangeValue,
+              let edit = TypingBehaviors.listIndentEdit(
+                  in: string as NSString,
+                  selection: selection,
+                  direction: backward ? .outdent : .indent,
+                  isListContext: { [self] location in
+                      if case .list = typingBlockContext(at: location) { return true }
+                      return false
+                  }
+              )
+        else { return false }
+
+        breakUndoCoalescing()
+        let manager = undoManager
+        manager?.beginUndoGrouping()
+        super.insertText(edit.replacement, replacementRange: edit.range)
+        setSelectedRange(edit.selectionAfter)
+        manager?.endUndoGrouping()
+        breakUndoCoalescing()
+        return true
+    }
+
     /// Block context for the line holding `location`, or `nil` when there is no
     /// line to classify.
     ///
@@ -1195,26 +1230,18 @@ final class EditorTextView: NSTextView {
         }
     }
 
-    /// Obsidian 风格表格导航：Tab 前进，Shift-Tab 后退。非表格位置仍交还 AppKit。
+    /// Tab 优先级：渲染表格导航 → 列表缩进 → 普通正文 no-op。
     override func insertTab(_ sender: Any?) {
         pendingPair = nil
         let backward = commandModifierFlags.contains(.shift)
-        guard tableNavigationHandler?(backward) == true else {
-            if backward {
-                super.insertBacktab(sender)
-            } else {
-                super.insertTab(sender)
-            }
-            return
-        }
+        if tableNavigationHandler?(backward) == true { return }
+        _ = performListIndent(backward: backward)
     }
 
     override func insertBacktab(_ sender: Any?) {
         pendingPair = nil
-        guard tableNavigationHandler?(true) == true else {
-            super.insertBacktab(sender)
-            return
-        }
+        if tableNavigationHandler?(true) == true { return }
+        _ = performListIndent(backward: true)
     }
 
     override func moveUp(_ sender: Any?) {

@@ -20,6 +20,11 @@ enum TypingBehaviors {
         case other
     }
 
+    enum ListIndentDirection {
+        case indent
+        case outdent
+    }
+
     /// Returns a single replacement for Enter, or `nil` to let NSTextView use
     /// its normal newline behavior.
     static func newlineEdit(
@@ -111,6 +116,108 @@ enum TypingBehaviors {
         }
 
         return nil
+    }
+
+    /// Typora/Obsidian-style structural list indentation. The edit changes only
+    /// Markdown indentation before list markers; ordinary paragraphs return nil
+    /// so the caller can deliberately make Tab/Shift-Tab a no-op there.
+    ///
+    /// Indent aligns the selected item beneath its nearest preceding sibling at
+    /// the same level. Outdent returns it to the nearest preceding ancestor. A
+    /// collapsed selection also carries the item's contiguous descendants so a
+    /// subtree cannot be torn apart by moving only its root line.
+    static func listIndentEdit(
+        in source: NSString,
+        selection: NSRange,
+        direction: ListIndentDirection,
+        isListContext: (Int) -> Bool = { _ in true }
+    ) -> Edit? {
+        guard selection.location >= 0,
+              selection.location <= source.length,
+              NSMaxRange(selection) <= source.length,
+              let selected = selectedListLines(in: source, selection: selection),
+              selected.isEmpty == false,
+              selected.allSatisfy({ isListContext($0.contextLocation) })
+        else { return nil }
+
+        let root = selected[0]
+        let delta: Int
+        switch direction {
+        case .indent:
+            guard let sibling = previousListLine(
+                in: source,
+                before: root.bounds.full.location,
+                quotePrefix: root.prefix.quotePrefix,
+                matchingIndent: root.prefix.indentColumns
+            ) else { return nil }
+            delta = sibling.prefix.markerWidth
+        case .outdent:
+            guard root.prefix.indentColumns > 0 else { return nil }
+            let ancestor = previousAncestorLine(
+                in: source,
+                before: root.bounds.full.location,
+                quotePrefix: root.prefix.quotePrefix,
+                belowIndent: root.prefix.indentColumns
+            )
+            delta = root.prefix.indentColumns - (ancestor?.prefix.indentColumns ?? 0)
+        }
+        guard delta > 0 else { return nil }
+
+        var lines = selected
+        if selection.length == 0,
+           let descendants = trailingDescendantLines(
+               in: source,
+               after: selected[selected.count - 1],
+               rootIndent: root.prefix.indentColumns
+           )
+        {
+            guard descendants.allSatisfy({ isListContext($0.contextLocation) }) else { return nil }
+            lines.append(contentsOf: descendants)
+        }
+
+        let changes = lines.compactMap { line -> TextChange? in
+            let current = line.prefix.indentColumns
+            let target: Int
+            switch direction {
+            case .indent: target = current + delta
+            case .outdent: target = max(0, current - delta)
+            }
+            guard target != current else { return nil }
+            return TextChange(
+                range: NSRange(
+                    location: line.bounds.contents.location + line.prefix.indentRange.location,
+                    length: line.prefix.indentRange.length
+                ),
+                replacement: String(repeating: " ", count: target)
+            )
+        }
+        guard let firstChange = changes.first, let lastChange = changes.last else { return nil }
+
+        let replacementRange = NSRange(
+            location: firstChange.range.location,
+            length: NSMaxRange(lastChange.range) - firstChange.range.location
+        )
+        let replacement = NSMutableString(string: source.substring(with: replacementRange))
+        for change in changes.reversed() {
+            replacement.replaceCharacters(
+                in: NSRange(
+                    location: change.range.location - replacementRange.location,
+                    length: change.range.length
+                ),
+                with: change.replacement
+            )
+        }
+
+        let mappedStart = mappedLocation(selection.location, through: changes)
+        let mappedEnd = mappedLocation(NSMaxRange(selection), through: changes)
+        return Edit(
+            range: replacementRange,
+            replacement: replacement as String,
+            selectionAfter: NSRange(
+                location: mappedStart,
+                length: max(0, mappedEnd - mappedStart)
+            )
+        )
     }
 
     /// Returns a conservative auto-pair edit for `*`, `**`, and backticks.
@@ -207,12 +314,37 @@ enum TypingBehaviors {
     // MARK: - Line recognition
 
     private struct LineBounds {
+        let full: NSRange
         let contents: NSRange
     }
 
     private struct Prefix {
         let contentStart: Int
         let continuation: String
+    }
+
+    private struct ListPrefix {
+        let contentStart: Int
+        let continuation: String
+        let quotePrefix: String
+        let indentRange: NSRange
+        let indentColumns: Int
+        let markerWidth: Int
+        let markerStart: Int
+    }
+
+    private struct ListLine {
+        let bounds: LineBounds
+        let prefix: ListPrefix
+
+        var contextLocation: Int {
+            bounds.contents.location + prefix.markerStart
+        }
+    }
+
+    private struct TextChange {
+        let range: NSRange
+        let replacement: String
     }
 
     private static func lineBounds(in source: NSString, at location: Int) -> LineBounds {
@@ -223,7 +355,10 @@ enum TypingBehaviors {
             guard character == CharacterCode.lineFeed || character == CharacterCode.carriageReturn else { break }
             contentsEnd -= 1
         }
-        return LineBounds(contents: NSRange(location: full.location, length: contentsEnd - full.location))
+        return LineBounds(
+            full: full,
+            contents: NSRange(location: full.location, length: contentsEnd - full.location)
+        )
     }
 
     private static let taskListExpression = try! NSRegularExpression(
@@ -262,8 +397,10 @@ enum TypingBehaviors {
         }
     }
 
-    private static func listPrefix(in line: String) -> Prefix? {
+    private static func listPrefix(in line: String) -> ListPrefix? {
         let full = NSRange(location: 0, length: (line as NSString).length)
+        let quote = quotePrefix(in: line)
+        let quoteLength = (quote as NSString).length
 
         if let match = taskListExpression.firstMatch(in: line, range: full) {
             let indent = substring(line, match.range(at: 1))
@@ -271,9 +408,17 @@ enum TypingBehaviors {
             let beforeTask = substring(line, match.range(at: 3))
             let task = substring(line, match.range(at: 4))
             let afterTask = substring(line, match.range(at: 5))
-            return Prefix(
+            let markerStart = match.range(at: 2).location
+            return ListPrefix(
                 contentStart: NSMaxRange(match.range),
-                continuation: indent + bullet + beforeTask + task + afterTask
+                continuation: indent + bullet + beforeTask + task + afterTask,
+                quotePrefix: quote,
+                indentRange: NSRange(location: quoteLength, length: markerStart - quoteLength),
+                indentColumns: indentationColumns(in: line, range: NSRange(
+                    location: quoteLength, length: markerStart - quoteLength
+                )),
+                markerWidth: NSMaxRange(match.range(at: 3)) - markerStart,
+                markerStart: markerStart
             )
         }
 
@@ -283,20 +428,162 @@ enum TypingBehaviors {
             let indent = substring(line, match.range(at: 1))
             let delimiter = substring(line, match.range(at: 3))
             let spacing = substring(line, match.range(at: 4))
-            return Prefix(
+            let markerStart = match.range(at: 2).location
+            return ListPrefix(
                 contentStart: NSMaxRange(match.range),
-                continuation: indent + numberText + delimiter + spacing
+                continuation: indent + numberText + delimiter + spacing,
+                quotePrefix: quote,
+                indentRange: NSRange(location: quoteLength, length: markerStart - quoteLength),
+                indentColumns: indentationColumns(in: line, range: NSRange(
+                    location: quoteLength, length: markerStart - quoteLength
+                )),
+                markerWidth: NSMaxRange(match.range(at: 4)) - markerStart,
+                markerStart: markerStart
             )
         }
 
         if let match = unorderedListExpression.firstMatch(in: line, range: full) {
-            return Prefix(
+            let markerStart = match.range(at: 2).location
+            return ListPrefix(
                 contentStart: NSMaxRange(match.range),
-                continuation: substring(line, match.range)
+                continuation: substring(line, match.range),
+                quotePrefix: quote,
+                indentRange: NSRange(location: quoteLength, length: markerStart - quoteLength),
+                indentColumns: indentationColumns(in: line, range: NSRange(
+                    location: quoteLength, length: markerStart - quoteLength
+                )),
+                markerWidth: NSMaxRange(match.range(at: 3)) - markerStart,
+                markerStart: markerStart
             )
         }
 
         return nil
+    }
+
+    private static func selectedListLines(in source: NSString, selection: NSRange) -> [ListLine]? {
+        guard source.length > 0 else { return nil }
+        let start = min(selection.location, source.length)
+        let endLocation: Int
+        if selection.length == 0 {
+            endLocation = start
+        } else {
+            endLocation = max(start, min(source.length, NSMaxRange(selection)) - 1)
+        }
+
+        let first = lineBounds(in: source, at: start)
+        let last = lineBounds(in: source, at: endLocation)
+        var cursor = first.full.location
+        let end = NSMaxRange(last.full)
+        var lines: [ListLine] = []
+        repeat {
+            let bounds = lineBounds(in: source, at: cursor)
+            let line = source.substring(with: bounds.contents)
+            guard let prefix = listPrefix(in: line) else { return nil }
+            lines.append(ListLine(bounds: bounds, prefix: prefix))
+            let next = NSMaxRange(bounds.full)
+            guard next > cursor else { break }
+            cursor = next
+        } while cursor < end
+        return lines
+    }
+
+    private static func previousListLine(
+        in source: NSString,
+        before location: Int,
+        quotePrefix: String,
+        matchingIndent indent: Int
+    ) -> ListLine? {
+        var cursor = location
+        while cursor > 0 {
+            let bounds = lineBounds(in: source, at: cursor - 1)
+            let line = source.substring(with: bounds.contents)
+            guard line.trimmingCharacters(in: structuralWhitespace).isEmpty == false,
+                  let prefix = listPrefix(in: line),
+                  prefix.quotePrefix == quotePrefix
+            else { return nil }
+            if prefix.indentColumns == indent {
+                return ListLine(bounds: bounds, prefix: prefix)
+            }
+            if prefix.indentColumns < indent { return nil }
+            cursor = bounds.full.location
+        }
+        return nil
+    }
+
+    private static func previousAncestorLine(
+        in source: NSString,
+        before location: Int,
+        quotePrefix: String,
+        belowIndent indent: Int
+    ) -> ListLine? {
+        var cursor = location
+        while cursor > 0 {
+            let bounds = lineBounds(in: source, at: cursor - 1)
+            let line = source.substring(with: bounds.contents)
+            guard line.trimmingCharacters(in: structuralWhitespace).isEmpty == false,
+                  let prefix = listPrefix(in: line),
+                  prefix.quotePrefix == quotePrefix
+            else { return nil }
+            if prefix.indentColumns < indent {
+                return ListLine(bounds: bounds, prefix: prefix)
+            }
+            cursor = bounds.full.location
+        }
+        return nil
+    }
+
+    private static func trailingDescendantLines(
+        in source: NSString,
+        after line: ListLine,
+        rootIndent: Int
+    ) -> [ListLine]? {
+        var cursor = NSMaxRange(line.bounds.full)
+        var descendants: [ListLine] = []
+        while cursor < source.length {
+            let bounds = lineBounds(in: source, at: cursor)
+            let text = source.substring(with: bounds.contents)
+            guard text.trimmingCharacters(in: structuralWhitespace).isEmpty == false,
+                  let prefix = listPrefix(in: text),
+                  prefix.quotePrefix == line.prefix.quotePrefix,
+                  prefix.indentColumns > rootIndent
+            else { break }
+            descendants.append(ListLine(bounds: bounds, prefix: prefix))
+            let next = NSMaxRange(bounds.full)
+            guard next > cursor else { break }
+            cursor = next
+        }
+        return descendants.isEmpty ? nil : descendants
+    }
+
+    private static func indentationColumns(in line: String, range: NSRange) -> Int {
+        let indentation = (line as NSString).substring(with: range)
+        var columns = 0
+        for character in indentation.utf16 {
+            if character == CharacterCode.tab {
+                columns += 4 - columns % 4
+            } else {
+                columns += 1
+            }
+        }
+        return columns
+    }
+
+    private static func mappedLocation(_ location: Int, through changes: [TextChange]) -> Int {
+        var delta = 0
+        for change in changes {
+            let start = change.range.location
+            let end = NSMaxRange(change.range)
+            let replacementLength = (change.replacement as NSString).length
+            if location < start { break }
+            if location <= end {
+                if change.range.length == 0 {
+                    return start + delta + replacementLength
+                }
+                return start + delta + min(replacementLength, max(0, location - start))
+            }
+            delta += replacementLength - change.range.length
+        }
+        return location + delta
     }
 
     private static let quotePrefixExpression = try! NSRegularExpression(
@@ -387,4 +674,3 @@ private extension NSString {
         location < length ? character(at: location) : nil
     }
 }
-

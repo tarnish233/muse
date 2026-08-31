@@ -15,6 +15,12 @@ import Testing
         let expected: String
     }
 
+    struct ListIndentCase: Sendable {
+        let source: String
+        let target: String
+        let expectedIndented: String
+    }
+
     private func host(_ textView: EditorTextView, size: NSSize = NSSize(width: 320, height: 160)) -> NSWindow {
         textView.frame = NSRect(origin: .zero, size: size)
         let window = NSWindow(
@@ -26,6 +32,21 @@ import Testing
         window.contentView = textView
         window.makeFirstResponder(textView)
         return window
+    }
+
+    private func tabKeyEvent(in window: NSWindow, backward: Bool) throws -> NSEvent {
+        try #require(NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: backward ? [.shift] : [],
+            timestamp: 0,
+            windowNumber: window.windowNumber,
+            context: nil,
+            characters: backward ? "\u{19}" : "\t",
+            charactersIgnoringModifiers: "\t",
+            isARepeat: false,
+            keyCode: 48
+        ))
     }
 
     private func markerInkBounds(of fragment: MuseLayoutFragment) -> CGRect? {
@@ -396,6 +417,136 @@ import Testing
         #expect(textView.performSmartNewline() == false)
         #expect(storage.string == testCase.expectedSource)
         #expect(textView.selectedRange() == NSRange(location: testCase.expectedCaret, length: 0))
+    }
+
+    @Test func plainParagraphTabAndBacktabAreNoOps() throws {
+        let source = "正文段落"
+        let storage = NSTextStorage(string: source)
+        let textView = EditorTextView.make(textStorage: storage)
+        let window = host(textView)
+        defer { window.contentView = nil }
+        let caret = NSRange(location: storage.length, length: 0)
+        textView.setSelectedRange(caret)
+
+        textView.keyDown(with: try tabKeyEvent(in: window, backward: false))
+        textView.keyDown(with: try tabKeyEvent(in: window, backward: true))
+
+        #expect(storage.string == source)
+        #expect(textView.selectedRange() == caret)
+    }
+
+    @Test(
+        "Tab and Shift-Tab indent every supported list marker",
+        arguments: [
+            ListIndentCase(
+                source: "- 第一项\n- 第二项",
+                target: "第二项",
+                expectedIndented: "- 第一项\n  - 第二项"
+            ),
+            ListIndentCase(
+                source: "1. 第一项\n2. 第二项",
+                target: "第二项",
+                expectedIndented: "1. 第一项\n   2. 第二项"
+            ),
+            ListIndentCase(
+                source: "- [ ] 第一项\n- [x] 第二项",
+                target: "第二项",
+                expectedIndented: "- [ ] 第一项\n  - [x] 第二项"
+            ),
+            ListIndentCase(
+                source: "> - 第一项\n> - 第二项",
+                target: "第二项",
+                expectedIndented: "> - 第一项\n>   - 第二项"
+            ),
+        ]
+    )
+    func nativeTabEventsIndentAndOutdentLists(testCase: ListIndentCase) throws {
+        let storage = NSTextStorage(string: testCase.source)
+        let textView = EditorTextView.make(textStorage: storage)
+        let window = host(textView)
+        defer { window.contentView = nil }
+        let target = (storage.string as NSString).range(of: testCase.target)
+        let caret = NSRange(location: NSMaxRange(target), length: 0)
+        textView.setSelectedRange(caret)
+
+        textView.keyDown(with: try tabKeyEvent(in: window, backward: false))
+        #expect(storage.string == testCase.expectedIndented)
+
+        textView.keyDown(with: try tabKeyEvent(in: window, backward: true))
+        #expect(storage.string == testCase.source)
+        #expect(textView.selectedRange() == caret)
+    }
+
+    @Test func firstListItemCannotIndentWithoutAPrecedingSibling() throws {
+        let source = "- 第一项\n- 第二项"
+        let storage = NSTextStorage(string: source)
+        let textView = EditorTextView.make(textStorage: storage)
+        let window = host(textView)
+        defer { window.contentView = nil }
+        let first = (source as NSString).range(of: "第一项")
+        let caret = NSRange(location: NSMaxRange(first), length: 0)
+        textView.setSelectedRange(caret)
+
+        textView.keyDown(with: try tabKeyEvent(in: window, backward: false))
+
+        #expect(storage.string == source)
+        #expect(textView.selectedRange() == caret)
+    }
+
+    @Test func listIndentCarriesDescendantsAndUndoesAsOneEdit() throws {
+        let source = "- 第一项\n- 第二项\n  - 子项"
+        let indented = "- 第一项\n  - 第二项\n    - 子项"
+        let storage = NSTextStorage(string: source)
+        let textView = EditorTextView.make(textStorage: storage)
+        let window = host(textView)
+        defer { window.contentView = nil }
+        let second = (source as NSString).range(of: "第二项")
+        textView.setSelectedRange(NSRange(location: NSMaxRange(second), length: 0))
+
+        textView.keyDown(with: try tabKeyEvent(in: window, backward: false))
+        #expect(storage.string == indented)
+
+        let manager = try #require(textView.undoManager)
+        manager.undo()
+        #expect(storage.string == source)
+    }
+
+    @Test func selectedSiblingListItemsIndentAndOutdentTogether() throws {
+        let source = "- 第一项\n- 第二项\n- 第三项"
+        let indented = "- 第一项\n  - 第二项\n  - 第三项"
+        let storage = NSTextStorage(string: source)
+        let textView = EditorTextView.make(textStorage: storage)
+        let window = host(textView)
+        defer { window.contentView = nil }
+        let start = (source as NSString).range(of: "- 第二项").location
+        let selection = NSRange(location: start, length: (source as NSString).length - start)
+        textView.setSelectedRange(selection)
+
+        textView.keyDown(with: try tabKeyEvent(in: window, backward: false))
+        #expect(storage.string == indented)
+
+        textView.keyDown(with: try tabKeyEvent(in: window, backward: true))
+        #expect(storage.string == source)
+        #expect(textView.selectedRange() == selection)
+    }
+
+    @Test func listShapedCodeFenceLineDoesNotIndent() throws {
+        let source = "```\n- 不是列表\n```"
+        let storage = NSTextStorage(string: source)
+        let engine = RenderEngine()
+        let package = engine.prepare(source)
+        _ = engine.render(package: package, selection: nil, into: storage)
+        let textView = EditorTextView.make(textStorage: storage)
+        let window = host(textView)
+        defer { window.contentView = nil }
+        let fakeItem = (source as NSString).range(of: "不是列表")
+        let caret = NSRange(location: NSMaxRange(fakeItem), length: 0)
+        textView.setSelectedRange(caret)
+
+        textView.keyDown(with: try tabKeyEvent(in: window, backward: false))
+
+        #expect(storage.string == source)
+        #expect(textView.selectedRange() == caret)
     }
 
     @Test(

@@ -404,6 +404,10 @@ final class EditorTextView: NSTextView {
         textView.textContainerInset = NSSize(width: 28, height: 16)
         textView.standardSelectedTextAttributes = textView.selectedTextAttributes
         textView.addSubview(textView.tableChromeOverlay, positioned: .above, relativeTo: nil)
+
+        // App 外观会在任何编辑视图创建前确定；主动建立 fragment 使用的已解析
+        // 颜色快照，不能只依赖 viewDidChangeEffectiveAppearance 的后续变化通知。
+        BlockVisualPalette.shared.update(for: textView.effectiveAppearance)
         return textView
     }
 

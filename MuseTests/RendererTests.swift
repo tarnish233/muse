@@ -645,6 +645,43 @@ import Testing
         #expect(light.checkboxUnchecked.components != dark.checkboxUnchecked.components)
     }
 
+    @Test func editorAssemblySynchronizesPaletteWithEffectiveAppearance() {
+        let application = NSApplication.shared
+        let aqua = NSAppearance(named: .aqua)!
+        let darkAqua = NSAppearance(named: .darkAqua)!
+        let originalAppearance = application.appearance
+        defer {
+            application.appearance = originalAppearance
+            BlockVisualPalette.shared.update(for: originalAppearance ?? aqua)
+        }
+
+        BlockVisualPalette.shared.update(for: aqua)
+        let expectedLight = BlockVisualPalette.shared.snapshot()
+        BlockVisualPalette.shared.update(for: darkAqua)
+        let expectedDark = BlockVisualPalette.shared.snapshot()
+
+        for (appearance, staleAppearance, expected) in [
+            (aqua, darkAqua, expectedLight),
+            (darkAqua, aqua, expectedDark),
+        ] {
+            application.appearance = appearance
+            // 模拟 singleton 早于首个编辑视图、按相反外观初始化的状态。
+            BlockVisualPalette.shared.update(for: staleAppearance)
+
+            let textView = EditorTextView.make(textStorage: NSTextStorage(string: "> quote"))
+            let actual = BlockVisualPalette.shared.snapshot()
+
+            #expect(textView.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua])
+                == appearance.bestMatch(from: [.aqua, .darkAqua]))
+            #expect(actual.quoteBackground.components == expected.quoteBackground.components)
+            #expect(actual.codeBackground.components == expected.codeBackground.components)
+            #expect(actual.marker.components == expected.marker.components)
+            #expect(actual.border.components == expected.border.components)
+            #expect(actual.tableHeaderBackground.components == expected.tableHeaderBackground.components)
+            #expect(actual.tableStripeBackground.components == expected.tableStripeBackground.components)
+        }
+    }
+
     @Test func taskMarkersUseAccentAndContrastingColors() throws {
         let source = "- [ ] 待办\n- [x] 完成"
         let storage = NSTextStorage(string: source)

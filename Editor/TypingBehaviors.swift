@@ -142,6 +142,7 @@ enum TypingBehaviors {
 
         let root = selected[0]
         let delta: Int
+        let firstOrderedNumberAtDestination: Int
         switch direction {
         case .indent:
             guard let sibling = previousListLine(
@@ -151,6 +152,7 @@ enum TypingBehaviors {
                 matchingIndent: root.prefix.indentColumns
             ) else { return nil }
             delta = sibling.prefix.markerWidth
+            firstOrderedNumberAtDestination = 1
         case .outdent:
             guard root.prefix.indentColumns > 0 else { return nil }
             let ancestor = previousAncestorLine(
@@ -160,6 +162,7 @@ enum TypingBehaviors {
                 belowIndent: root.prefix.indentColumns
             )
             delta = root.prefix.indentColumns - (ancestor?.prefix.indentColumns ?? 0)
+            firstOrderedNumberAtDestination = ancestor?.prefix.orderedNumber.map { $0 + 1 } ?? 1
         }
         guard delta > 0 else { return nil }
 
@@ -175,7 +178,7 @@ enum TypingBehaviors {
             lines.append(contentsOf: descendants)
         }
 
-        let changes = lines.compactMap { line -> TextChange? in
+        var changes = lines.compactMap { line -> TextChange? in
             let current = line.prefix.indentColumns
             let target: Int
             switch direction {
@@ -190,6 +193,40 @@ enum TypingBehaviors {
                 ),
                 replacement: String(repeating: " ", count: target)
             )
+        }
+
+        // An ordered sublist which immediately follows paragraph content must
+        // begin at 1 under CommonMark. Keeping the old top-level marker (`2.`)
+        // makes cmark parse the line as plain paragraph text even though its
+        // indentation is otherwise correct. Renumber only the selected sibling
+        // roots; descendants keep the numbering of their own nested lists.
+        var nextOrderedNumber = firstOrderedNumberAtDestination
+        for line in selected where line.prefix.indentColumns == root.prefix.indentColumns {
+            guard let numberRange = line.prefix.orderedNumberRange else {
+                nextOrderedNumber = 1
+                continue
+            }
+            let replacement = String(nextOrderedNumber)
+            let currentLength = numberRange.length
+            if source.substring(with: NSRange(
+                location: line.bounds.contents.location + numberRange.location,
+                length: currentLength
+            )) != replacement {
+                changes.append(TextChange(
+                    range: NSRange(
+                        location: line.bounds.contents.location + numberRange.location,
+                        length: currentLength
+                    ),
+                    replacement: replacement
+                ))
+            }
+            nextOrderedNumber += 1
+        }
+        changes.sort { lhs, rhs in
+            if lhs.range.location != rhs.range.location {
+                return lhs.range.location < rhs.range.location
+            }
+            return lhs.range.length < rhs.range.length
         }
         guard let firstChange = changes.first, let lastChange = changes.last else { return nil }
 
@@ -331,6 +368,8 @@ enum TypingBehaviors {
         let indentColumns: Int
         let markerWidth: Int
         let markerStart: Int
+        let orderedNumber: Int?
+        let orderedNumberRange: NSRange?
     }
 
     private struct ListLine {
@@ -418,7 +457,9 @@ enum TypingBehaviors {
                     location: quoteLength, length: markerStart - quoteLength
                 )),
                 markerWidth: NSMaxRange(match.range(at: 3)) - markerStart,
-                markerStart: markerStart
+                markerStart: markerStart,
+                orderedNumber: nil,
+                orderedNumberRange: nil
             )
         }
 
@@ -438,7 +479,9 @@ enum TypingBehaviors {
                     location: quoteLength, length: markerStart - quoteLength
                 )),
                 markerWidth: NSMaxRange(match.range(at: 4)) - markerStart,
-                markerStart: markerStart
+                markerStart: markerStart,
+                orderedNumber: number,
+                orderedNumberRange: match.range(at: 2)
             )
         }
 
@@ -453,7 +496,9 @@ enum TypingBehaviors {
                     location: quoteLength, length: markerStart - quoteLength
                 )),
                 markerWidth: NSMaxRange(match.range(at: 3)) - markerStart,
-                markerStart: markerStart
+                markerStart: markerStart,
+                orderedNumber: nil,
+                orderedNumberRange: nil
             )
         }
 

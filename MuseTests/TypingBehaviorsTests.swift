@@ -446,7 +446,7 @@ import Testing
             ListIndentCase(
                 source: "1. 第一项\n2. 第二项",
                 target: "第二项",
-                expectedIndented: "1. 第一项\n   2. 第二项"
+                expectedIndented: "1. 第一项\n   1. 第二项"
             ),
             ListIndentCase(
                 source: "- [ ] 第一项\n- [x] 第二项",
@@ -475,6 +475,69 @@ import Testing
         textView.keyDown(with: try tabKeyEvent(in: window, backward: true))
         #expect(storage.string == testCase.source)
         #expect(textView.selectedRange() == caret)
+    }
+
+    @Test func orderedListTabKeepsNestedOrderedListSemantics() throws {
+        let source = "1. 第一项\n2. 第二项"
+        let storage = NSTextStorage(string: source)
+        let textView = EditorTextView.make(textStorage: storage)
+        let window = host(textView)
+        defer { window.contentView = nil }
+        let second = (source as NSString).range(of: "第二项")
+        textView.setSelectedRange(NSRange(location: NSMaxRange(second), length: 0))
+
+        textView.keyDown(with: try tabKeyEvent(in: window, backward: false))
+
+        #expect(storage.string == "1. 第一项\n   1. 第二项")
+        let engine = RenderEngine()
+        let package = engine.prepare(storage.string)
+        let orderedItems = package.tokens.compactMap { token -> (line: Int, depth: Int, number: Int)? in
+            guard case let .orderedListItem(depth, number) = token.kind else { return nil }
+            return (token.line, depth, number)
+        }
+        #expect(orderedItems.map(\.line) == [0, 1])
+        #expect(orderedItems.map(\.depth) == [1, 2])
+        #expect(orderedItems.map(\.number) == [1, 1])
+
+        _ = engine.render(package: package, selection: nil, into: storage)
+        let child = (storage.string as NSString).range(of: "第二项").location
+        #expect((storage.attribute(.museListDepth, at: child, effectiveRange: nil) as? NSNumber)?.intValue == 2)
+        #expect((storage.attribute(.museListNumber, at: child, effectiveRange: nil) as? NSNumber)?.intValue == 1)
+
+        textView.keyDown(with: try tabKeyEvent(in: window, backward: true))
+        #expect(storage.string == source)
+        let restored = engine.prepare(storage.string).tokens.compactMap { token -> (depth: Int, number: Int)? in
+            guard case let .orderedListItem(depth, number) = token.kind else { return nil }
+            return (depth, number)
+        }
+        #expect(restored.map(\.depth) == [1, 1])
+        #expect(restored.map(\.number) == [1, 2])
+    }
+
+    @Test func selectedOrderedSiblingsRenumberWithinNestedListAndRestoreOnOutdent() throws {
+        let source = "1. 第一项\n2. 第二项\n3. 第三项"
+        let nested = "1. 第一项\n   1. 第二项\n   2. 第三项"
+        let storage = NSTextStorage(string: source)
+        let textView = EditorTextView.make(textStorage: storage)
+        let window = host(textView)
+        defer { window.contentView = nil }
+        let selectionStart = (source as NSString).range(of: "2. 第二项").location
+        let selection = NSRange(location: selectionStart, length: (source as NSString).length - selectionStart)
+        textView.setSelectedRange(selection)
+
+        textView.keyDown(with: try tabKeyEvent(in: window, backward: false))
+
+        #expect(storage.string == nested)
+        let nestedItems = RenderEngine().prepare(storage.string).tokens.compactMap { token -> (depth: Int, number: Int)? in
+            guard case let .orderedListItem(depth, number) = token.kind else { return nil }
+            return (depth, number)
+        }
+        #expect(nestedItems.map(\.depth) == [1, 2, 2])
+        #expect(nestedItems.map(\.number) == [1, 1, 2])
+
+        textView.keyDown(with: try tabKeyEvent(in: window, backward: true))
+        #expect(storage.string == source)
+        #expect(textView.selectedRange() == selection)
     }
 
     @Test func firstListItemCannotIndentWithoutAPrecedingSibling() throws {

@@ -35,11 +35,27 @@ struct WorkspaceBookmarking {
 struct WorkspaceProjectStore {
     let load: () -> Data?
     let save: (Data) throws -> Void
+    let backupCorruptData: (Data) throws -> String
 
     static func userDefaults(_ defaults: UserDefaults, key: String) -> WorkspaceProjectStore {
         WorkspaceProjectStore(
             load: { defaults.data(forKey: key) },
-            save: { defaults.set($0, forKey: key) }
+            save: { defaults.set($0, forKey: key) },
+            backupCorruptData: { data in
+                let timestamp = Int(Date().timeIntervalSince1970 * 1_000)
+                let baseKey = "\(key).corrupt-\(timestamp)"
+                var backupKey = baseKey
+                var suffix = 2
+                while defaults.object(forKey: backupKey) != nil {
+                    backupKey = "\(baseKey)-\(suffix)"
+                    suffix += 1
+                }
+                defaults.set(data, forKey: backupKey)
+                guard defaults.data(forKey: backupKey) == data else {
+                    throw CocoaError(.fileWriteUnknown)
+                }
+                return backupKey
+            }
         )
     }
 }

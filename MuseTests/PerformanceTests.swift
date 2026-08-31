@@ -12,6 +12,14 @@ import Testing
 @Suite(.serialized) @MainActor struct PerformanceTests {
     let clock = ContinuousClock()
 
+    private static var fullPipelineBudgetMilliseconds: Double {
+        #if DEBUG
+        900
+        #else
+        500
+        #endif
+    }
+
     /// 确定性语料：重复若干种块，直到达到目标大小。
     static func corpus(kb: Int) -> String {
         let unit = """
@@ -51,6 +59,14 @@ import Testing
         }
         _ = unitBytes
         return doc
+    }
+
+    @Test func fullPipelineBudgetMatchesBuildConfiguration() {
+        #if DEBUG
+        #expect(Self.fullPipelineBudgetMilliseconds == 900)
+        #else
+        #expect(Self.fullPipelineBudgetMilliseconds == 500)
+        #endif
     }
 
     @Test func perf20KB() throws {
@@ -200,8 +216,9 @@ import Testing
         let parseMs = ms(parseDuration)
         let applyMs = ms(applyDuration)
         print("[PERF] \(kb)KB 扫描+索引: \(parseMs) ms | 属性应用: \(applyMs) ms | tokens: \(tokenCount) | 字数: \(source.utf16.count)")
-        // 粗防线：200KB 整篇管线应远低于 500ms（目标 <16ms P95 待增量优化后验收）
-        #expect(parseMs + applyMs < 500)
+        // Debug 下 swift-markdown 带编译器插桩，只守 900ms 粗防线；
+        // 产品门槛仍由 Release 的 500ms 约束。
+        #expect(parseMs + applyMs < Self.fullPipelineBudgetMilliseconds)
     }
 
     private func ms(_ duration: Duration) -> Double {

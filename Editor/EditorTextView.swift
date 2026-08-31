@@ -1555,24 +1555,10 @@ final class EditorTextView: NSTextView {
         guard let source = pasteboard.string(forType: .string) else {
             return super.readSelection(from: pasteboard, type: type)
         }
-        let replacement = Self.normalizedLineEndings(in: source)
+        let replacement = MuseDocument.LineEnding.normalizeToLF(source)
         let range = selectedRange()
-        guard shouldChangeText(in: range, replacementString: replacement) else { return false }
         super.insertText(replacement, replacementRange: range)
         return true
-    }
-
-    private static func normalizedLineEndings(in source: String) -> String {
-        var normalized = source
-        if normalized.range(of: "\r", options: .literal) != nil {
-            normalized = normalized
-                .replacingOccurrences(of: "\r\n", with: "\n", options: .literal)
-                .replacingOccurrences(of: "\r", with: "\n", options: .literal)
-        }
-        normalized = normalized
-            .replacingOccurrences(of: "\u{2028}", with: "\n", options: .literal)
-            .replacingOccurrences(of: "\u{2029}", with: "\n", options: .literal)
-        return normalized
     }
 
     /// Standard text replacement for the checkbox hit by `point`. The source

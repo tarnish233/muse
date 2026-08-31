@@ -73,6 +73,15 @@ import Testing
         #expect(String(data: written, encoding: .utf8)?.contains("\n\n") == false)
     }
 
+    @Test func documentStorageNormalizesEverySupportedSeparatorToLF() throws {
+        let document = MuseDocument()
+        let source = "a\r\nb\rc\nd\u{0085}e\u{2028}f\u{2029}g"
+
+        try document.read(from: Data(source.utf8), ofType: markdownType)
+
+        #expect(document.buffer.string == "a\nb\nc\nd\ne\nf\ng")
+    }
+
     /// 混合终止符按**多数**归类，不是按第一处出现——否则一个 99% 是 LF、
     /// 只有一处 CRLF 的文件会被整体改写成 CRLF。
     @Test func mixedTerminatorsFollowTheMajority() throws {

@@ -87,6 +87,29 @@ public final class MuseDocument: NSDocument {
         case crlf = "\r\n"
 
         public var string: String { String(rawValue) }
+
+        private static let nonCommonMarkSeparators = ["\u{0085}", "\u{2028}", "\u{2029}"]
+
+        /// Convert every supported input line separator to the editor's sole storage
+        /// representation. This is intentionally separate from `dominantLineEnding`: NEL,
+        /// LS, and PS must not influence the file's write-back terminator, but none may
+        /// survive inside NSTextStorage.
+        public static func normalizeToLF(_ source: String) -> String {
+            var normalized = source
+            if normalized.utf16.contains(0x0D) {
+                normalized = normalized
+                    .replacingOccurrences(of: crlf.string, with: lf.string, options: .literal)
+                    .replacingOccurrences(of: cr.string, with: lf.string, options: .literal)
+            }
+            for separator in nonCommonMarkSeparators {
+                normalized = normalized.replacingOccurrences(
+                    of: separator,
+                    with: lf.string,
+                    options: .literal
+                )
+            }
+            return normalized
+        }
     }
 
     private var lineEnding = LineEnding.lf
@@ -183,18 +206,9 @@ public final class MuseDocument: NSDocument {
         }
         let text = decoded.text
         let ending = Self.dominantLineEnding(in: text)
-        // 归一是无条件的：存储必须只有 LF，哪怕主流终止符本来就是 LF——混合文件
-        // 里那几处 CRLF 同样要被抹平，否则编辑层会遇到它不认识的终止符。
-        //
-        // 全部走 `.literal`（按 UTF-16 code unit 匹配）而不是默认的字符簇比较：
-        // `"\r\n"` 在 Swift 里是**单个** Character，默认语义下 `contains("\r")`
-        // 对 CRLF 文本是 false，`replacingOccurrences(of: "\n")` 也匹配不到
-        // CRLF 里的那个 LF。
-        let body = text.utf16.contains(0x0D)
-            ? text
-                .replacingOccurrences(of: LineEnding.crlf.string, with: LineEnding.lf.string, options: .literal)
-                .replacingOccurrences(of: LineEnding.cr.string, with: LineEnding.lf.string, options: .literal)
-            : text
+        // 归一是无条件的：存储必须只有 LF。终止符投票与存储归一是两件事；
+        // NEL / LS / PS 不参与前者，但同样不得进入编辑层。
+        let body = LineEnding.normalizeToLF(text)
         MainActor.assumeIsolated {
             isReadingContent = true
             defer {

@@ -15,6 +15,11 @@ final class ProjectWorkspace {
         static let readableExtensions = Set(["md", "markdown", "mdown", "mkd", "txt", "text"])
     }
 
+    private struct ProjectStoreRecoveryError: LocalizedError {
+        let message: String
+        var errorDescription: String? { message }
+    }
+
     private(set) var projects: [WorkspaceProject] = []
     private(set) var trees: [URL: [WorkspaceNode]] = [:]
     var presentedError: String?
@@ -214,8 +219,15 @@ final class ProjectWorkspace {
         do {
             stored = try JSONDecoder().decode([StoredProject].self, from: data)
         } catch {
-            unresolvedProjectStoreError = error
-            report([error.localizedDescription])
+            do {
+                let backupLocation = try projectStore.backupCorruptData(data)
+                unresolvedProjectStoreError = nil
+                report(["项目列表数据无法读取。原数据已备份到 \(backupLocation)。"])
+            } catch {
+                let message = "项目列表数据无法读取，且备份失败。为避免覆盖原数据，保存已暂停：\(error.localizedDescription)"
+                unresolvedProjectStoreError = ProjectStoreRecoveryError(message: message)
+                report([message])
+            }
             return
         }
 

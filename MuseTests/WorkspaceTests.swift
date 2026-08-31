@@ -144,11 +144,37 @@ import Testing
         #expect(try decodedBookmarks(store.saved[0]) == [oldFirst, refreshedSecond])
     }
 
-    @Test func corruptStoredProjectsAreReportedAndPreservedWhenAddingProject() throws {
+    @Test func corruptStoredProjectsAreBackedUpBeforeSavingReplacement() throws {
         let root = try makeDirectory(named: "CorruptStore")
         defer { try? FileManager.default.removeItem(at: root) }
         let original = Data("not valid project JSON".utf8)
+        let bookmark = Data([7])
         let store = StoreRecorder(data: original)
+        let workspace = ProjectWorkspace(
+            bookmarking: WorkspaceBookmarking(
+                create: { _ in bookmark },
+                resolve: { _ in throw TestFailure.expected }
+            ),
+            projectStore: store.store
+        )
+
+        #expect(store.data == original)
+        #expect(store.backups[store.backupLocation] == original)
+        #expect(workspace.presentedError?.contains(store.backupLocation) == true)
+
+        try workspace.addProject(at: root)
+
+        let saved = try #require(store.data)
+        #expect(try decodedBookmarks(saved) == [bookmark])
+        #expect(workspace.projects.map(\.rootURL) == [root.standardizedFileURL])
+    }
+
+    @Test func failedCorruptStoreBackupBlocksReplacementSave() throws {
+        let root = try makeDirectory(named: "CorruptStoreBackupFailure")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let original = Data("not valid project JSON".utf8)
+        let store = StoreRecorder(data: original)
+        store.backupError = TestFailure.expected
         let workspace = ProjectWorkspace(
             bookmarking: WorkspaceBookmarking(
                 create: { _ in Data([7]) },
@@ -157,11 +183,34 @@ import Testing
             projectStore: store.store
         )
 
-        #expect(workspace.presentedError != nil)
+        #expect(workspace.presentedError?.contains("保存已暂停") == true)
+        #expect(store.backups.isEmpty)
 
-        _ = try? workspace.addProject(at: root)
+        do {
+            try workspace.addProject(at: root)
+            Issue.record("备份失败后不应覆盖原项目数据")
+        } catch {
+            #expect(error.localizedDescription.contains("保存已暂停"))
+        }
 
         #expect(store.data == original)
+        #expect(store.saved.isEmpty)
+        #expect(workspace.projects.isEmpty)
+    }
+
+    @Test func userDefaultsStoreWritesCorruptBackupUnderSeparateTimestampedKey() throws {
+        let suiteName = "MuseWorkspaceStoreBackupTests-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let key = "Muse.workspace.projects.test"
+        let original = Data("corrupt".utf8)
+        let store = WorkspaceProjectStore.userDefaults(defaults, key: key)
+
+        let backupLocation = try store.backupCorruptData(original)
+
+        #expect(backupLocation.hasPrefix("\(key).corrupt-"))
+        #expect(defaults.data(forKey: backupLocation) == original)
+        #expect(defaults.data(forKey: key) == nil)
     }
 
     @Test func missingStoredProjectsAreSilentAndDoNotBlockSaving() throws {
@@ -346,6 +395,9 @@ import Testing
     private final class StoreRecorder {
         var data: Data?
         var saved: [Data] = []
+        var backups: [String: Data] = [:]
+        var backupError: Error?
+        let backupLocation = "Muse.workspace.projects.corrupt-test"
 
         init(data: Data? = nil) {
             self.data = data
@@ -357,6 +409,12 @@ import Testing
                 save: { [weak self] data in
                     self?.data = data
                     self?.saved.append(data)
+                },
+                backupCorruptData: { [weak self] data in
+                    guard let self else { throw TestFailure.expected }
+                    if let backupError { throw backupError }
+                    backups[backupLocation] = data
+                    return backupLocation
                 }
             )
         }

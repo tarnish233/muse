@@ -122,7 +122,9 @@ import Testing
     @Test(arguments: [
         LineEndingTransferCase(source: "alpha\r\nbeta", expected: "alpha\nbeta"),
         LineEndingTransferCase(source: "alpha\rbeta", expected: "alpha\nbeta"),
+        LineEndingTransferCase(source: "alpha\u{0085}beta", expected: "alpha\nbeta"),
         LineEndingTransferCase(source: "alpha\u{2028}beta", expected: "alpha\nbeta"),
+        LineEndingTransferCase(source: "alpha\u{2029}beta", expected: "alpha\nbeta"),
     ])
     func pastedTextUsesOnlyLF(testCase: LineEndingTransferCase) {
         let storage = NSTextStorage()
@@ -138,6 +140,28 @@ import Testing
         textView.paste(nil)
 
         #expect(storage.string == testCase.expected)
+    }
+
+    @Test func pastedCRLFUndoIsExactlyOneSafeStep() throws {
+        let storage = NSTextStorage(string: "start")
+        let textView = EditorTextView.make(textStorage: storage)
+        let window = host(textView)
+        defer {
+            window.contentView = nil
+            NSPasteboard.general.clearContents()
+        }
+        textView.setSelectedRange(NSRange(location: storage.length, length: 0))
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString("a\r\nb", forType: .string)
+
+        textView.paste(nil)
+
+        let undoManager = try #require(textView.undoManager)
+        #expect(storage.string == "starta\nb")
+        #expect(undoManager.canUndo)
+        undoManager.undo()
+        #expect(storage.string == "start")
+        #expect(undoManager.canUndo == false)
     }
 
     @Test func pastingExistingLFKeepsLineBreak() {
@@ -159,7 +183,9 @@ import Testing
     @Test(arguments: [
         LineEndingTransferCase(source: "alpha\r\nbeta", expected: "alpha\nbeta"),
         LineEndingTransferCase(source: "alpha\rbeta", expected: "alpha\nbeta"),
+        LineEndingTransferCase(source: "alpha\u{0085}beta", expected: "alpha\nbeta"),
         LineEndingTransferCase(source: "alpha\u{2028}beta", expected: "alpha\nbeta"),
+        LineEndingTransferCase(source: "alpha\u{2029}beta", expected: "alpha\nbeta"),
     ])
     func droppedTextUsesOnlyLF(testCase: LineEndingTransferCase) {
         let pasteboard = NSPasteboard(name: .init("MuseTests.Drop.\(UUID().uuidString)"))

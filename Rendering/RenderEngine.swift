@@ -1379,8 +1379,13 @@ public struct RenderEngine {
     private func lineSpan(containing utf16Range: NSRange, package: Package) -> ClosedRange<Int> {
         let lower = lineIndex(atUTF16: utf16Range.location, package: package)
         let upperBound = utf16Range.location + utf16Range.length
+        // Character-edit ranges are half-open, but paragraph restyling must also
+        // include the line created at an inserted newline's upper boundary.
+        // Otherwise `text\n---` → `text\n\n---` dirties the original paragraph
+        // and the new blank line, while the shifted `---` line never receives its
+        // newly parsed rule block attributes.
         let upper = upperBound > utf16Range.location
-            ? lineIndex(atUTF16: upperBound - 1, package: package)
+            ? lineIndex(atUTF16: upperBound, package: package)
             : lower
         return lower...upper
     }

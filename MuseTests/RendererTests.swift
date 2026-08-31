@@ -369,6 +369,50 @@ import Testing
         #expect(storage.string == source)
     }
 
+    @Test func setextUnderlineBecomingFinalRuleRedrawsItsFragment() throws {
+        let oldSource = "末段\n---\n"
+        let storage = NSTextStorage(string: oldSource)
+        let textView = EditorTextView.make(textStorage: storage)
+        textView.frame = NSRect(x: 0, y: 0, width: 640, height: 240)
+        textView.textContainer?.containerSize = NSSize(
+            width: 640,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+
+        let oldPackage = engine.prepare(oldSource)
+        _ = engine.render(
+            package: oldPackage,
+            selection: NSRange(location: storage.length, length: 0),
+            into: storage
+        )
+        _ = customFragments(in: textView) // 先建立会被 TextKit 复用的 Setext fragment。
+
+        let insertion = (oldSource as NSString).range(of: "\n").location
+        storage.replaceCharacters(in: NSRange(location: insertion, length: 0), with: "\n")
+        let source = storage.string
+        let package = engine.prepare(source)
+        let dirtyLines = engine.applyDirty(
+            package: package,
+            previousPackage: oldPackage,
+            utf16Range: NSRange(location: insertion, length: 1),
+            into: storage
+        )
+        #expect(dirtyLines == 0...2)
+        let coordinator = RenderCoordinator()
+        coordinator.adoptPackage(package)
+        coordinator.updateMarkerVisibility(
+            selection: NSRange(location: insertion, length: 0),
+            into: storage
+        )
+
+        let marker = (source as NSString).range(of: "---").location
+        #expect(isHidden(marker, in: storage))
+        let rule = try #require(customFragments(in: textView).first { fragment in
+            fragment.blockKind == BlockVisual.rule.rawValue
+        })
+        #expect(blockPixelCount(of: rule) > 0)
+    }
+
     @Test func ruleHiddenWithSpacing() {
         let source = "上一段\n\n---\n\n下一段"
         let storage = NSTextStorage(string: source)

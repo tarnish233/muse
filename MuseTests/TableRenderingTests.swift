@@ -318,6 +318,67 @@ import Testing
         #expect(storage.string == source)
     }
 
+    @Test func nativeTabKeyEventsReachRenderedTableNavigation() throws {
+        let source = "| 姓名 | 状态 |\n|---|---|\n| Muse | ok |"
+        let storage = NSTextStorage(string: source)
+        let package = engine.prepare(source)
+        let table = try #require(package.tables.first)
+        _ = engine.render(package: package, selection: nil, into: storage)
+
+        let textView = EditorTextView.make(textStorage: storage)
+        textView.frame = NSRect(x: 0, y: 0, width: 560, height: 260)
+        let window = NSWindow(
+            contentRect: textView.frame,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = textView
+        window.makeFirstResponder(textView)
+        defer { window.contentView = nil }
+
+        let coordinator = RenderCoordinator()
+        coordinator.attach(storage: storage)
+        coordinator.textView = textView
+        coordinator.adoptPackage(package)
+        textView.tableNavigationHandler = { coordinator.navigateTable(backward: $0) }
+
+        let first = package.index.nsRange(table.rows[1].cells[0].ink)
+        let second = package.index.nsRange(table.rows[1].cells[1].ink)
+        textView.setSelectedRange(NSRange(location: first.location, length: 0))
+
+        let tab = try #require(NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: window.windowNumber,
+            context: nil,
+            characters: "\t",
+            charactersIgnoringModifiers: "\t",
+            isARepeat: false,
+            keyCode: 48
+        ))
+        textView.keyDown(with: tab)
+        #expect(textView.selectedRange() == second)
+
+        let backtab = try #require(NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [.shift],
+            timestamp: 0,
+            windowNumber: window.windowNumber,
+            context: nil,
+            characters: "\u{19}",
+            charactersIgnoringModifiers: "\t",
+            isARepeat: false,
+            keyCode: 48
+        ))
+        textView.keyDown(with: backtab)
+        #expect(textView.selectedRange() == first)
+        #expect(storage.string == source)
+    }
+
     @Test func tabFromLastCellAppendsRowAndKeepsMarkdownBacking() throws {
         let source = "| 姓名 | 状态 |\n|---|---|\n| Muse | ok |"
         let storage = NSTextStorage(string: source)

@@ -351,10 +351,21 @@ final class EditorTextView: NSTextView {
     private var pendingPair: PendingPair?
     /// 每次真实文本变化自增（didChangeText 是 NSTextView 所有编辑路径的汇合点）。
     private var editEpoch = 0
+    /// AppKit/第三方输入法有时会把 Shift-Tab 仍解析成 `insertTab:`。
+    /// 这里只暂存当前按键的修饰键，真正的命令仍由 NSResponder 入口处理；
+    /// `keyDown` 不消费、不改写任何按键。
+    private var commandModifierFlags: NSEvent.ModifierFlags = []
 
     override func didChangeText() {
         editEpoch += 1
         super.didChangeText()
+    }
+
+    override func keyDown(with event: NSEvent) {
+        let previous = commandModifierFlags
+        commandModifierFlags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        defer { commandModifierFlags = previous }
+        super.keyDown(with: event)
     }
 
     static func make(textStorage: NSTextStorage) -> EditorTextView {
@@ -1187,8 +1198,13 @@ final class EditorTextView: NSTextView {
     /// Obsidian 风格表格导航：Tab 前进，Shift-Tab 后退。非表格位置仍交还 AppKit。
     override func insertTab(_ sender: Any?) {
         pendingPair = nil
-        guard tableNavigationHandler?(false) == true else {
-            super.insertTab(sender)
+        let backward = commandModifierFlags.contains(.shift)
+        guard tableNavigationHandler?(backward) == true else {
+            if backward {
+                super.insertBacktab(sender)
+            } else {
+                super.insertTab(sender)
+            }
             return
         }
     }

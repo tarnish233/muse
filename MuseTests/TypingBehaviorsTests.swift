@@ -474,8 +474,8 @@ import Testing
         #expect(storage.string == "- item\n- \nnext")
     }
 
-    /// 情形 3：引用内的列表。容器块占用了整行的 `.museBlock`（值为 quote），
-    /// 但它只写这一个键，列表 marker 属性完好地留在下面。
+    /// 情形 3：引用内的列表。列表是更具体的交互语义，所以 `.museBlock` 最终
+    /// 保留 list；引用的背景/前景属性仍叠在同一行，容器视觉没有丢失。
     @Test func quotedListContinuesFromSurvivingMarkerAttributes() {
         let source = "> - item"
         let storage = NSTextStorage(string: source)
@@ -486,9 +486,12 @@ import Testing
         defer { window.contentView = nil }
         #expect(
             storage.attribute(.museBlock, at: 7, effectiveRange: nil) as? String
-                == BlockVisual.quote.rawValue,
-            "前提：容器块确实占用了 .museBlock"
+                == BlockVisual.list.rawValue + ":u",
+            "引用内列表应保留可供续行读取的具体列表语义"
         )
+        #expect(storage.attribute(.backgroundColor, at: 7, effectiveRange: nil) as? NSColor
+                == Theme.standard.quoteBackground,
+                "列表语义覆盖 .museBlock 时，引用容器视觉仍应保留")
         textView.setSelectedRange(NSRange(location: 8, length: 0))
 
         #expect(textView.performSmartNewline())

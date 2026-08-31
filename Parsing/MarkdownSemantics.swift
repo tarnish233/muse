@@ -545,7 +545,7 @@ public nonisolated struct MarkdownSemantics: Sendable {
         private mutating func appendHeading(_ heading: Heading) {
             guard let range = byteRange(heading), let line = sourceLine(of: heading) else { return }
             let contentStart = firstChildStart(heading) ?? min(range.upperBound, lines[line].end)
-            let markerStart = syntaxStart(on: line)
+            let markerStart = syntaxStart(on: line, atOrAfter: range.lowerBound)
             let marker = markerStart..<min(max(contentStart, markerStart), lines[line].end)
             let content = marker.upperBound..<lines[line].end
             blocks.append(.init(kind: .heading(level: heading.level), line: line, marker: marker,
@@ -574,7 +574,7 @@ public nonisolated struct MarkdownSemantics: Sendable {
             }
 
             let contentStart = firstChildStart(listItem) ?? min(range.upperBound, lines[line].end)
-            let markerStart = syntaxStart(on: line)
+            let markerStart = syntaxStart(on: line, atOrAfter: range.lowerBound)
             let markerUpper = min(max(contentStart, markerStart), lines[line].end)
             blocks.append(.init(kind: kind, line: line, marker: markerStart..<markerUpper,
                                 content: markerUpper..<lines[line].end))
@@ -637,7 +637,8 @@ public nonisolated struct MarkdownSemantics: Sendable {
             guard let range = byteRange(codeBlock), let line = sourceLine(of: codeBlock) else { return }
             markAllLines(range, into: &fenceLines)
 
-            guard let opening = delimiterRun(on: lines[line]) else { return }
+            guard let opening = delimiterRun(on: lines[line], atOrAfter: range.lowerBound) else { return }
+            let containerOffset = opening.lowerBound - lines[line].start
             // The AST source range already bounds this code block. Use that
             // range directly instead of searching the accumulated fence-line
             // set from the beginning of the document for every block.
@@ -647,7 +648,11 @@ public nonisolated struct MarkdownSemantics: Sendable {
             if line < endLine {
                 for index in (line + 1)...endLine {
                     let candidate = lines[index]
-                    if isClosingFence(candidate, matching: opening) {
+                    if isClosingFence(
+                        candidate,
+                        matching: opening,
+                        containerOffset: containerOffset
+                    ) {
                         closingLine = candidate
                         break
                     }
@@ -655,7 +660,9 @@ public nonisolated struct MarkdownSemantics: Sendable {
             }
             let bodyStart = lines[line].next
             let bodyEnd = closingLine?.start ?? bytes.count
-            let closingMarker = closingLine.flatMap { delimiterRun(on: $0) }
+            let closingMarker = closingLine.flatMap {
+                delimiterRun(on: $0, atOrAfter: $0.start + containerOffset)
+            }
             blocks.append(.init(
                 kind: .codeFence(language: codeBlock.language),
                 line: line,
@@ -669,14 +676,16 @@ public nonisolated struct MarkdownSemantics: Sendable {
             guard let range = byteRange(thematicBreak), let line = sourceLine(of: thematicBreak) else {
                 return
             }
-            let start = max(lineStarts[line], range.lowerBound)
+            let start = syntaxStart(on: line, atOrAfter: range.lowerBound)
             let end = min(lines[line].end, max(start, range.upperBound))
             blocks.append(.init(kind: .rule, line: line,
                                 marker: start..<end))
         }
 
-        private func syntaxStart(on line: Int) -> Int {
-            var start = lineStarts[line]
+        /// AST 节点可能嵌在 blockquote/list 容器内。节点自己的下界是可信的
+        /// 最早语法位置；从那里继续跳过空格，既不吞容器前缀，也保留合法缩进。
+        private func syntaxStart(on line: Int, atOrAfter lowerBound: Int) -> Int {
+            var start = min(lines[line].end, max(lineStarts[line], lowerBound))
             while start < lines[line].end, bytes[start] == 0x20 || bytes[start] == 0x09 {
                 start += 1
             }
@@ -686,11 +695,11 @@ public nonisolated struct MarkdownSemantics: Sendable {
         /// Extract a delimiter run only after the AST has identified the code
         /// block. This recovers the exact source span; it does not decide
         /// whether a line opens or closes a block.
-        private func delimiterRun(on line: TokenScanner.Line) -> Range<Int>? {
-            var start = line.start
-            while start < line.end, bytes[start] == 0x20 || bytes[start] == 0x09 {
-                start += 1
-            }
+        private func delimiterRun(
+            on line: TokenScanner.Line,
+            atOrAfter lowerBound: Int
+        ) -> Range<Int>? {
+            let start = syntaxStart(on: line.index, atOrAfter: lowerBound)
             guard start < line.end, bytes[start] == 0x60 || bytes[start] == 0x7E else { return nil }
             let delimiter = bytes[start]
             var end = start
@@ -701,9 +710,14 @@ public nonisolated struct MarkdownSemantics: Sendable {
 
         private func isClosingFence(
             _ line: TokenScanner.Line,
-            matching opening: Range<Int>?
+            matching opening: Range<Int>?,
+            containerOffset: Int
         ) -> Bool {
-            guard let opening, let closing = delimiterRun(on: line),
+            guard let opening,
+                  let closing = delimiterRun(
+                    on: line,
+                    atOrAfter: line.start + containerOffset
+                  ),
                   bytes[opening.lowerBound] == bytes[closing.lowerBound],
                   closing.count >= opening.count else { return false }
             return bytes[closing.upperBound..<line.end].allSatisfy { $0 == 0x20 || $0 == 0x09 }
@@ -813,8 +827,16 @@ public nonisolated struct MarkdownSemantics: Sendable {
 
         private func byteRange(_ markup: Markup) -> Range<Int>? {
             guard let range = markup.range,
-                  let lower = MarkdownSemantics.byteOffset(range.lowerBound, lineStarts: lineStarts, byteCount: bytes.count),
-                  let upper = MarkdownSemantics.byteOffset(range.upperBound, lineStarts: lineStarts, byteCount: bytes.count),
+                  let lower = MarkdownSemantics.byteOffset(
+                    range.lowerBound,
+                    lineStarts: lineStarts,
+                    lines: lines
+                  ),
+                  let upper = MarkdownSemantics.byteOffset(
+                    range.upperBound,
+                    lineStarts: lineStarts,
+                    lines: lines
+                  ),
                   lower <= upper else { return nil }
             return lower..<upper
         }
@@ -893,12 +915,12 @@ public nonisolated struct MarkdownSemantics: Sendable {
     private static func byteOffset(
         _ location: SourceLocation,
         lineStarts: [Int],
-        byteCount: Int
+        lines: [TokenScanner.Line]
     ) -> Int? {
         let line = location.line - 1
-        guard line >= 0, line < lineStarts.count else { return nil }
+        guard line >= 0, line < lineStarts.count, line < lines.count else { return nil }
         let offset = lineStarts[line] + max(0, location.column - 1)
-        guard offset >= 0, offset <= byteCount else { return nil }
+        guard offset >= lineStarts[line], offset <= lines[line].end else { return nil }
         return offset
     }
 

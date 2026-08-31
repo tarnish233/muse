@@ -441,6 +441,93 @@ import Testing
         })
     }
 
+    @Test func quotedListAndHeadingMarkersStartAfterContainerPrefix() throws {
+        let quotedList = MarkdownSemantics("> - a\n").blocks
+        let list = try #require(quotedList.first { block in
+            if case .unorderedList = block.kind { return true }
+            return false
+        })
+        #expect(list.marker == 2..<4)
+        #expect(list.content == 4..<5)
+
+        let quotedHeading = MarkdownSemantics("> # h\n").blocks
+        let heading = try #require(quotedHeading.first { block in
+            if case .heading(level: 1) = block.kind { return true }
+            return false
+        })
+        #expect(heading.marker == 2..<4)
+        #expect(heading.content == 4..<5)
+    }
+
+    @Test func quotedFenceProducesMatchingBlockAndLineState() throws {
+        let source = "> ```\n> c\n> ```\n"
+        let semantics = MarkdownSemantics(source)
+        let fence = try #require(semantics.blocks.first { block in
+            if case .codeFence = block.kind { return true }
+            return false
+        })
+
+        #expect(fence.line == 0)
+        #expect(fence.marker == 2..<5)
+        #expect(fence.content == 6..<10)
+        #expect(fence.closingMarker == 12..<15)
+        #expect(semantics.fenceLines == Set([0, 1, 2]))
+
+        let token = try #require(semantics.tokens.first { $0.kind == .codeFence })
+        #expect(token.markerRange == fence.marker)
+        #expect(token.contentRange == fence.content)
+        #expect(token.closingMarkerRange == fence.closingMarker)
+    }
+
+    @Test func containerAwareSyntaxDoesNotChangeTopLevelOrIndentedBlocks() throws {
+        let topLevelList = try #require(MarkdownSemantics("- a\n").blocks.first { block in
+            if case .unorderedList = block.kind { return true }
+            return false
+        })
+        #expect(topLevelList.marker == 0..<2)
+
+        let topLevelHeading = try #require(MarkdownSemantics("# h\n").blocks.first { block in
+            if case .heading(level: 1) = block.kind { return true }
+            return false
+        })
+        #expect(topLevelHeading.marker == 0..<2)
+
+        let topLevelFence = try #require(MarkdownSemantics("```\nc\n```\n").blocks.first { block in
+            if case .codeFence = block.kind { return true }
+            return false
+        })
+        #expect(topLevelFence.marker == 0..<3)
+        #expect(topLevelFence.closingMarker == 6..<9)
+
+        let nested = MarkdownSemantics("- root\n  - child\n").blocks
+        let nestedList = try #require(nested.first { block in
+            if case .unorderedList(depth: 2) = block.kind { return true }
+            return false
+        })
+        #expect(nestedList.marker == 9..<11)
+
+        let indentedFence = try #require(MarkdownSemantics("  ```\n  c\n  ```\n").blocks.first { block in
+            if case .codeFence = block.kind { return true }
+            return false
+        })
+        #expect(indentedFence.marker == 2..<5)
+        #expect(indentedFence.closingMarker == 12..<15)
+    }
+
+    @Test func overflowingASTColumnDoesNotCrossPhysicalLine() throws {
+        let source = "- x\\\n  **y**\n"
+        let semantics = MarkdownSemantics(source)
+
+        #expect(semantics.inlineMarkers.isEmpty,
+                "cmark 把 Strong 错报在上一行越界列时，应安全放弃样式而不是折叠下一行缩进")
+        let list = try #require(semantics.blocks.first { block in
+            if case .unorderedList = block.kind { return true }
+            return false
+        })
+        #expect(list.marker == 0..<2)
+        #expect(list.content == 2..<4)
+    }
+
     @Test func nestedListWithoutLinksStillUsesAST() throws {
         let source = "- root\n  - child\n"
         #expect(!source.contains("["))

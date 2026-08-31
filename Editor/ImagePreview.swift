@@ -16,8 +16,8 @@ final class ImagePreviewController: NSViewController {
     private var loadTask: Task<Void, Never>?
 
     /// 预览窗的最大边长；图片按比例缩放到其中。
-    private static let maxPreviewSize = NSSize(width: 420, height: 320)
-    private static let maxRemoteBytes = 20 * 1024 * 1024
+    nonisolated private static let maxPreviewSize = NSSize(width: 420, height: 320)
+    nonisolated static let maxRemoteBytes = 20 * 1024 * 1024
 
     init(destination: String, baseURL: URL?) {
         self.destination = destination
@@ -73,12 +73,41 @@ final class ImagePreviewController: NSViewController {
         loadTask?.cancel()
     }
 
-    private enum LoadResult {
+    nonisolated enum LoadResult: Sendable {
         case image(NSImage, CGSize)
         case failure(String)
     }
 
-    private static func load(destination: String, baseURL: URL?) async -> LoadResult {
+    /// 流式下载的有界累积器。`expectedContentLength == -1` 时仍逐字节执行硬上限；
+    /// 不能改成下载完再检查，否则未知长度响应可以先把内存吃满。
+    nonisolated struct RemoteDataAccumulator: Sendable {
+        private let maxBytes: Int
+        private(set) var data = Data()
+
+        init(expectedContentLength: Int64, maxBytes: Int = ImagePreviewController.maxRemoteBytes) {
+            self.maxBytes = max(0, maxBytes)
+            if expectedContentLength > 0 {
+                data.reserveCapacity(min(Int(clamping: expectedContentLength), self.maxBytes))
+            }
+        }
+
+        mutating func append(_ byte: UInt8) -> Bool {
+            guard data.count < maxBytes else { return false }
+            data.append(byte)
+            return true
+        }
+    }
+
+    /// Swift 6.2 的 `NonisolatedNonsendingByDefault` 会让普通 `nonisolated async`
+    /// 继续运行在调用者 actor；图片解码是 CPU 重活，因此这里需要显式 `@concurrent`
+    /// 才会离开主 actor。`executionProbe` 只供回归测试观察同一生产入口的执行线程。
+    @concurrent
+    nonisolated static func load(
+        destination: String,
+        baseURL: URL?,
+        executionProbe: (@Sendable (Bool) -> Void)? = nil
+    ) async -> LoadResult {
+        executionProbe?(isMainThreadNow())
         guard let url = ImageResolver.resolvedURL(destination: destination, baseURL: baseURL) else {
             return .failure("无法解析图片路径")
         }
@@ -98,17 +127,15 @@ final class ImagePreviewController: NSViewController {
             else {
                 return .failure("无法加载图片")
             }
-            var data = Data()
-            if http.expectedContentLength > 0 {
-                data.reserveCapacity(min(Int(http.expectedContentLength), Self.maxRemoteBytes))
-            }
+            var accumulator = RemoteDataAccumulator(
+                expectedContentLength: http.expectedContentLength
+            )
             for try await byte in bytes {
-                guard data.count < Self.maxRemoteBytes else {
+                guard accumulator.append(byte) else {
                     return .failure("图片超过 20 MB，无法预览")
                 }
-                data.append(byte)
             }
-            guard let image = downsampledImage(data: data) else {
+            guard let image = downsampledImage(data: accumulator.data) else {
                 return .failure("无法加载图片")
             }
             return .image(image, image.size)
@@ -117,7 +144,13 @@ final class ImagePreviewController: NSViewController {
         }
     }
 
-    private static func downsampledImage(data: Data) -> NSImage? {
+    /// `Thread.isMainThread` 在 async 函数体里被 Swift 6 禁用；同步小函数只用于
+    /// 观察当前 executor 所落在线程，不承载任何 UI 工作。
+    nonisolated private static func isMainThreadNow() -> Bool {
+        Thread.isMainThread
+    }
+
+    nonisolated private static func downsampledImage(data: Data) -> NSImage? {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
         let maxPixels = max(maxPreviewSize.width, maxPreviewSize.height) * 2
         let options: [CFString: Any] = [

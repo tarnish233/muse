@@ -413,6 +413,88 @@ import Testing
         #expect(storage.attribute(.backgroundColor, at: newLastCodeLine.location, effectiveRange: nil) == nil)
     }
 
+    @Test func splittingALongQuoteLineKeepsDirtyRangeLocalAfterLineRebase() {
+        let quoteLines = (0..<48).map { "> 引用第 \($0) 行" }
+        let old = quoteLines.joined(separator: "\n")
+        let storage = NSTextStorage(string: old)
+        let oldPackage = engine.prepare(old)
+        _ = engine.render(package: oldPackage, selection: nil, into: storage)
+
+        let editLine = 24
+        let lineText = quoteLines[editLine]
+        let insertion = (old as NSString).range(of: lineText).upperBound
+        let replacement = "\n> 续写"
+        storage.replaceCharacters(
+            in: NSRange(location: insertion, length: 0),
+            with: replacement
+        )
+        let source = storage.string
+        let newPackage = engine.prepare(source)
+        let dirtyLines = engine.applyDirty(
+            package: newPackage,
+            previousPackage: oldPackage,
+            utf16Range: NSRange(location: insertion, length: replacement.utf16.count),
+            into: storage
+        )
+
+        #expect(dirtyLines.lowerBound >= editLine - 1)
+        #expect(dirtyLines.upperBound <= editLine + 2)
+        #expect(dirtyLines.count <= 4)
+    }
+
+    @Test func joiningTwoLinesInsideLongQuoteKeepsDirtyRangeLocalAfterLineRebase() {
+        let quoteLines = (0..<48).map { "> 引用第 \($0) 行" }
+        let old = quoteLines.joined(separator: "\n")
+        let storage = NSTextStorage(string: old)
+        let oldPackage = engine.prepare(old)
+        _ = engine.render(package: oldPackage, selection: nil, into: storage)
+
+        let editLine = 24
+        let lineEnd = (old as NSString).range(of: quoteLines[editLine]).upperBound
+        storage.replaceCharacters(
+            in: NSRange(location: lineEnd, length: 3),
+            with: ""
+        )
+        let source = storage.string
+        let newPackage = engine.prepare(source)
+        let dirtyLines = engine.applyDirty(
+            package: newPackage,
+            previousPackage: oldPackage,
+            utf16Range: NSRange(location: lineEnd, length: 0),
+            into: storage
+        )
+
+        #expect(dirtyLines.lowerBound >= editLine - 1)
+        #expect(dirtyLines.upperBound <= editLine + 1)
+        #expect(dirtyLines.count <= 3)
+    }
+
+    @Test func insertingBareBlankLineStillExpandsTheChangedQuoteTopology() {
+        let quoteLines = (0..<48).map { "> 引用第 \($0) 行" }
+        let old = quoteLines.joined(separator: "\n")
+        let storage = NSTextStorage(string: old)
+        let oldPackage = engine.prepare(old)
+        _ = engine.render(package: oldPackage, selection: nil, into: storage)
+
+        let editLine = 24
+        let insertion = (old as NSString).range(of: quoteLines[editLine]).upperBound
+        storage.replaceCharacters(
+            in: NSRange(location: insertion, length: 0),
+            with: "\n"
+        )
+        let source = storage.string
+        let newPackage = engine.prepare(source)
+        let dirtyLines = engine.applyDirty(
+            package: newPackage,
+            previousPackage: oldPackage,
+            utf16Range: NSRange(location: insertion, length: 1),
+            into: storage
+        )
+
+        #expect(dirtyLines.lowerBound == 0)
+        #expect(dirtyLines.upperBound == 48)
+    }
+
     @Test func deletingLongLazyQuoteOpenerInvalidatesEntireFormerQuote() {
         let old = "> first\nlazy 1\nlazy 2\nlazy 3\nlazy 4\nlazy 5\nlazy 6"
         let storage = NSTextStorage(string: old)

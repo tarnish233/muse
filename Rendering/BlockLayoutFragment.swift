@@ -427,6 +427,24 @@ public nonisolated final class MuseLayoutFragment: NSTextLayoutFragment {
         return CGSize(width: numbers[0].doubleValue, height: numbers[1].doubleValue)
     }
 
+    /// 块图片预览命中与绘制共用同一个图片盒，避免折叠源码字形的窄范围与视觉图像分叉。
+    public func imagePreviewHitTarget() -> (destination: String, frame: CGRect)? {
+        guard blockKind == BlockVisual.image.rawValue,
+              let destination = imageDestination,
+              let size = imageDisplaySize
+        else { return nil }
+        let fragmentFrame = layoutFragmentFrame
+        return (
+            destination,
+            CGRect(
+                x: fragmentFrame.minX,
+                y: fragmentFrame.minY + max(0, (fragmentFrame.height - size.height) / 2),
+                width: size.width,
+                height: size.height
+            )
+        )
+    }
+
     /// Semantic marker glyph for this fragment.  Exposed so tests can inspect
     /// the same decision used by drawing.
     public var listMarkerGlyph: ListMarkerGlyph? {

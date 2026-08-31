@@ -22,6 +22,11 @@ import Testing
 
     /// 确定性语料：重复若干种块，直到达到目标大小。
     static func corpus(kb: Int) -> String {
+        // 缺陷 12 的性能守卫：单行引用无法暴露“换行后整段重排”。每个语料单元
+        // 都带 40 行连续引用，确保 20KB/200KB 基准都覆盖长引用拓扑。
+        let quoteBlock = (1...40)
+            .map { "> 引用块第 \($0) 行，包含 **加粗**、中文与 lazy-continuation 邻接。" }
+            .joined(separator: "\n")
         let unit = """
         # 标题 与 Heading
 
@@ -35,7 +40,7 @@ import Testing
         1. 有序第一
         2. 有序第二
 
-        > 引用块内容，包含 **加粗** 与中文。
+        \(quoteBlock)
 
         ```swift
         func sample() -> Int { return 42 } // 代码块

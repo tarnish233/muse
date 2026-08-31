@@ -33,7 +33,9 @@ public struct RenderEngine {
         let tokenLineRanges: [ClosedRange<Int>]
         private let tokenPrefixMaxEndLines: [Int]
         let structuralBlockLineRanges: [ClosedRange<Int>]
-        let quoteLineSet: Set<Int>
+        /// 每行最深的 blockquote 层级。脏区比较不能只看“是否引用”，否则
+        /// `> > nested` 改成 `> nested` 这类真实拓扑变化会被漏掉。
+        let quoteDepthByLine: [Int: Int]
 
         public init(
             tokens: [Token],
@@ -94,7 +96,7 @@ public struct RenderEngine {
             prefixMaxEndLines.reserveCapacity(computedTokenLineRanges.count)
             var maxEndLine = 0
             var structuralRanges: [ClosedRange<Int>] = []
-            var quoteLines: Set<Int> = []
+            var quoteDepths: [Int: Int] = [:]
             for (tokenIndex, token) in tokens.enumerated() {
                 let lineRange = computedTokenLineRanges[tokenIndex]
                 maxEndLine = max(maxEndLine, lineRange.upperBound)
@@ -102,15 +104,15 @@ public struct RenderEngine {
                 switch token.kind {
                 case .codeFence, .table:
                     structuralRanges.append(lineRange)
-                case .blockquote:
-                    quoteLines.insert(token.line)
+                case let .blockquote(depth):
+                    quoteDepths[token.line] = max(quoteDepths[token.line] ?? 0, depth)
                 default:
                     break
                 }
             }
             tokenPrefixMaxEndLines = prefixMaxEndLines
             structuralBlockLineRanges = structuralRanges
-            quoteLineSet = quoteLines
+            quoteDepthByLine = quoteDepths
         }
 
         func table(headerLine: Int) -> TableStructure? {
@@ -269,11 +271,17 @@ public struct RenderEngine {
         into storage: NSTextStorage,
         imageBaseURL: URL? = nil
     ) -> ClosedRange<Int> {
-        var dirtyLines = lineSpan(containing: utf16Range, package: package)
+        let editedLines = lineSpan(containing: utf16Range, package: package)
+        var dirtyLines = editedLines
         let lastLine = package.lineStarts.count - 1
         dirtyLines = dirtyLines.lowerBound...min(dirtyLines.upperBound + 1, lastLine)
 
-        extendForStructuralChanges(&dirtyLines, package: package, previousPackage: previousPackage)
+        extendForStructuralChanges(
+            &dirtyLines,
+            editedLines: editedLines,
+            package: package,
+            previousPackage: previousPackage
+        )
 
         // 行边界字节区间 → UTF-16 区间（增量应用只重置这一"带"）。
         let startUTF8 = package.lineStarts[dirtyLines.lowerBound]
@@ -307,6 +315,7 @@ public struct RenderEngine {
     /// （TextKit 2 存储的属性读取实测 ~56µs/次，读存储会让热路径退化）。
     private func extendForStructuralChanges(
         _ dirtyLines: inout ClosedRange<Int>,
+        editedLines: ClosedRange<Int>,
         package: Package,
         previousPackage: Package?
     ) {
@@ -322,11 +331,23 @@ public struct RenderEngine {
 
         // CommonMark lazy continuation 只能由 AST 判定。引用拓扑未变化时普通正文编辑
         // 保持局部；发生变化时沿旧/新引用的连通区间扩张到稳定。
-        let oldQuotes = quoteLines(of: previousPackage)
-        let newQuotes = quoteLines(of: package)
-        if oldQuotes != newQuotes {
+        //
+        // 旧 package 的行号属于编辑前文档。插入/删除换行后，编辑点之后的行会整体
+        // 平移；若直接比较索引集合，一次普通回车也会被误判成“整段引用拓扑变化”。
+        // 先把旧引用深度重基到新行号：拆行时复制原行深度，合行时要求被合并各行
+        // 深度一致。这样纯位移保持相等，空白行拆段/嵌套层级变化仍会触发扩张。
+        let oldQuoteDepths = quoteDepths(of: previousPackage)
+        let newQuoteDepths = quoteDepths(of: package)
+        let rebased = rebaseQuoteDepths(
+            oldQuoteDepths,
+            oldLineCount: previousPackage?.lineStarts.count ?? 0,
+            newLineCount: package.lineStarts.count,
+            editedLines: editedLines
+        )
+        if rebased.preservesTopology == false || rebased.depths != newQuoteDepths {
             let quoteRanges = (
-                contiguousRanges(oldQuotes) + contiguousRanges(newQuotes)
+                contiguousRanges(Set(rebased.depths.keys))
+                    + contiguousRanges(Set(newQuoteDepths.keys))
             ).compactMap { clamped($0, to: validLines) }
             extendConnectedRange(&dirtyLines, candidates: quoteRanges)
         }
@@ -358,8 +379,59 @@ public struct RenderEngine {
         package?.structuralBlockLineRanges ?? []
     }
 
-    private func quoteLines(of package: Package?) -> Set<Int> {
-        package?.quoteLineSet ?? []
+    private func quoteDepths(of package: Package?) -> [Int: Int] {
+        package?.quoteDepthByLine ?? [:]
+    }
+
+    /// 把编辑前引用行重基到编辑后的行坐标。
+    ///
+    /// - 插入行：原编辑行被拆成多行，新增行继承原行引用深度；实际若插入的是裸空行，
+    ///   新 AST 会缺少这些行，从而正确判为拓扑变化。
+    /// - 删除行：多行合并到编辑行。只有所有被合并行（包括裸行）深度完全一致，才算
+    ///   纯位移；否则宁可扩张，也不能把引用拆分/合并误判成局部编辑。
+    private func rebaseQuoteDepths(
+        _ oldDepths: [Int: Int],
+        oldLineCount: Int,
+        newLineCount: Int,
+        editedLines: ClosedRange<Int>
+    ) -> (depths: [Int: Int], preservesTopology: Bool) {
+        guard oldLineCount > 0 else { return ([:], oldDepths.isEmpty) }
+        let delta = newLineCount - oldLineCount
+        guard delta != 0 else { return (oldDepths, true) }
+
+        let pivot = min(max(editedLines.lowerBound, 0), max(0, newLineCount - 1))
+        var rebased: [Int: Int] = [:]
+
+        if delta > 0 {
+            for (line, depth) in oldDepths {
+                if line < pivot {
+                    rebased[line] = depth
+                } else if line == pivot {
+                    for mappedLine in pivot...(pivot + delta) {
+                        rebased[mappedLine] = depth
+                    }
+                } else {
+                    rebased[line + delta] = depth
+                }
+            }
+            return (rebased, true)
+        }
+
+        let removedLineCount = -delta
+        let collapsedOldRange = pivot...min(oldLineCount - 1, pivot + removedLineCount)
+        let collapsedDepths = Set(collapsedOldRange.map { oldDepths[$0] ?? 0 })
+        let preservesTopology = collapsedDepths.count <= 1
+
+        for (line, depth) in oldDepths {
+            if line < pivot {
+                rebased[line] = depth
+            } else if collapsedOldRange.contains(line) {
+                rebased[pivot] = max(rebased[pivot] ?? 0, depth)
+            } else {
+                rebased[line + delta] = depth
+            }
+        }
+        return (rebased, preservesTopology)
     }
 
     private func contiguousRanges(_ lines: Set<Int>) -> [ClosedRange<Int>] {

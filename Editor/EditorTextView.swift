@@ -1593,10 +1593,7 @@ final class EditorTextView: NSTextView {
               let contentManager = layoutManager.textContentManager
         else { return nil }
 
-        let containerPoint = CGPoint(
-            x: point.x - textContainerOrigin.x,
-            y: point.y - textContainerOrigin.y
-        )
+        let containerPoint = textContainerPoint(from: point)
         // 悬挂式 marker 位于正文 fragment 左侧。TextKit 对这个点有时会返回垂直
         // 距离更近的前一段（而不是 nil）；只在 nil 时回退会导致段落后的首个 Todo
         // 看得见却点不中。先验实际落点，再始终用同一 y 的正文列复核一次。
@@ -1633,10 +1630,7 @@ final class EditorTextView: NSTextView {
               let contentManager = layoutManager.textContentManager
         else { return nil }
 
-        let containerPoint = CGPoint(
-            x: point.x - textContainerOrigin.x,
-            y: point.y - textContainerOrigin.y
-        )
+        let containerPoint = textContainerPoint(from: point)
         let direct = layoutManager.textLayoutFragment(for: containerPoint)
         let lineProbe = layoutManager.textLayoutFragment(for: CGPoint(
             x: (textContainer?.size.width ?? 0) / 2,
@@ -1667,10 +1661,61 @@ final class EditorTextView: NSTextView {
     private var imagePreviewPopover: NSPopover?
 
     /// 点击点所在字符带 `.museImageDestination` 属性时返回目的地字符串。
+    ///
+    /// `NSTextView.characterIndex(for:)` 属于 `NSTextInputClient`，参数是屏幕坐标，
+    /// 不能拿已经转换过的视图坐标去问。这里始终留在 TextKit 2：先把视图点换到
+    /// text container，再从 layout fragment / line fragment 得到元素内字符下标。
+    /// 命中失败直接返回 nil，绝不能把 `NSNotFound` 夹到文档末尾。
     func imageDestination(at point: CGPoint) -> String? {
-        guard let storage = textStorage, storage.length > 0 else { return nil }
-        let index = min(max(0, characterIndex(for: point)), storage.length - 1)
+        guard let storage = textStorage, storage.length > 0,
+              let layoutManager = textLayoutManager,
+              let contentManager = layoutManager.textContentManager
+        else { return nil }
+
+        let containerPoint = textContainerPoint(from: point)
+        guard let fragment = layoutManager.textLayoutFragment(for: containerPoint),
+              fragment.layoutFragmentFrame.contains(containerPoint)
+        else { return nil }
+
+        // 块图片不是由源码字形占据整张图的宽度；它由自定义 fragment 绘制。
+        // 因此先复用绘制层同源的图片盒命中，避免只点到 0.1pt 的折叠源码才生效。
+        if let fragment = fragment as? MuseLayoutFragment,
+           let target = fragment.imagePreviewHitTarget(),
+           target.frame.contains(containerPoint) {
+            return target.destination
+        }
+
+        let pointInFragment = CGPoint(
+            x: containerPoint.x - fragment.layoutFragmentFrame.minX,
+            y: containerPoint.y - fragment.layoutFragmentFrame.minY
+        )
+        guard let line = fragment.textLineFragments.first(where: {
+            $0.typographicBounds.contains(pointInFragment)
+        }) else { return nil }
+
+        let pointInLine = CGPoint(
+            x: pointInFragment.x - line.typographicBounds.minX,
+            y: pointInFragment.y - line.typographicBounds.minY
+        )
+        let indexInElement = line.characterIndex(for: pointInLine)
+        guard indexInElement != NSNotFound,
+              NSLocationInRange(indexInElement, line.characterRange)
+        else { return nil }
+
+        let elementStart = contentManager.offset(
+            from: contentManager.documentRange.location,
+            to: fragment.rangeInElement.location
+        )
+        let index = elementStart + indexInElement
+        guard index >= 0, index < storage.length else { return nil }
         return storage.attribute(.museImageDestination, at: index, effectiveRange: nil) as? String
+    }
+
+    private func textContainerPoint(from point: CGPoint) -> CGPoint {
+        CGPoint(
+            x: point.x - textContainerOrigin.x,
+            y: point.y - textContainerOrigin.y
+        )
     }
 
     /// 在点击处弹出图片预览。transient 行为：点击别处自动关闭。

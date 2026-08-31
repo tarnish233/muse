@@ -733,6 +733,95 @@ import Testing
         #expect(storage.string == "- [x] task")
     }
 
+    // MARK: - 图片点击命中（缺陷 8）
+
+    @Test func imageHitTestingUsesViewCoordinatesAndOrdinaryClicksReachNSTextView() throws {
+        let destination = "https://example.com/end.png"
+        let source = "正文区域文字\n\n结尾是 ![图片](\(destination))"
+        let storage = NSTextStorage(string: source)
+        let engine = RenderEngine()
+        _ = engine.render(package: engine.prepare(source), selection: nil, into: storage)
+        let textView = EditorTextView.make(textStorage: storage)
+        let window = host(textView, size: NSSize(width: 560, height: 220))
+        defer { window.contentView = nil }
+        textView.textContainer?.containerSize = NSSize(
+            width: 560,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+
+        let layoutManager = try #require(textView.textLayoutManager)
+        let contentManager = try #require(layoutManager.textContentManager)
+        layoutManager.ensureLayout(for: layoutManager.documentRange)
+
+        func point(at documentLocation: Int) -> CGPoint? {
+            var result: CGPoint?
+            layoutManager.enumerateTextLayoutFragments(
+                from: layoutManager.documentRange.location,
+                options: [.ensuresLayout]
+            ) { fragment in
+                let elementStart = contentManager.offset(
+                    from: contentManager.documentRange.location,
+                    to: fragment.rangeInElement.location
+                )
+                guard let paragraph = fragment.textElement as? NSTextParagraph else { return true }
+                let local = documentLocation - elementStart
+                guard local >= 0, local < paragraph.attributedString.length,
+                      let line = fragment.textLineFragments.first(where: {
+                          NSLocationInRange(local, $0.characterRange)
+                      })
+                else { return true }
+                let localPoint = line.locationForCharacter(at: local)
+                result = CGPoint(
+                    x: fragment.layoutFragmentFrame.minX
+                        + line.typographicBounds.minX + localPoint.x + 1,
+                    y: fragment.layoutFragmentFrame.minY + line.typographicBounds.midY
+                )
+                result?.x += textView.textContainerOrigin.x
+                result?.y += textView.textContainerOrigin.y
+                return false
+            }
+            return result
+        }
+
+        let bodyRange = (source as NSString).range(of: "正文区域")
+        let imageRange = (source as NSString).range(of: "![图片]")
+        let bodyPoint = try #require(point(at: bodyRange.location))
+        let imagePoint = try #require(point(at: imageRange.location + 1))
+
+        #expect(textView.imageDestination(at: bodyPoint) == nil)
+        #expect(textView.imageDestination(at: imagePoint) == destination)
+
+        // 文档末尾仍带图片属性时，正文普通点击必须落到 super.mouseDown。
+        // 预先投递 mouse-up，避免 AppKit 的跟踪循环在单测里等待真实硬件事件。
+        textView.setSelectedRange(NSRange(location: storage.length, length: 0))
+        let windowPoint = textView.convert(bodyPoint, to: nil)
+        let mouseUp = try #require(NSEvent.mouseEvent(
+            with: .leftMouseUp,
+            location: windowPoint,
+            modifierFlags: [],
+            timestamp: 0.01,
+            windowNumber: window.windowNumber,
+            context: nil,
+            eventNumber: 2,
+            clickCount: 1,
+            pressure: 0
+        ))
+        NSApplication.shared.postEvent(mouseUp, atStart: false)
+        let mouseDown = try #require(NSEvent.mouseEvent(
+            with: .leftMouseDown,
+            location: windowPoint,
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: window.windowNumber,
+            context: nil,
+            eventNumber: 1,
+            clickCount: 1,
+            pressure: 1
+        ))
+        textView.mouseDown(with: mouseDown)
+        #expect(bodyRange.contains(textView.selectedRange().location))
+    }
+
     /// 真实绘制墨迹的中心，供点击测试使用（不复用被测 API 自己算的坐标）。
     private func checkboxInkCenter(in textView: EditorTextView) -> CGPoint? {
         guard let layoutManager = textView.textLayoutManager else { return nil }

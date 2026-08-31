@@ -13,6 +13,16 @@ import Testing
     let engine = RenderEngine()
     let theme = Theme.standard
 
+    private final class RejectingTextDelegate: NSObject, NSTextViewDelegate {
+        func textView(
+            _ textView: NSTextView,
+            shouldChangeTextIn affectedCharRange: NSRange,
+            replacementString: String?
+        ) -> Bool {
+            false
+        }
+    }
+
     /// 各行同一列的墨迹起点 x（按渲染后的属性度量）。
     ///
     /// 用 `CTLineGetOffsetForStringIndex` 而不是自己累加字宽：kern、折叠成 0.1pt
@@ -42,6 +52,29 @@ import Testing
         let package = engine.prepare(source)
         _ = engine.render(package: package, selection: nil, into: storage)
         return (storage, package)
+    }
+
+    private func tableFixture(_ source: String) throws -> (
+        storage: NSTextStorage,
+        package: RenderEngine.Package,
+        table: TableStructure,
+        textView: EditorTextView,
+        coordinator: RenderCoordinator
+    ) {
+        let storage = NSTextStorage(string: source)
+        let package = engine.prepare(source)
+        _ = engine.render(package: package, selection: nil, into: storage)
+        let table = try #require(package.tables.first)
+        let textView = EditorTextView.make(textStorage: storage)
+        let coordinator = RenderCoordinator()
+        coordinator.attach(storage: storage)
+        coordinator.textView = textView
+        coordinator.adoptPackage(package)
+        return (storage, package, table, textView, coordinator)
+    }
+
+    private func pasteboard(_ label: String) -> NSPasteboard {
+        NSPasteboard(name: .init("MuseTests.\(label).\(UUID().uuidString)"))
     }
 
     /// 核心性质：左对齐列的墨迹在每一行都落在同一个 x —— 哪怕单元格里混着
@@ -552,6 +585,65 @@ import Testing
         #expect(storage.string == source, "整行拖拽应由一次撤销完整还原")
     }
 
+    @Test func rowDragCannotReplaceHeaderButStillReachesFirstAndLastBodyRows() throws {
+        let source = "| A | B |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n| 5 | 6 |"
+
+        do {
+            let fixture = try tableFixture(source)
+            #expect(!fixture.coordinator.moveTableRow(
+                tableID: fixture.table.headerLine, from: 2, to: 0
+            ))
+            #expect(fixture.storage.string == source)
+        }
+
+        do {
+            let fixture = try tableFixture(source)
+            #expect(fixture.coordinator.moveTableRow(
+                tableID: fixture.table.headerLine, from: 2, to: 1
+            ))
+            #expect(fixture.storage.string == "| A | B |\n| --- | --- |\n| 3 | 4 |\n| 1 | 2 |\n| 5 | 6 |")
+        }
+
+        do {
+            let fixture = try tableFixture(source)
+            #expect(fixture.coordinator.moveTableRow(
+                tableID: fixture.table.headerLine, from: 1, to: 3
+            ))
+            #expect(fixture.storage.string == "| A | B |\n| --- | --- |\n| 3 | 4 |\n| 5 | 6 |\n| 1 | 2 |")
+        }
+    }
+
+    @Test func menuRowActionsPreserveHeaderBoundary() throws {
+        let source = "| A | B |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |"
+
+        do {
+            let fixture = try tableFixture(source)
+            #expect(!fixture.coordinator.performTableAction(
+                tableID: fixture.table.headerLine,
+                action: .moveRow(from: 2, to: 0)
+            ))
+            #expect(fixture.storage.string == source)
+        }
+
+        do {
+            let fixture = try tableFixture(source)
+            #expect(fixture.coordinator.performTableAction(
+                tableID: fixture.table.headerLine,
+                action: .insertRow(index: 0, copying: nil)
+            ))
+            #expect(fixture.storage.string == "| A | B |\n| --- | --- |\n|  |  |\n| 1 | 2 |\n| 3 | 4 |")
+        }
+
+        do {
+            let fixture = try tableFixture(source)
+            #expect(fixture.coordinator.performTableAction(
+                tableID: fixture.table.headerLine,
+                action: .moveRow(from: 2, to: 1)
+            ))
+            #expect(fixture.storage.string == "| A | B |\n| --- | --- |\n| 3 | 4 |\n| 1 | 2 |")
+        }
+    }
+
     @Test func draggingWholeColumnMovesCellsAndAlignmentTogether() throws {
         let source = "| A | B | C |\n|---|:---:|---:|\n| 1 | 2 | 3 |"
         let storage = NSTextStorage(string: source)
@@ -713,6 +805,136 @@ import Testing
         #expect(coordinator.currentTableSelection?.bounds == TableSelectionBounds(
             minRow: 1, maxRow: 2, minColumn: 1, maxColumn: 1
         ), "活动端返回锚点列时，选区应收缩而不是保留历史并集")
+    }
+
+    @Test func leavingRenderedModeClearsOnlyStaleTableSelection() throws {
+        let source = "| A | B |\n|---|---|\n| 1 | 2 |"
+        let fixture = try tableFixture(source)
+        let bounds = TableSelectionBounds(minRow: 1, maxRow: 1, minColumn: 0, maxColumn: 1)
+        #expect(fixture.coordinator.selectTableCells(
+            tableID: fixture.table.headerLine,
+            bounds: bounds
+        ))
+
+        fixture.coordinator.setPresentationMode(.rendered)
+        #expect(fixture.coordinator.currentTableSelection?.bounds == bounds,
+                "重复设置渲染模式不应误清仍有效的选区")
+
+        fixture.coordinator.setPresentationMode(.source)
+        #expect(fixture.coordinator.currentTableSelection == nil,
+                "离开渲染模式后不能保留可被结构命令复用的陈旧选区")
+    }
+
+    @Test func tablePasteRejectsSourceModeAndPendingDirtyPackageIndependently() throws {
+        let source = "| A | B |\n|---|---|\n| 1 | 2 |"
+
+        do {
+            let fixture = try tableFixture(source)
+            fixture.coordinator.setPresentationMode(.source)
+            fixture.textView.setSelectedRange(
+                fixture.package.index.nsRange(fixture.table.rows[1].cells[0].ink)
+            )
+            let board = pasteboard("SourcePaste")
+            board.clearContents()
+            board.setString("changed", forType: .string)
+
+            #expect(!fixture.coordinator.pasteTableSelection(from: board))
+            #expect(fixture.storage.string == source)
+        }
+
+        do {
+            let fixture = try tableFixture(source)
+            #expect(fixture.coordinator.selectTableCells(
+                tableID: fixture.table.headerLine,
+                bounds: TableSelectionBounds(minRow: 1, maxRow: 1, minColumn: 0, maxColumn: 0)
+            ))
+            fixture.storage.replaceCharacters(in: NSRange(location: 0, length: 0), with: "prefix\n")
+            let dirtySource = "prefix\n" + source
+            let board = pasteboard("DirtyPaste")
+            board.clearContents()
+            board.setString("changed", forType: .string)
+
+            #expect(!fixture.coordinator.pasteTableSelection(from: board))
+            #expect(fixture.storage.string == dirtySource)
+        }
+    }
+
+    @Test func tableCopyAndCutRejectUnsafeStateWithoutTouchingPasteboard() throws {
+        let source = "| A | B |\n|---|---|\n| 1 | 2 |"
+        let bounds = TableSelectionBounds(minRow: 1, maxRow: 1, minColumn: 0, maxColumn: 1)
+
+        do {
+            let fixture = try tableFixture(source)
+            fixture.coordinator.setPresentationMode(.source)
+            fixture.coordinator.adoptTableSelectionForTesting(
+                tableID: fixture.table.headerLine,
+                bounds: bounds
+            )
+            let board = pasteboard("SourceCopyCut")
+            board.clearContents()
+            board.setString("sentinel", forType: .string)
+
+            #expect(!fixture.coordinator.copyTableSelection(to: board))
+            #expect(board.string(forType: .string) == "sentinel")
+            #expect(!fixture.coordinator.copyTableSelection(to: board, cut: true))
+            #expect(board.string(forType: .string) == "sentinel")
+            #expect(fixture.storage.string == source)
+        }
+
+        do {
+            let fixture = try tableFixture(source)
+            #expect(fixture.coordinator.selectTableCells(
+                tableID: fixture.table.headerLine,
+                bounds: bounds
+            ))
+            fixture.storage.replaceCharacters(in: NSRange(location: 0, length: 0), with: "prefix\n")
+            let board = pasteboard("DirtyCopy")
+            board.clearContents()
+            board.setString("sentinel", forType: .string)
+
+            #expect(!fixture.coordinator.copyTableSelection(to: board))
+            #expect(board.string(forType: .string) == "sentinel")
+            #expect(fixture.storage.string == "prefix\n" + source)
+        }
+    }
+
+    @Test func renderedTableCutPublishesClipboardOnlyAfterDeletionSucceeds() throws {
+        let source = "| A | B |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |"
+        let bounds = TableSelectionBounds(minRow: 1, maxRow: 1, minColumn: 0, maxColumn: 1)
+
+        do {
+            let fixture = try tableFixture(source)
+            #expect(fixture.coordinator.selectTableCells(
+                tableID: fixture.table.headerLine,
+                bounds: bounds
+            ))
+            let board = pasteboard("SuccessfulCut")
+            board.clearContents()
+            board.setString("sentinel", forType: .string)
+
+            #expect(fixture.coordinator.copyTableSelection(to: board, cut: true))
+            #expect(board.string(forType: .string) == "| 1 | 2 |\n| --- | --- |")
+            #expect(fixture.storage.string == "| A | B |\n| --- | --- |\n| 3 | 4 |")
+        }
+
+        do {
+            let fixture = try tableFixture(source)
+            #expect(fixture.coordinator.selectTableCells(
+                tableID: fixture.table.headerLine,
+                bounds: bounds
+            ))
+            let rejectingDelegate = RejectingTextDelegate()
+            fixture.textView.delegate = rejectingDelegate
+            let board = pasteboard("RejectedCut")
+            board.clearContents()
+            board.setString("sentinel", forType: .string)
+
+            #expect(!fixture.coordinator.copyTableSelection(to: board, cut: true))
+            #expect(board.string(forType: .string) == "sentinel",
+                    "删除被 delegate 拒绝时不能先宣称已经剪切")
+            #expect(fixture.storage.string == source)
+            _ = rejectingDelegate
+        }
     }
 
     @Test func pastedTSVExpandsTableWithoutExposingMarkdownDelimiters() throws {

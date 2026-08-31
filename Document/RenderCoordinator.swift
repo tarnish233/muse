@@ -554,7 +554,9 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
 
         switch action {
         case let .insertRow(index, copying):
-            let insertion = min(max(0, index), rows.count)
+            // 第 0 行是 Markdown 表头；“在上方插入”即使落在表头，也只能
+            // 插到首个正文行位置，不能让空行取代表头。
+            let insertion = min(max(1, index), rows.count)
             let template = copying.flatMap { rows.indices.contains($0) ? rows[$0] : nil }
                 ?? Array(repeating: "", count: alignments.count)
             rows.insert(template, at: insertion)
@@ -582,7 +584,9 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
             actionName = "删除表格行"
 
         case let .moveRow(from, to):
-            guard rows.indices.contains(from), rows.indices.contains(to) else { return false }
+            guard from >= 1, to >= 1,
+                  rows.indices.contains(from), rows.indices.contains(to)
+            else { return false }
             let moved = rows.remove(at: from)
             rows.insert(moved, at: to)
             selectionRow = to
@@ -743,7 +747,9 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
 
     @discardableResult
     public func copyTableSelection(to pasteboard: NSPasteboard, cut: Bool = false) -> Bool {
-        guard let active = activeTableSelection,
+        guard presentationMode == .rendered,
+              pendingDirtyRange == nil,
+              let active = activeTableSelection,
               let package = lastPackage,
               let table = package.tables.first(where: { $0.headerLine == active.tableID }),
               let storage = textStorage,
@@ -756,18 +762,21 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
         }
         let alignments = (bounds.minColumn...bounds.maxColumn).map { table.alignment(column: $0) }
         let markdown = serializeTable(rows: rows, alignments: alignments).text
+        if cut,
+           !performTableAction(tableID: active.tableID, action: .delete(bounds)) {
+            return false
+        }
         pasteboard.clearContents()
         pasteboard.setString(markdown, forType: .string)
         pasteboard.setString(markdown, forType: NSPasteboard.PasteboardType("com.muse.table"))
-        if cut {
-            return performTableAction(tableID: active.tableID, action: .delete(bounds))
-        }
         return true
     }
 
     @discardableResult
     public func pasteTableSelection(from pasteboard: NSPasteboard) -> Bool {
-        guard let source = pasteboard.string(forType: NSPasteboard.PasteboardType("com.muse.table"))
+        guard presentationMode == .rendered,
+              pendingDirtyRange == nil,
+              let source = pasteboard.string(forType: NSPasteboard.PasteboardType("com.muse.table"))
                 ?? pasteboard.string(forType: .string),
               let pasted = parsedClipboardTable(source),
               !pasted.rows.isEmpty,
@@ -1091,8 +1100,8 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
         rowFrom source: Int,
         rowTo destination: Int
     ) -> Bool {
-        guard source >= 0, source < table.rows.count,
-              destination >= 0, destination < table.rows.count
+        guard source >= 1, source < table.rows.count,
+              destination >= 1, destination < table.rows.count
         else { return false }
         var rows = tableRows(table, package: package, storage: storage)
         guard rows.count == table.rows.count else { return false }
@@ -1752,6 +1761,12 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
         lastPackage = package
     }
 
+    /// 供测试注入正常 UI 已无法创建的陈旧结构选区，以独立验证模式和 revision
+    /// 闸门；生产路径只通过 `selectTableCells` 创建选区。
+    func adoptTableSelectionForTesting(tableID: Int, bounds: TableSelectionBounds?) {
+        activeTableSelection = bounds.map { ActiveTableSelection(tableID: tableID, bounds: $0) }
+    }
+
     /// 在即时渲染与源码模式之间切换。两种模式共享同一份正文，切换只重建
     /// 可丢弃属性，不进入 undo 栈，也不创建第二份 String。
     public func setPresentationMode(_ mode: RenderEngine.PresentationMode) {
@@ -1761,6 +1776,7 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
             lastReconcileWriteCount = 0
             if mode != .rendered {
                 pendingTableNavigations.removeAll(keepingCapacity: true)
+                activeTableSelection = nil
             }
         }
         applyPresentationModeIfPossible()

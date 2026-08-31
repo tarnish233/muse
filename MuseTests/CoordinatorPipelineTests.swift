@@ -16,6 +16,23 @@ import Testing
         NSFontManager.shared.traits(of: font ?? .systemFont(ofSize: 16)).contains(.boldFontMask)
     }
 
+    private func host(_ textView: EditorTextView, size: NSSize = NSSize(width: 560, height: 260)) -> NSWindow {
+        textView.frame = NSRect(origin: .zero, size: size)
+        textView.textContainer?.containerSize = NSSize(
+            width: size.width,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        let window = NSWindow(
+            contentRect: textView.frame,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = textView
+        window.makeFirstResponder(textView)
+        return window
+    }
+
     /// 轮询等待协调器把指定 revision 应用到存储。
     private func waitForApplied(_ coordinator: RenderCoordinator, atLeast rev: Int, timeoutMs: Int = 10_000) async -> Bool {
         let deadline = ContinuousClock.now + .milliseconds(timeoutMs)
@@ -170,6 +187,137 @@ import Testing
 
         let y = (storage.string as NSString).range(of: "Y").location
         #expect(isBold(storage.attribute(.font, at: y, effectiveRange: nil) as? NSFont))
+    }
+
+    // MARK: - 输入法 revision 契约（缺陷 1）
+
+    @Test func markedTextEditsAdvanceRevisionAndRejectOlderPackage() async throws {
+        let storage = NSTextStorage(string: "prefix")
+        let coordinator = RenderCoordinator()
+        coordinator.attach(storage: storage)
+        coordinator.onTextEdited = {}
+        let textView = EditorTextView.make(textStorage: storage)
+        coordinator.textView = textView
+        let window = host(textView)
+        defer { window.contentView = nil }
+
+        storage.replaceCharacters(in: NSRange(location: 0, length: storage.length), with: storage.string)
+        #expect(await waitForApplied(coordinator, atLeast: 1))
+        coordinator.setParseLoopPausedForTesting(true)
+
+        textView.setSelectedRange(NSRange(location: storage.length, length: 0))
+        textView.insertText(" **zhongwen**", replacementRange: NSRange(location: NSNotFound, length: 0))
+        let staleSource = storage.string
+        let stalePackage = engine.prepare(staleSource)
+        let staleRevision = coordinator.revisionForTesting
+        let staleAppliedRevision = coordinator.appliedRevision
+
+        let romanized = (storage.string as NSString).range(of: "zhongwen")
+        textView.setMarkedText(
+            "zhongwen",
+            selectedRange: NSRange(location: "zhongwen".utf16.count, length: 0),
+            replacementRange: romanized
+        )
+        textView.setMarkedText(
+            "中文",
+            selectedRange: NSRange(location: "中文".utf16.count, length: 0),
+            replacementRange: NSRange(location: NSNotFound, length: 0)
+        )
+        #expect(textView.hasMarkedText())
+        #expect(storage.string == "prefix **中文**")
+        #expect(coordinator.revisionForTesting >= staleRevision + 2)
+        let pending = try #require(coordinator.pendingDirtyRangeForTesting)
+        #expect(NSMaxRange(pending) <= storage.length)
+
+        textView.unmarkText()
+        coordinator.applyParsedForTesting(
+            package: stalePackage,
+            revision: staleRevision,
+            dirtyRange: NSRange(location: 0, length: staleSource.utf16.count)
+        )
+        #expect(coordinator.appliedRevision == staleAppliedRevision)
+
+        coordinator.setParseLoopPausedForTesting(false)
+        coordinator.refreshPresentationMode()
+        let targetRevision = coordinator.revisionForTesting
+        #expect(await waitForApplied(coordinator, atLeast: targetRevision))
+        #expect(coordinator.pendingDirtyRangeForTesting == nil)
+        #expect(coordinator.lastPackage?.index.utf16Length == storage.length)
+
+        let content = (storage.string as NSString).range(of: "中文")
+        #expect(isBold(storage.attribute(.font, at: content.location, effectiveRange: nil) as? NSFont))
+
+        let expected = NSTextStorage(string: storage.string)
+        _ = engine.render(
+            package: engine.prepare(storage.string),
+            selection: textView.selectedRange(),
+            into: expected
+        )
+        for location in 0..<storage.length {
+            let actualFont = storage.attribute(.font, at: location, effectiveRange: nil) as? NSFont
+            let expectedFont = expected.attribute(.font, at: location, effectiveRange: nil) as? NSFont
+            #expect(actualFont?.pointSize == expectedFont?.pointSize)
+            let actualTraits = NSFontManager.shared.traits(of: actualFont ?? .systemFont(ofSize: 16))
+            let expectedTraits = NSFontManager.shared.traits(of: expectedFont ?? .systemFont(ofSize: 16))
+            #expect(actualTraits.contains(.boldFontMask) == expectedTraits.contains(.boldFontMask))
+            #expect(actualTraits.contains(.italicFontMask) == expectedTraits.contains(.italicFontMask))
+            #expect(storage.attribute(.museBlock, at: location, effectiveRange: nil) as? String
+                == expected.attribute(.museBlock, at: location, effectiveRange: nil) as? String)
+        }
+    }
+
+    @Test func parsedResultDiscardedDuringMarkedTextResumesAndReopensTableGate() async throws {
+        let source = "| 名称 | 状态 |\n|---|---|\n| Muse | ok |"
+        let storage = NSTextStorage(string: source)
+        let coordinator = RenderCoordinator()
+        coordinator.attach(storage: storage)
+        coordinator.onTextEdited = {}
+        let textView = EditorTextView.make(textStorage: storage)
+        coordinator.textView = textView
+        let window = host(textView)
+        defer { window.contentView = nil }
+
+        storage.replaceCharacters(in: NSRange(location: 0, length: storage.length), with: source)
+        #expect(await waitForApplied(coordinator, atLeast: 1))
+        coordinator.setParseLoopPausedForTesting(true)
+
+        let cell = (storage.string as NSString).range(of: "Muse")
+        textView.setSelectedRange(NSRange(location: NSMaxRange(cell), length: 0))
+        textView.setMarkedText(
+            "X",
+            selectedRange: NSRange(location: 1, length: 0),
+            replacementRange: NSRange(location: NSNotFound, length: 0)
+        )
+        #expect(textView.hasMarkedText())
+        let markedPackage = engine.prepare(storage.string)
+        let targetRevision = coordinator.revisionForTesting
+        #expect(coordinator.consumeLatestParseRequestForTesting(package: markedPackage))
+        #expect(coordinator.isParseDeferredForMarkedTextForTesting)
+        #expect(coordinator.pendingDirtyRangeForTesting != nil)
+
+        let table = try #require(markedPackage.tables.first)
+        coordinator.adoptTableSelectionForTesting(
+            tableID: table.headerLine,
+            bounds: TableSelectionBounds(minRow: 1, maxRow: 1, minColumn: 0, maxColumn: 0)
+        )
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("Muse-IME-Gate-\(UUID().uuidString)"))
+        pasteboard.clearContents()
+        #expect(coordinator.copyTableSelection(to: pasteboard) == false)
+
+        textView.unmarkText()
+        coordinator.setParseLoopPausedForTesting(false)
+        coordinator.refreshPresentationMode()
+        #expect(await waitForApplied(coordinator, atLeast: targetRevision))
+        #expect(coordinator.pendingDirtyRangeForTesting == nil)
+        #expect(coordinator.isParseDeferredForMarkedTextForTesting == false)
+
+        let freshTable = try #require(coordinator.lastPackage?.tables.first)
+        coordinator.adoptTableSelectionForTesting(
+            tableID: freshTable.headerLine,
+            bounds: TableSelectionBounds(minRow: 1, maxRow: 1, minColumn: 0, maxColumn: 0)
+        )
+        #expect(coordinator.copyTableSelection(to: pasteboard))
+        #expect(pasteboard.string(forType: .string)?.contains("MuseX") == true)
     }
 
     /// 字符编辑后、解析应用前：光标流不得用旧 package 写属性（复审 P1-2）。

@@ -52,6 +52,11 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
     private let preparationWorker = RenderPreparationWorker()
     private var revision = 0
     private var parseTask: Task<Void, Never>?
+    /// 当前 revision 的解析结果若在输入法候选态返回，保留最新请求并暂停消费循环；
+    /// 组合输入结束后继续，而不是在主 actor 上忙等或永久遗失 pending dirty。
+    private var isParseDeferredForMarkedText = false
+    /// 仅供确定性管线测试冻结消费循环；生产路径始终为 false。
+    private var isParseLoopPausedForTesting = false
     private struct ParseRequest: Sendable {
         let revision: Int
         let snapshot: String
@@ -166,8 +171,9 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
 
     // MARK: - NSTextStorageDelegate
 
-    /// 字符编辑后：登记脏区并调度后台解析；属性变更（editedAttributes）不重入；
-    /// 组合输入（marked text）期间跳过，上屏后的下一次编辑会触发。
+    /// 字符编辑后：无论是否处于输入法 marked text，都先登记脏区、推进 revision
+    /// 并更新 latest-wins 快照；属性变更（editedAttributes）不重入。候选态只延后
+    /// 属性应用，不能延后记账，否则候选文本变化期间旧 package 仍会被当成权威。
     public func textStorage(
         _ textStorage: NSTextStorage,
         didProcessEditing editedMask: NSTextStorageEditActions,
@@ -176,7 +182,6 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
     ) {
         guard editedMask.contains(.editedCharacters), !isApplyingAttributes else { return }
         onTextEdited?()
-        guard textView?.hasMarkedText() != true else { return }
         pendingDirtyRange = Self.accumulatingDirtyRange(
             pending: pendingDirtyRange,
             editedRange: editedRange,
@@ -194,17 +199,30 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
 
         // `pendingDirtyRange` 已经随每次编辑重基到当前坐标系；本轮快照与范围属于同一 revision。
         // 旧解析即使在新输入之后完成，也会由 revision guard 丢弃，不能清空这份 pending 状态。
+        enqueueCurrentParse(storage: storage)
+        // 部分输入法在最终上屏时会先结束 marked 状态、再送字符编辑；这次编辑本身
+        // 就是明确的恢复信号，不必再等待选区变化回调。
+        if textView?.hasMarkedText() != true {
+            isParseDeferredForMarkedText = false
+        }
+        startParseLoopIfNeeded()
+    }
+
+    private func enqueueCurrentParse(storage: NSTextStorage) {
         guard let dirtyNS = pendingDirtyRange else { return }
         latestParseRequest = ParseRequest(
             revision: revision,
             snapshot: storage.string,
             dirtyRange: dirtyNS
         )
-        startParseLoopIfNeeded()
     }
 
     private func startParseLoopIfNeeded() {
-        guard parseTask == nil, latestParseRequest != nil else { return }
+        guard !isParseDeferredForMarkedText,
+              !isParseLoopPausedForTesting,
+              parseTask == nil,
+              latestParseRequest != nil
+        else { return }
         parseTask = Task(priority: .high) { [weak self] in
             await self?.runParseLoop()
         }
@@ -239,15 +257,41 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
                 rev: request.revision,
                 dirtyNS: request.dirtyRange
             )
-            guard latestParseRequest != nil else { return }
+            guard !isParseDeferredForMarkedText,
+                  latestParseRequest != nil
+            else { return }
         }
     }
 
     private func applyParsed(package: RenderEngine.Package, rev: Int, dirtyNS: NSRange) {
         guard rev == revision, !isApplyingAttributes else { return } // 过期结果直接丢弃
-        guard textView?.hasMarkedText() != true else { return }     // 候选态上屏后重排
         guard let storage = textStorage else { return }
-        apply(package: package, rev: rev, dirtyNS: dirtyNS, into: storage)
+
+        guard textView?.hasMarkedText() != true else {
+            // 当前 package 对应候选态文本，不能改写 marked range 的派生属性；但 dirty
+            // 与 revision 都必须保留。暂停 single-flight 循环并重放当前快照，待上屏后
+            // 由最终字符编辑或 refreshPresentationMode() 恢复，避免紧循环反复解析。
+            enqueueCurrentParse(storage: storage)
+            isParseDeferredForMarkedText = true
+            return
+        }
+
+        // revision 是主防线；长度校验是最后兜底。若外部组件漏报了一次字符编辑，
+        // 也不能让旧 package 的 token 范围写进更短的 storage。
+        guard package.index.utf16Length == storage.length else {
+            if pendingDirtyRange == nil {
+                pendingDirtyRange = NSRange(location: 0, length: storage.length)
+            }
+            enqueueCurrentParse(storage: storage)
+            return
+        }
+
+        apply(
+            package: package,
+            rev: rev,
+            dirtyNS: Self.clampedDirtyRange(dirtyNS, toLength: storage.length),
+            into: storage
+        )
     }
 
     private func apply(
@@ -1728,6 +1772,42 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
         return result
     }
 
+    private static func clampedDirtyRange(_ range: NSRange, toLength length: Int) -> NSRange {
+        let lower = min(max(range.location, 0), length)
+        let upper = min(max(NSMaxRange(range), lower), length)
+        return NSRange(location: lower, length: upper - lower)
+    }
+
+    /// 缺陷 1 的确定性测试插桩：真实编辑仍走 NSTextStorage delegate，仅冻结后台消费。
+    func setParseLoopPausedForTesting(_ paused: Bool) {
+        isParseLoopPausedForTesting = paused
+        if !paused { startParseLoopIfNeeded() }
+    }
+
+    var revisionForTesting: Int { revision }
+    var pendingDirtyRangeForTesting: NSRange? { pendingDirtyRange }
+    var isParseDeferredForMarkedTextForTesting: Bool { isParseDeferredForMarkedText }
+
+    func applyParsedForTesting(
+        package: RenderEngine.Package,
+        revision: Int,
+        dirtyRange: NSRange
+    ) {
+        applyParsed(package: package, rev: revision, dirtyNS: dirtyRange)
+    }
+
+    @discardableResult
+    func consumeLatestParseRequestForTesting(package: RenderEngine.Package) -> Bool {
+        guard let request = latestParseRequest else { return false }
+        latestParseRequest = nil
+        applyParsed(
+            package: package,
+            rev: request.revision,
+            dirtyNS: request.dirtyRange
+        )
+        return true
+    }
+
     // MARK: - 光标流（marker 显隐 diff）
 
     /// 选区变化时调用：只写入显隐状态实际翻转的 marker，不重解析。
@@ -1785,8 +1865,20 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
     /// 组合输入结束时由编辑视图重试尚未落地的模式切换。
     /// NSTextView 的 marked text 仍由系统独占，不在候选态上改写属性。
     public func refreshPresentationMode() {
+        resumeParsingAfterMarkedTextIfPossible()
         applyPresentationModeIfPossible()
         applyImageRefreshIfPossible()
+    }
+
+    private func resumeParsingAfterMarkedTextIfPossible() {
+        guard isParseDeferredForMarkedText,
+              textView?.hasMarkedText() != true
+        else { return }
+        isParseDeferredForMarkedText = false
+        if latestParseRequest == nil, let storage = textStorage {
+            enqueueCurrentParse(storage: storage)
+        }
+        startParseLoopIfNeeded()
     }
 
     private func applyPresentationModeIfPossible() {

@@ -3,6 +3,14 @@ import SwiftUI
 
 struct GeneralSettingsPane: View {
     @AppStorage(AppPreferences.openUntitledDocumentKey) private var openUntitledDocument = true
+    @AppStorage(EditorPreferences.revealCurrentBlockMarkdownKey)
+    private var revealCurrentBlockMarkdown = true
+    @AppStorage(EditorPreferences.clipboardCopyModeKey)
+    private var clipboardCopyMode = ClipboardCopyMode.markdownSource.rawValue
+    @AppStorage(EditorPreferences.copyWholeLineWhenSelectionIsEmptyKey)
+    private var copyWholeLineWhenSelectionIsEmpty = false
+    @AppStorage(EditorPreferences.typewriterModeKey)
+    private var typewriterMode = true
 
     var body: some View {
         Form {
@@ -28,10 +36,58 @@ struct GeneralSettingsPane: View {
                         .foregroundStyle(.secondary)
                 }
             }
+
+            Section("即时渲染") {
+                Toggle(
+                    "显示当前块元素的 Markdown 源码（支持标题等块元素）",
+                    isOn: $revealCurrentBlockMarkdown
+                )
+                .toggleStyle(.checkbox)
+            }
+
+            Section {
+                Picker(selection: $clipboardCopyMode) {
+                    ForEach(ClipboardCopyMode.allCases) { mode in
+                        Text(mode.title).tag(mode.rawValue)
+                    }
+                } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("复制格式")
+                        Text(selectedClipboardCopyMode.detail)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .pickerStyle(.menu)
+
+                Toggle(
+                    "复制或剪切时，若没有文字被选中，则复制或剪切光标所在的一整行",
+                    isOn: $copyWholeLineWhenSelectionIsEmpty
+                )
+                .toggleStyle(.checkbox)
+            } header: {
+                HStack(spacing: 8) {
+                    Text("默认复制行为")
+                    Text("（⌘C）")
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Section("打字机模式") {
+                Toggle(
+                    "在打字机模式下，始终保证光标在屏幕中间",
+                    isOn: $typewriterMode
+                )
+                .toggleStyle(.checkbox)
+            }
         }
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
         .contentMargins(.top, 8, for: .scrollContent)
+    }
+
+    private var selectedClipboardCopyMode: ClipboardCopyMode {
+        ClipboardCopyMode(rawValue: clipboardCopyMode) ?? .markdownSource
     }
 }
 

@@ -8,6 +8,14 @@ struct EditorView: NSViewRepresentable {
     let document: MuseDocument
     let isSourceMode: Bool
     let previewBaseURL: URL?
+    @AppStorage(EditorPreferences.revealCurrentBlockMarkdownKey)
+    private var revealCurrentBlockMarkdown = true
+    @AppStorage(EditorPreferences.clipboardCopyModeKey)
+    private var clipboardCopyMode = ClipboardCopyMode.markdownSource.rawValue
+    @AppStorage(EditorPreferences.copyWholeLineWhenSelectionIsEmptyKey)
+    private var copyWholeLineWhenSelectionIsEmpty = false
+    @AppStorage(EditorPreferences.typewriterModeKey)
+    private var typewriterMode = true
 
     func makeCoordinator() -> Coordinator {
         Coordinator(document: document)
@@ -30,8 +38,13 @@ struct EditorView: NSViewRepresentable {
         textView.previewBaseURL = previewBaseURL
         scrollView.documentView = textView
 
+        textView.clipboardCopyMode = resolvedClipboardCopyMode
+        textView.copiesWholeLineWhenSelectionIsEmpty = copyWholeLineWhenSelectionIsEmpty
+        textView.setTypewriterMode(typewriterMode)
+
         textView.delegate = context.coordinator
         document.renderer.textView = textView
+        document.renderer.setRevealsCurrentBlockSource(revealCurrentBlockMarkdown)
         textView.tableNavigationHandler = { [weak renderer = document.renderer] backward in
             renderer?.navigateTable(backward: backward) == true
         }
@@ -78,8 +91,16 @@ struct EditorView: NSViewRepresentable {
         // 另存为/首次保存后文档 URL 可能变化，相对路径图片的解析基准随之更新。
         if let textView = scrollView.documentView as? EditorTextView {
             textView.previewBaseURL = previewBaseURL
+            textView.clipboardCopyMode = resolvedClipboardCopyMode
+            textView.copiesWholeLineWhenSelectionIsEmpty = copyWholeLineWhenSelectionIsEmpty
+            textView.setTypewriterMode(typewriterMode)
+            document.renderer.setRevealsCurrentBlockSource(revealCurrentBlockMarkdown)
             context.coordinator.updateTableSelection(in: textView)
         }
+    }
+
+    private var resolvedClipboardCopyMode: ClipboardCopyMode {
+        ClipboardCopyMode(rawValue: clipboardCopyMode) ?? .markdownSource
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
@@ -102,6 +123,9 @@ struct EditorView: NSViewRepresentable {
                 selection: textView.selectedRange(),
                 into: document.buffer.textStorage
             )
+            if let editor = textView as? EditorTextView {
+                editor.scheduleTypewriterCaretPosition()
+            }
         }
 
         /// TextKit 2 的系统选区会对隐藏结构字符上的 kern 再位移一次。表格内改为在

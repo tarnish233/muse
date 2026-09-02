@@ -309,6 +309,13 @@ final class EditorTextView: NSTextView {
     var tablePasteHandler: ((NSPasteboard) -> Bool)?
     var tableCurrentSelectionProvider: (() -> (tableID: Int, bounds: TableSelectionBounds)?)?
     var tableDimensionProvider: ((Int) -> (rows: Int, columns: Int)?)?
+    var clipboardCopyMode: ClipboardCopyMode = .markdownSource
+    var clipboardPasteboard = NSPasteboard.general
+    var copiesWholeLineWhenSelectionIsEmpty = false
+    private(set) var isTypewriterModeEnabled = false
+    private var contentInsetsBeforeTypewriterMode: NSEdgeInsets?
+    private var typewriterViewportHeight: CGFloat = 0
+    private var pendingTypewriterPositionTask: Task<Void, Never>?
     /// 非表格选区的系统默认属性。表格选区由 MuseLayoutFragment 按真实字形位置画，
     /// 这里只把 TextKit 那个会受 kern 干扰的背景关掉。
     private var standardSelectedTextAttributes: [NSAttributedString.Key: Any]?
@@ -359,6 +366,7 @@ final class EditorTextView: NSTextView {
     override func didChangeText() {
         editEpoch += 1
         super.didChangeText()
+        scheduleTypewriterCaretPosition()
     }
 
     override func keyDown(with event: NSEvent) {
@@ -902,9 +910,12 @@ final class EditorTextView: NSTextView {
             name: NSView.boundsDidChangeNotification,
             object: clipView
         )
+        updateTypewriterInsets()
+        scheduleTypewriterCaretPosition()
     }
 
     @objc private func clipViewBoundsDidChange() {
+        updateTypewriterInsets()
         hoveredTableControl = nil
         invalidateCheckboxCursorRects()
         syncTableChrome()
@@ -1581,13 +1592,38 @@ final class EditorTextView: NSTextView {
     }
 
     override func copy(_ sender: Any?) {
-        if tableCopyHandler?(NSPasteboard.general, false) == true { return }
-        super.copy(sender)
+        if tableCopyHandler?(clipboardPasteboard, false) == true { return }
+        let source = string as NSString
+        guard let range = ClipboardText.effectiveCopyRange(
+            in: source,
+            selection: selectedRange(),
+            copiesWholeLineWhenEmpty: copiesWholeLineWhenSelectionIsEmpty
+        ), range.length > 0 else {
+            super.copy(sender)
+            return
+        }
+
+        let plainText = clipboardPlainText(source: source as String, range: range)
+        publishClipboardText(plainText, to: clipboardPasteboard)
     }
 
     override func cut(_ sender: Any?) {
-        if tableCopyHandler?(NSPasteboard.general, true) == true { return }
+        if tableCopyHandler?(clipboardPasteboard, true) == true { return }
+        let source = string as NSString
+        guard let range = ClipboardText.effectiveCopyRange(
+            in: source,
+            selection: selectedRange(),
+            copiesWholeLineWhenEmpty: copiesWholeLineWhenSelectionIsEmpty
+        ), range.length > 0 else {
+            super.cut(sender)
+            return
+        }
+        let plainText = clipboardPlainText(source: source as String, range: range)
+        if range != selectedRange() {
+            setSelectedRange(range)
+        }
         super.cut(sender)
+        publishClipboardText(plainText, to: clipboardPasteboard)
     }
 
     override func paste(_ sender: Any?) {
@@ -1606,6 +1642,115 @@ final class EditorTextView: NSTextView {
         let range = selectedRange()
         super.insertText(replacement, replacementRange: range)
         return true
+    }
+
+    func setTypewriterMode(_ enabled: Bool) {
+        guard isTypewriterModeEnabled != enabled else {
+            if enabled { updateTypewriterInsets() }
+            return
+        }
+        isTypewriterModeEnabled = enabled
+        if enabled {
+            updateTypewriterInsets()
+            scheduleTypewriterCaretPosition()
+        } else {
+            pendingTypewriterPositionTask?.cancel()
+            pendingTypewriterPositionTask = nil
+            restoreContentInsetsAfterTypewriterMode()
+        }
+    }
+
+    /// Selection and edit notifications can arrive more than once for a single keystroke.
+    /// Coalesce them at the end of the current main-actor turn so TextKit lays out at most once.
+    func scheduleTypewriterCaretPosition() {
+        guard isTypewriterModeEnabled else { return }
+        pendingTypewriterPositionTask?.cancel()
+        pendingTypewriterPositionTask = Task { @MainActor [weak self] in
+            await Task.yield()
+            guard !Task.isCancelled else { return }
+            self?.maintainTypewriterCaretPosition()
+        }
+    }
+
+    func maintainTypewriterCaretPosition() {
+        guard isTypewriterModeEnabled,
+              selectedRange().length == 0,
+              let window,
+              let scrollView = enclosingScrollView
+        else { return }
+        updateTypewriterInsets()
+
+        let caretOnScreen = firstRect(
+            forCharacterRange: selectedRange(),
+            actualRange: nil
+        )
+        guard caretOnScreen.height > 0,
+              caretOnScreen.minX.isFinite,
+              caretOnScreen.minY.isFinite,
+              caretOnScreen.maxX.isFinite,
+              caretOnScreen.maxY.isFinite
+        else { return }
+        let caretInWindow = window.convertFromScreen(caretOnScreen)
+        let caretInDocument = convert(caretInWindow, from: nil)
+        let clipView = scrollView.contentView
+        let proposedBounds = NSRect(
+            x: clipView.bounds.origin.x,
+            y: caretInDocument.midY - clipView.bounds.height / 2,
+            width: clipView.bounds.width,
+            height: clipView.bounds.height
+        )
+        let target = clipView.constrainBoundsRect(proposedBounds).origin
+        guard target.x.isFinite,
+              target.y.isFinite,
+              abs(target.x - clipView.bounds.origin.x) > 0.5
+                || abs(target.y - clipView.bounds.origin.y) > 0.5
+        else { return }
+        clipView.scroll(to: target)
+        scrollView.reflectScrolledClipView(clipView)
+    }
+
+    private func clipboardPlainText(source: String, range: NSRange) -> String {
+        switch clipboardCopyMode {
+        case .plainText:
+            return ClipboardText.renderedPlainText(from: source, range: range)
+        case .markdownSource:
+            return (source as NSString).substring(with: range)
+        case .normalizedMarkdown:
+            return ClipboardText.normalizedMarkdown(from: source, range: range)
+        }
+    }
+
+    private func publishClipboardText(_ text: String, to pasteboard: NSPasteboard) {
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+    }
+
+    private func updateTypewriterInsets() {
+        guard isTypewriterModeEnabled, let scrollView = enclosingScrollView else { return }
+        if contentInsetsBeforeTypewriterMode == nil {
+            contentInsetsBeforeTypewriterMode = scrollView.contentInsets
+        }
+        let viewportHeight = scrollView.contentSize.height
+        guard viewportHeight > 0, viewportHeight != typewriterViewportHeight,
+              let baseInsets = contentInsetsBeforeTypewriterMode
+        else { return }
+        typewriterViewportHeight = viewportHeight
+        let centeringInset = max(0, viewportHeight / 2 - textContainerInset.height)
+        scrollView.contentInsets = NSEdgeInsets(
+            top: baseInsets.top + centeringInset,
+            left: baseInsets.left,
+            bottom: baseInsets.bottom + centeringInset,
+            right: baseInsets.right
+        )
+    }
+
+    private func restoreContentInsetsAfterTypewriterMode() {
+        guard let scrollView = enclosingScrollView,
+              let contentInsetsBeforeTypewriterMode
+        else { return }
+        scrollView.contentInsets = contentInsetsBeforeTypewriterMode
+        self.contentInsetsBeforeTypewriterMode = nil
+        typewriterViewportHeight = 0
     }
 
     /// Standard text replacement for the checkbox hit by `point`. The source

@@ -224,6 +224,7 @@ public struct RenderEngine {
         package: Package,
         selection: NSRange?,
         mode: PresentationMode = .rendered,
+        revealsCurrentBlockSource: Bool = true,
         into storage: NSTextStorage,
         imageBaseURL: URL? = nil
     ) -> Stats {
@@ -244,6 +245,7 @@ public struct RenderEngine {
             applyVisibility(
                 package: package,
                 selection: selection,
+                revealsCurrentBlockSource: revealsCurrentBlockSource,
                 into: storage,
                 forceAll: true,
                 imageBaseURL: imageBaseURL
@@ -512,7 +514,8 @@ public struct RenderEngine {
     public func computedVisibility(
         package: Package,
         selection: NSRange?,
-        mode: PresentationMode = .rendered
+        mode: PresentationMode = .rendered,
+        revealsCurrentBlockSource: Bool = true
     ) -> [VisibilityEntry] {
         func makeEntries(_ token: Token, state: MarkerState) -> [VisibilityEntry] {
             // 行内图片：整段一个条目，携带子区间供附件显隐与源码回显。
@@ -568,9 +571,11 @@ public struct RenderEngine {
 
         return package.tokens.flatMap { token in
             let state: MarkerState
-            if token.isBlockMarker {
+            if token.isBlockImage, !revealsCurrentBlockSource {
+                state = .hidden
+            } else if token.isBlockMarker {
                 let onCaret: Bool
-                if staysRenderedUnderSelection(token.kind) {
+                if !revealsCurrentBlockSource || staysRenderedUnderSelection(token.kind) {
                     // 分隔线、普通列表、任务列表和表格在渲染模式下始终保留
                     // 各自的直接编辑视觉。光标或选区经过时不摊回 `---`、
                     // `- `、`1. `、`- [ ] ` 或表格分隔符；需要逐字编辑 marker
@@ -639,12 +644,21 @@ public struct RenderEngine {
         state: MarkerState,
         markerNS: NSRange,
         listDepth: Int?,
+        updatesParagraphStyle: Bool = true,
         into storage: NSTextStorage
     ) {
         storage.addAttributes(Self.markerVisibilityAttributes(state: state), range: markerNS)
+        let source = storage.string as NSString
+        if state == .hidden {
+            preserveLineHeightForEmptyListItem(
+                markerNS: markerNS,
+                source: source,
+                in: storage
+            )
+        }
+        guard updatesParagraphStyle else { return }
         guard let listDepth else { return }
 
-        let source = storage.string as NSString
         let paragraphRange = source.paragraphRange(for: markerNS)
         // The paragraph geometry compensates the whole visible prefix
         // (indentation + marker), not just the marker characters.
@@ -660,6 +674,39 @@ public struct RenderEngine {
                 markerRevealed: state == .revealed
             ),
             range: paragraphRange
+        )
+    }
+
+    /// An empty continued item consists only of a hidden source marker such as
+    /// `- `. If every character uses the 0.1pt marker font, TextKit can reduce
+    /// the paragraph to a near-zero rendering surface and skip the fragment's
+    /// replacement bullet until body text is typed. Keep the marker's final
+    /// whitespace transparent but at body-font height so the line and its
+    /// custom marker are drawable immediately. Its horizontal font transform
+    /// stays near zero-width; otherwise the carrier itself shifts an empty
+    /// item's replacement marker to the right of its populated siblings.
+    private func preserveLineHeightForEmptyListItem(
+        markerNS: NSRange,
+        source: NSString,
+        in storage: NSTextStorage
+    ) {
+        guard markerNS.length > 0 else { return }
+        let paragraphRange = source.paragraphRange(for: markerNS)
+        var contentEnd = NSMaxRange(paragraphRange)
+        while contentEnd > paragraphRange.location {
+            let character = source.character(at: contentEnd - 1)
+            guard character == 0x0A || character == 0x0D else { break }
+            contentEnd -= 1
+        }
+        guard NSMaxRange(markerNS) == contentEnd else { return }
+
+        let carrierLocation = contentEnd - 1
+        let carrier = source.character(at: carrierLocation)
+        guard carrier == 0x20 || carrier == 0x09 else { return }
+        storage.addAttribute(
+            .font,
+            value: theme.hiddenMarkerLineHeightCarrierFont(),
+            range: NSRange(location: carrierLocation, length: 1)
         )
     }
 
@@ -1298,11 +1345,16 @@ public struct RenderEngine {
     private func applyVisibility(
         package: Package,
         selection: NSRange?,
+        revealsCurrentBlockSource: Bool,
         into storage: NSTextStorage,
         forceAll: Bool,
         imageBaseURL: URL?
     ) {
-        for entry in computedVisibility(package: package, selection: selection) {
+        for entry in computedVisibility(
+            package: package,
+            selection: selection,
+            revealsCurrentBlockSource: revealsCurrentBlockSource
+        ) {
             apply(entry, imageBaseURL: imageBaseURL, into: storage, skipHiddenListParagraph: true)
         }
     }
@@ -1333,11 +1385,12 @@ public struct RenderEngine {
             )
             return
         }
-        if entry.listDepth != nil, !(skipHiddenListParagraph && entry.state == .hidden) {
+        if entry.listDepth != nil {
             applyMarkerVisibility(
                 state: entry.state,
                 markerNS: entry.markerNS,
                 listDepth: entry.listDepth,
+                updatesParagraphStyle: !(skipHiddenListParagraph && entry.state == .hidden),
                 into: storage
             )
             return

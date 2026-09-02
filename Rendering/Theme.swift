@@ -214,6 +214,14 @@ public nonisolated struct Theme: @unchecked Sendable {
     public func codeFont() -> NSFont { NSFont.monospacedSystemFont(ofSize: 14, weight: .regular) }
     /// marker 隐藏用：近零宽 + 透明。M0 验证项：观察是否产生可见留白。
     public func hiddenMarkerFont() -> NSFont { NSFont.monospacedSystemFont(ofSize: 0.1, weight: .regular) }
+    /// Empty hidden list items still need normal vertical font metrics so
+    /// TextKit creates a full-height line fragment. Compress only the horizontal
+    /// axis so the invisible carrier does not move the replacement marker.
+    public func hiddenMarkerLineHeightCarrierFont() -> NSFont {
+        let base = baseFont()
+        let transform = AffineTransform(scaleByX: 0.01, byY: 1)
+        return NSFont(descriptor: base.fontDescriptor, textTransform: transform) ?? base
+    }
     public func revealedMarkerFont() -> NSFont { NSFont.monospacedSystemFont(ofSize: baseSize - 1, weight: .regular) }
 
     // MARK: - 段落

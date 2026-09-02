@@ -106,6 +106,22 @@ import Testing
         #expect(font(at: 5, in: storage) == theme.revealedMarkerFont()) // 第二行 "## " 起点（utf16）
     }
 
+    @Test func currentBlockSourceCanStayHiddenUnderCaret() {
+        let source = "## 标题\n> 引用"
+        let storage = NSTextStorage(string: source)
+        let package = engine.prepare(source)
+        _ = engine.render(
+            package: package,
+            selection: NSRange(location: 3, length: 0),
+            revealsCurrentBlockSource: false,
+            into: storage
+        )
+
+        #expect(isHidden(0, in: storage))
+        #expect(isHidden((source as NSString).range(of: "> ").location, in: storage))
+        #expect(storage.string == source)
+    }
+
     @Test func structuralMarkersFollowCaret() {
         // 标题、引用、围栏等可编辑结构按光标回显；普通列表与任务列表始终保持
         // 渲染 marker，源码近零宽隐藏，图形符号由绘制层画。
@@ -1221,6 +1237,81 @@ import Testing
         let markerBaselineY = orderedFrame.minY + orderedFont.ascender
         let contentBaselineY = orderedPoint.y + orderedLine.glyphOrigin.y
         #expect(abs(markerBaselineY - (contentBaselineY - 1.5)) < 0.5)
+    }
+
+    @Test func trailingEmptyListItemKeepsDrawableLineAndMarker() throws {
+        // The reported sample has more document content after this visible section.
+        // Keep the soft-wrapped item, pre-existing blank line, and following heading
+        // in the fixture so TextKit must split the old and new paragraphs.
+        let body = Array(repeating: "超长列表内容用于触发软换行", count: 12)
+            .joined(separator: " ")
+        let source = "- \(body)\n- \n\n## 后续标题"
+        let storage = NSTextStorage(string: source)
+        let textView = EditorTextView.make(textStorage: storage)
+        textView.frame = NSRect(x: 0, y: 0, width: 480, height: 180)
+        textView.textContainer?.containerSize = NSSize(
+            width: 480,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+
+        let package = engine.prepare(source)
+        _ = engine.render(
+            package: package,
+            selection: NSRange(
+                location: (source as NSString).range(of: "- \n\n").location + 2,
+                length: 0
+            ),
+            into: storage
+        )
+        let fragments = customFragments(in: textView).filter {
+            $0.blockKind == BlockVisual.list.rawValue + ":u"
+        }
+        #expect(fragments.count == 2)
+        let trailing = try #require(fragments.last)
+        #expect(trailing.listMarkerGlyph == .unordered(depth: 1))
+        let trailingMarker = (source as NSString).range(of: "- \n\n").location
+        #expect(isHidden(trailingMarker, in: storage))
+        let carrierFont = try #require(font(at: trailingMarker + 1, in: storage))
+        #expect(carrierFont.pointSize == theme.baseFont().pointSize)
+        #expect((" " as NSString).size(withAttributes: [.font: carrierFont]).width < 0.1)
+        #expect(trailing.layoutFragmentFrame.height >= theme.baseFont().ascender - theme.baseFont().descender)
+        let first = try #require(fragments.first)
+        let firstFrame = try #require(first.listMarkerFrame(at: markerDrawPoint(for: first)))
+        let trailingFrame = try #require(trailing.listMarkerFrame(at: markerDrawPoint(for: trailing)))
+        #expect(abs(trailingFrame.maxX - firstFrame.maxX) < 0.5)
+        #expect(abs(trailingFrame.midY - firstFrame.midY) < 0.5)
+    }
+
+    @Test func emptyOrderedMarkerAlignsWithPopulatedSibling() throws {
+        let source = "1. 有序列表第一项\n2. "
+        let storage = NSTextStorage(string: source)
+        let textView = EditorTextView.make(textStorage: storage)
+        textView.frame = NSRect(x: 0, y: 0, width: 480, height: 180)
+        textView.textContainer?.containerSize = NSSize(
+            width: 480,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+
+        let package = engine.prepare(source)
+        _ = engine.render(
+            package: package,
+            selection: NSRange(location: storage.length, length: 0),
+            into: storage
+        )
+        let fragments = customFragments(in: textView).filter {
+            $0.blockKind == BlockVisual.list.rawValue + ":o"
+        }
+        #expect(fragments.count == 2)
+        guard fragments.count == 2 else { return }
+
+        let populatedFrame = try #require(
+            fragments[0].listMarkerFrame(at: markerDrawPoint(for: fragments[0]))
+        )
+        let emptyFrame = try #require(
+            fragments[1].listMarkerFrame(at: markerDrawPoint(for: fragments[1]))
+        )
+        #expect(abs(emptyFrame.maxX - populatedFrame.maxX) < 0.5)
+        #expect(abs(emptyFrame.minY - populatedFrame.minY) < 0.5)
     }
 
     @Test func unorderedMarkerAlignsWithFirstVisibleInlineContent() throws {

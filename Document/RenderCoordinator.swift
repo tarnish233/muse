@@ -69,6 +69,7 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
     /// 非 nil 时 `lastPackage` 已过期，光标流与模式切换都必须等待最新 package 落地。
     private var pendingDirtyRange: NSRange?
     private var revealCache: [RevealKey: RenderEngine.MarkerState] = [:]
+    private var revealsCurrentBlockSource = true
     private var needsImageRefresh = false
     private var imagePreparationTask: Task<Void, Never>?
     private var imagePreparationGeneration = 0
@@ -310,6 +311,7 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
                     package: package,
                     selection: textView?.selectedRange(),
                     mode: presentationMode,
+                    revealsCurrentBlockSource: revealsCurrentBlockSource,
                     into: storage,
                     imageBaseURL: imageBaseURL
                 )
@@ -1836,6 +1838,31 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
         }
     }
 
+    /// Controls whether editable block syntax (for example `# ` and `> `) is
+    /// revealed under the caret while the editor remains in rendered mode.
+    public func setRevealsCurrentBlockSource(_ enabled: Bool) {
+        guard revealsCurrentBlockSource != enabled else { return }
+        revealsCurrentBlockSource = enabled
+        revealCache.removeAll(keepingCapacity: true)
+        guard presentationMode == .rendered,
+              !isApplyingAttributes,
+              pendingDirtyRange == nil,
+              let package = lastPackage,
+              let storage = textStorage
+        else { return }
+        suppressUndo {
+            reconcileVisibility(
+                package: package,
+                selection: textView?.selectedRange(),
+                into: storage,
+                forceLines: nil
+            )
+            if lastReconcileWriteCount > 0 {
+                textView?.needsDisplay = true
+            }
+        }
+    }
+
     /// 供测试直接注入已解析的 package（正常路径由编辑流自动写入）。
     public func adoptPackage(_ package: RenderEngine.Package) {
         lastPackage = package
@@ -1896,6 +1923,7 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
                 package: package,
                 selection: textView?.selectedRange(),
                 mode: presentationMode,
+                revealsCurrentBlockSource: revealsCurrentBlockSource,
                 into: storage,
                 imageBaseURL: imageBaseURL
             )
@@ -1920,6 +1948,7 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
                 package: package,
                 selection: textView?.selectedRange(),
                 mode: presentationMode,
+                revealsCurrentBlockSource: revealsCurrentBlockSource,
                 into: storage,
                 imageBaseURL: imageBaseURL
             )
@@ -1960,7 +1989,11 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
             return
         }
 
-        let entries = engine.computedVisibility(package: package, selection: selection)
+        let entries = engine.computedVisibility(
+            package: package,
+            selection: selection,
+            revealsCurrentBlockSource: revealsCurrentBlockSource
+        )
         var newCache: [RevealKey: RenderEngine.MarkerState] = [:]
         var firstWrite = true
         var writeCount = 0

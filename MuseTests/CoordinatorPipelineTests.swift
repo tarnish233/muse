@@ -500,6 +500,65 @@ import Testing
         #expect(storage.string == source + typed)
     }
 
+    @Test func smartNewlineDrawsTrailingEmptyListMarker() async throws {
+        let body = Array(repeating: "超长列表内容用于触发软换行", count: 12)
+            .joined(separator: " ")
+        let source = "- \(body)\n\n## 后续标题"
+        let storage = NSTextStorage(string: source)
+        let coordinator = RenderCoordinator()
+        coordinator.attach(storage: storage)
+        coordinator.onTextEdited = {}
+
+        let textView = EditorTextView.make(textStorage: storage)
+        let window = host(textView)
+        defer { window.contentView = nil }
+        coordinator.textView = textView
+
+        storage.replaceCharacters(in: NSRange(location: 0, length: storage.length), with: source)
+        #expect(await waitForApplied(coordinator, atLeast: 1))
+        let listEnd = (source as NSString).range(of: body).upperBound
+        textView.setSelectedRange(NSRange(location: listEnd, length: 0))
+        textView.insertNewline(nil)
+        #expect(storage.string == "- \(body)\n- \n\n## 后续标题")
+        #expect(await waitForApplied(coordinator, atLeast: 2))
+
+        let continuedMarker = (storage.string as NSString).range(of: "- \n\n").location
+        let hiddenFont = RenderEngine.markerVisibilityAttributes(state: .hidden)[.font] as? NSFont
+        #expect(storage.attribute(.font, at: continuedMarker, effectiveRange: nil) as? NSFont == hiddenFont)
+        let carrierFont = try #require(
+            storage.attribute(.font, at: continuedMarker + 1, effectiveRange: nil) as? NSFont
+        )
+        #expect(carrierFont.pointSize == Theme.standard.baseFont().pointSize)
+        #expect((" " as NSString).size(withAttributes: [.font: carrierFont]).width < 0.1)
+
+        guard let layoutManager = textView.textLayoutManager else {
+            Issue.record("缺少 TextKit 2 layout manager")
+            return
+        }
+        var listFragments: [MuseLayoutFragment] = []
+        layoutManager.enumerateTextLayoutFragments(
+            from: layoutManager.documentRange.location,
+            options: [.ensuresLayout]
+        ) { fragment in
+            guard let fragment = fragment as? MuseLayoutFragment,
+                  fragment.blockKind == BlockVisual.list.rawValue + ":u"
+            else { return true }
+            listFragments.append(fragment)
+            return true
+        }
+
+        #expect(listFragments.count == 2)
+        let trailing = try #require(listFragments.last)
+        #expect(trailing.listMarkerGlyph == .unordered(depth: 1))
+        let drawPoint = CGPoint(
+            x: trailing.layoutFragmentFrame.origin.x + ListMarkerGeometry.defaultMarkerLaneWidth,
+            y: 20
+        )
+        #expect(trailing.layoutFragmentFrame.height
+                >= Theme.standard.baseFont().ascender - Theme.standard.baseFont().descender)
+        #expect(trailing.listMarkerFrame(at: drawPoint) != nil)
+    }
+
     /// 围栏闭合与紧随其后的行内编辑连续发生时，旧 package 仍须扩张结构脏带。
     @Test func rapidFenceClosureKeepsStructuralExpansion() async {
         let source = "```\ncode line\n\nparagraph"

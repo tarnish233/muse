@@ -290,7 +290,7 @@ private final class TableChromeOverlayView: NSView {
 /// M1：编辑视图。手工搭建 TextKit 2 栈，把文档的单一 NSTextStorage 挂进编辑面
 /// （v0.2 数据所有权边界：EditorBuffer.textStorage 是唯一可变正文）。
 /// 禁止代码访问 TextKit 1 的 layoutManager（会把视图打进不可逆的兼容模式）。
-final class EditorTextView: NSTextView {
+final class EditorTextView: NSTextView, NSMenuDelegate {
     /// 块级视觉的 fragment 工厂（layoutManager.delegate 是 unowned，需强引用持有）。
     private var fragmentProvider: MuseLayoutFragmentProvider?
     /// App 层接到文档的 RenderCoordinator。返回 true 表示表格已消费按键。
@@ -329,6 +329,13 @@ final class EditorTextView: NSTextView {
         let source: Int
         let sourceFrame: CGRect
         let grabOffset: CGFloat
+        /// 本次拖拽的全部落点候选，拖拽开始时算一次。
+        ///
+        /// 不能在 `mouseDragged` 里重查 `tableDragHandleGeometries()`：那只枚举可见
+        /// 区，滚出屏的行不是候选，`destination` 会卡在最上/最下可见行，一次拖拽
+        /// 就把行挪到错的位置。拖拽期间只写 `museTableDrag*` 属性、不改字号与行高，
+        /// 所以这份快照在整个手势里都成立。
+        let candidates: [TableDragHandleGeometry]
         var destination: Int
         var hasMoved = false
     }
@@ -342,6 +349,8 @@ final class EditorTextView: NSTextView {
         let column: Int
     }
     private var tableMenuTarget: TableMenuContext?
+    /// `menu(for:)` 里算好、等菜单真正弹出时才生效的整行/整列高亮。
+    private var pendingTableMenuSelection: (tableID: Int, bounds: TableSelectionBounds)?
     private enum TableMenuCommand: Int {
         case rowBefore = 1, rowAfter, rowUp, rowDown, rowDuplicate, rowDelete
         case columnBefore, columnAfter, columnLeft, columnRight, columnDuplicate, columnDelete
@@ -471,6 +480,9 @@ final class EditorTextView: NSTextView {
     /// I 型光标，再把复选框那几块盖上去。
     override func resetCursorRects() {
         super.resetCursorRects()
+        // 复选框与表格 chrome 都是**编辑**手势，`mouseDown` 里都有 `isEditable` 门禁。
+        // 只读文档里不能拿光标承诺一个点下去会被拒绝的动作。
+        guard isEditable else { return }
         for rect in taskCheckboxCursorRects() {
             addCursorRect(rect, cursor: .pointingHand)
         }
@@ -540,19 +552,64 @@ final class EditorTextView: NSTextView {
             let frame = fragment.layoutFragmentFrame
             if frame.minY + inset.y > visible.maxY { return false }
             guard let fragment = fragment as? MuseLayoutFragment else { return true }
-            for geometry in fragment.tableDragHandleGeometries(at: frame.origin) {
-                result.append(TableDragHandleGeometry(
-                    tableID: geometry.tableID,
-                    axis: geometry.axis,
-                    index: geometry.index,
-                    frame: geometry.frame.offsetBy(dx: inset.x, dy: inset.y),
-                    itemFrame: geometry.itemFrame.offsetBy(dx: inset.x, dy: inset.y),
-                    isLastRow: geometry.isLastRow
-                ))
-            }
+            result.append(contentsOf: viewSpaceHandles(in: fragment, inset: inset))
             return true
         }
         return result
+    }
+
+    /// 一个 fragment 的手柄几何，已从容器坐标搬到 NSTextView 坐标。
+    private func viewSpaceHandles(
+        in fragment: MuseLayoutFragment,
+        inset: CGPoint
+    ) -> [TableDragHandleGeometry] {
+        fragment.tableDragHandleGeometries(at: fragment.layoutFragmentFrame.origin).map { geometry in
+            TableDragHandleGeometry(
+                tableID: geometry.tableID,
+                axis: geometry.axis,
+                index: geometry.index,
+                frame: geometry.frame.offsetBy(dx: inset.x, dy: inset.y),
+                itemFrame: geometry.itemFrame.offsetBy(dx: inset.x, dy: inset.y),
+                isLastRow: geometry.isLastRow
+            )
+        }
+    }
+
+    /// 指定表格的**全部**行列手柄，不限可见区。拖拽落点判定用这个。
+    ///
+    /// 不做整篇扫描：从表格内部的 `containerY` 出发，向前后各走到「不再属于这张
+    /// 表」的第一个 fragment 就收手，代价与表格大小同阶、与文档规模无关（热路径
+    /// 不得随文档规模退化的同一条约束）。
+    private func tableDragHandleGeometries(
+        forTableID tableID: Int,
+        nearContainerY containerY: CGFloat
+    ) -> [TableDragHandleGeometry] {
+        guard let layoutManager = textLayoutManager,
+              let seed = layoutManager.textLayoutFragment(for: CGPoint(x: 0, y: containerY))
+        else { return [] }
+        let inset = textContainerOrigin
+
+        // 正反两趟都从 seed 那个 fragment 起算，所以 seed 会被访问两次；按
+        // 轴+序号去重，顺带保证同一手柄只留一份几何。
+        var collected: [String: TableDragHandleGeometry] = [:]
+        func walk(reverse: Bool) {
+            layoutManager.enumerateTextLayoutFragments(
+                from: seed.rangeInElement.location,
+                options: reverse ? [.ensuresLayout, .reverse] : [.ensuresLayout]
+            ) { fragment in
+                guard let fragment = fragment as? MuseLayoutFragment else { return false }
+                let handles = viewSpaceHandles(in: fragment, inset: inset)
+                    .filter { $0.tableID == tableID }
+                guard !handles.isEmpty else { return false } // 走出这张表，收手
+                for handle in handles {
+                    collected["\(handle.axis.rawValue)#\(handle.index)"] = handle
+                }
+                return true
+            }
+        }
+        walk(reverse: false)
+        walk(reverse: true)
+        return Array(collected.values)
     }
 
     private func tableChromeControls() -> [TableChromeControl] {
@@ -611,6 +668,10 @@ final class EditorTextView: NSTextView {
 
     private func syncTableChrome() {
         tableChromeOverlay.frame = visibleRect
+        // 滚动只改覆盖层的**原点**，`NSView` 只在尺寸变化时自动置 `needsLayout`。
+        // 而层里的路径全是相对覆盖层原点算的（见 `TableChromeCoordinateSpace`），
+        // 不重新布局的话拖拽鬼影与落点指示会按旧原点留在错位置。
+        tableChromeOverlay.needsLayout = true
         tableChromeOverlay.hoveredControl = hoveredTableControl
         if let drag = activeTableDrag {
             tableChromeOverlay.activeControl = tableChromeControls().first {
@@ -652,12 +713,12 @@ final class EditorTextView: NSTextView {
 
     private func sourceFrame(
         for control: TableChromeControl,
-        axis: TableDragHandleGeometry.Axis
+        axis: TableDragHandleGeometry.Axis,
+        candidates: [TableDragHandleGeometry]
     ) -> CGRect {
         guard axis == .column else { return control.itemFrame }
-        let rows = tableDragHandleGeometries().filter {
-            $0.tableID == control.tableID && $0.axis == .row
-        }
+        // 整列的鬼影要覆盖表格的**全部**行高，所以行范围也取自整表候选而不是可见区。
+        let rows = candidates.filter { $0.axis == .row }
         guard let minY = rows.map(\.itemFrame.minY).min(),
               let maxY = rows.map(\.itemFrame.maxY).max()
         else { return control.itemFrame }
@@ -726,6 +787,7 @@ final class EditorTextView: NSTextView {
         let control = tableChromeControls().last(where: { $0.frame.contains(point) })
         let context: TableMenuContext?
         var directAxis: TableDragHandleGeometry.Axis?
+        pendingTableMenuSelection = nil
         if let control, case let .handle(axis, index) = control.kind {
             directAxis = axis
             let row = axis == .row ? index : 0
@@ -746,7 +808,11 @@ final class EditorTextView: NSTextView {
                     minColumn: index, maxColumn: index
                 )
             }
-            _ = tableSelectionHandler?(control.tableID, bounds)
+            // 高亮整行/整列是右键的**效果**，不是构造菜单的一部分。原来直接在这里
+            // 调 handler，于是一次纯查询就写了 `.museTableSelection` 属性；菜单被
+            // 取消、或 AppKit 只是试探性地问一次，文档也已经被改过了。
+            // 推迟到 `menuWillOpen`——菜单真的弹出来才生效。
+            pendingTableMenuSelection = (control.tableID, bounds)
         } else {
             context = tableCell(at: point)
         }
@@ -754,6 +820,7 @@ final class EditorTextView: NSTextView {
         tableMenuTarget = context
 
         let menu = NSMenu(title: "表格")
+        menu.delegate = self
         if let selection = tableCurrentSelectionProvider?(), selection.tableID == context.tableID,
            context.row >= selection.bounds.minRow, context.row <= selection.bounds.maxRow,
            context.column >= selection.bounds.minColumn, context.column <= selection.bounds.maxColumn {
@@ -816,6 +883,14 @@ final class EditorTextView: NSTextView {
         menu.addItem(menuItem("删除列", symbol: "trash", command: .columnDelete))
     }
 
+    /// 右键整行/整列手柄时高亮它。放在 `menuWillOpen` 而不是 `menu(for:)` 里：
+    /// 后者是 AppKit 的查询入口，查询不该改文档。
+    func menuWillOpen(_ menu: NSMenu) {
+        guard let pending = pendingTableMenuSelection else { return }
+        pendingTableMenuSelection = nil
+        _ = tableSelectionHandler?(pending.tableID, pending.bounds)
+    }
+
     private func appendSortItems(to menu: NSMenu) {
         menu.addItem(menuItem("升序排列", symbol: "arrow.down", command: .sortAscending))
         menu.addItem(menuItem("降序排列", symbol: "arrow.up", command: .sortDescending))
@@ -847,6 +922,14 @@ final class EditorTextView: NSTextView {
     @objc private func performTableMenuCommand(_ sender: NSMenuItem) {
         guard let context = tableMenuTarget,
               let command = TableMenuCommand(rawValue: sender.tag)
+        else { return }
+        // 右键那一刻算出的行列是**当时**的表格形状，而菜单项可能几秒后才被选中；
+        // 期间后台重解析或一次撤销都可能改了行列数。`performTableAction` 只把索引
+        // 夹进合法范围——夹住的结果依然是错的那一行，「删除行」尤其不可接受。
+        // 用现在的维度复验（脏区未清时 provider 返回 nil，这里也就一并放弃）。
+        guard let dimensions = tableDimensionProvider?(context.tableID),
+              context.row < dimensions.rows,
+              context.column < dimensions.columns
         else { return }
         let action: TableStructureAction
         switch command {
@@ -905,8 +988,11 @@ final class EditorTextView: NSTextView {
         NotificationCenter.default.removeObserver(
             self, name: NSView.boundsDidChangeNotification, object: nil
         )
-        guard let clipView = enclosingScrollView?.contentView else { return }
+        // 悬停跟踪与「是否装在滚动视图里」无关，不能共用下面那个 guard：一旦
+        // `return` 掉，`mouseMoved` 就永远收不到事件，而表格 chrome 的可见性、
+        // 乃至它能不能被点，现在都以悬停为准。
         window?.acceptsMouseMovedEvents = true
+        guard let clipView = enclosingScrollView?.contentView else { return }
         clipView.postsBoundsChangedNotifications = true
         NotificationCenter.default.addObserver(
             self,
@@ -1405,8 +1491,12 @@ final class EditorTextView: NSTextView {
         if Self.isPlainPrimaryClick(event),
            hasMarkedText() == false,
            isEditable,
-           let control = tableChromeControls().last(where: { $0.frame.contains(point) })
+           let control = hoveredTableControl,
+           control.frame.contains(point)
         {
+            // 只有**看得见**的 chrome 才能点：覆盖层未悬停时完全不绘制，而这些控件
+            // 的命中矩形铺在表格外沿（addRow 是表格下方通宽 16pt 的条带）。不看
+            // hover 的话，点表格下面那片空白会插一行，而不是把光标落到下一段。
             switch control.kind {
             case .addRow:
                 let rows = tableDragHandleGeometries().filter {
@@ -1433,7 +1523,11 @@ final class EditorTextView: NSTextView {
                     return
                 }
             case let .handle(axis, index):
-                let sourceFrame = sourceFrame(for: control, axis: axis)
+                let candidates = tableDragHandleGeometries(
+                    forTableID: control.tableID,
+                    nearContainerY: control.itemFrame.midY - textContainerOrigin.y
+                )
+                let sourceFrame = sourceFrame(for: control, axis: axis, candidates: candidates)
                 let drag = ActiveTableDrag(
                     tableID: control.tableID,
                     axis: axis,
@@ -1442,6 +1536,7 @@ final class EditorTextView: NSTextView {
                     grabOffset: axis == .row
                         ? point.y - sourceFrame.minY
                         : point.x - sourceFrame.minX,
+                    candidates: candidates,
                     destination: index
                 )
                 let accepted = tableDragHandler?(TableDragEvent(
@@ -1483,14 +1578,18 @@ final class EditorTextView: NSTextView {
         if Self.isPlainPrimaryClick(event),
            hasMarkedText() == false,
            isEditable,
-           taskCheckboxToggleRange(at: point) != nil
+           let hit = taskCheckboxHit(at: point)
         {
             // Focus first, then edit. The old order evaluated the toggle inside the
             // `if` condition and only became first responder afterwards, so a
             // focusing click arriving from the sidebar mutated the document while
             // the view was not even the responder.
+            //
+            // 命中只解析一次，然后把结果带过 `makeFirstResponder`：抢焦点会触发
+            // 选区变化 → marker 显隐 → 重排，此时同一个落点可能解析到另一个
+            // fragment。重解析一遍就等于「用旧几何做决定、用新几何下手」。
             window?.makeFirstResponder(self)
-            if toggleTaskCheckbox(at: point) { return }
+            if toggleTaskCheckbox(hit) { return }
         }
         if Self.isPlainPrimaryClick(event),
            hasMarkedText() == false,
@@ -1520,9 +1619,7 @@ final class EditorTextView: NSTextView {
             return
         }
         let point = convert(event.locationInWindow, from: nil)
-        let candidates = tableDragHandleGeometries().filter {
-            $0.tableID == drag.tableID && $0.axis == drag.axis
-        }
+        let candidates = drag.candidates.filter { $0.axis == drag.axis }
         guard let nearest = candidates.min(by: { lhs, rhs in
             let leftDistance: CGFloat
             let rightDistance: CGFloat
@@ -1795,34 +1892,57 @@ final class EditorTextView: NSTextView {
         typewriterViewportHeight = 0
     }
 
-    /// Standard text replacement for the checkbox hit by `point`. The source
-    /// length stays unchanged, so the existing selection remains valid.
+    /// Standard text replacement for the checkbox hit by `point`.
     @discardableResult
     func toggleTaskCheckbox(at point: CGPoint) -> Bool {
         pendingPair = nil
-        guard let range = taskCheckboxToggleRange(at: point) else { return false }
-        let current = (string as NSString).substring(with: range)
+        guard let hit = taskCheckboxHit(at: point) else { return false }
+        return toggleTaskCheckbox(hit)
+    }
+
+    /// 切换一个已经命中的复选框。
+    ///
+    /// 光标**必须先落到被点的那一行**再替换：`NSTextView.insertText` 把*光标*滚进
+    /// 视野，而不是被替换的区间。光标还停在上次编辑处时，切一个屏幕上的复选框会
+    /// 把视口整个拽走（实测 122 行文档 y 4020 → 0）。落到本行正文起点之后，滚动
+    /// 目标就是用户刚点的位置，视口不动。
+    ///
+    /// 落点是 marker 之后的正文起点，不是 `[ ]` 内部——那几个是折叠掉的结构字符，
+    /// 光标停在里面接着打字会把复选框拆坏。
+    @discardableResult
+    func toggleTaskCheckbox(_ hit: TaskCheckboxHit) -> Bool {
+        pendingPair = nil
+        let source = string as NSString
+        guard NSMaxRange(hit.toggleRange) <= source.length else { return false }
+        let current = source.substring(with: hit.toggleRange)
         guard current == " " || current.lowercased() == "x" else { return false }
         let replacement = current == " " ? "x" : " "
         // `shouldChangeText` 是 AppKit 问「这段文本能不能改」的官方入口：它既覆盖
         // `isEditable`，也把否决权交给 delegate。不要用手写的 isEditable 检查代替，
         // 那只覆盖其中一半。
-        guard shouldChangeText(in: range, replacementString: replacement) else { return false }
+        guard shouldChangeText(in: hit.toggleRange, replacementString: replacement) else { return false }
 
-        let selection = selectedRange()
         breakUndoCoalescing()
         let manager = undoManager
         manager?.beginUndoGrouping()
-        super.insertText(replacement, replacementRange: range)
-        setSelectedRange(selection)
+        setSelectedRange(NSRange(location: min(hit.caretLocation, source.length), length: 0))
+        super.insertText(replacement, replacementRange: hit.toggleRange)
         manager?.endUndoGrouping()
         breakUndoCoalescing()
         return true
     }
 
+    /// 一次命中的复选框，全部是正文的绝对 UTF-16 偏移。
+    struct TaskCheckboxHit: Equatable {
+        /// `[ ]` / `[x]` 里那一个状态字符。替换前后长度不变。
+        let toggleRange: NSRange
+        /// 点击后光标应落的位置：该列表项 marker 之后的正文起点。
+        let caretLocation: Int
+    }
+
     /// Uses the actual TextKit 2 fragments and the same marker frame as the
     /// renderer. No TextKit 1 layout manager or duplicate hit geometry exists.
-    func taskCheckboxToggleRange(at point: CGPoint) -> NSRange? {
+    func taskCheckboxHit(at point: CGPoint) -> TaskCheckboxHit? {
         guard let layoutManager = textLayoutManager,
               let contentManager = layoutManager.textContentManager
         else { return nil }
@@ -1837,7 +1957,7 @@ final class EditorTextView: NSTextView {
             y: containerPoint.y
         ))
         let candidates = [direct, lineProbe].compactMap { $0 as? MuseLayoutFragment }
-        guard let match = candidates.lazy.compactMap({ fragment -> (MuseLayoutFragment, (frame: CGRect, toggleRange: NSRange))? in
+        guard let match = candidates.lazy.compactMap({ fragment -> (MuseLayoutFragment, MuseLayoutFragment.TaskCheckboxHitTarget)? in
             guard let target = fragment.taskCheckboxHitTarget(),
                   target.frame.contains(containerPoint) else { return nil }
             return (fragment, target)
@@ -1854,7 +1974,10 @@ final class EditorTextView: NSTextView {
         guard location >= 0, location + target.toggleRange.length <= (self.string as NSString).length else {
             return nil
         }
-        return NSRange(location: location, length: target.toggleRange.length)
+        return TaskCheckboxHit(
+            toggleRange: NSRange(location: location, length: target.toggleRange.length),
+            caretLocation: elementStart + target.contentOffset
+        )
     }
 
     /// Source location for a click on a rendered unordered/ordered marker.
@@ -1962,7 +2085,11 @@ final class EditorTextView: NSTextView {
             baseURL: previewBaseURL
         )
         popover.contentSize = NSSize(width: 380, height: 280)
-        popover.show(relativeTo: NSRect(origin: point, size: .zero), of: self, preferredEdge: .maxY)
+        // 定位矩形**不能为空**：`NSPopover` 把空矩形当成 `positioningView.bounds`，
+        // 而这里的 positioningView 是滚动视图的文档视图（整篇文档那么高），弹窗
+        // 就锚到文档底边、通常落在视口外面。给点击处一个真实的小矩形。
+        let anchor = NSRect(x: point.x - 1, y: point.y - 1, width: 2, height: 2)
+        popover.show(relativeTo: anchor, of: self, preferredEdge: .maxY)
         imagePreviewPopover = popover
     }
 }

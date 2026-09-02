@@ -885,6 +885,112 @@ import Testing
         #expect(textView.selectedRange() == freshPackage.index.nsRange(third.ink))
     }
 
+    /// 大纲跳转不许用旧 package 的行偏移定位。
+    ///
+    /// `OutlineHeading.lineRange` 由 `makeOutline` 从 `lastPackage` 算出。脏区未清时
+    /// 那份 package 对应的是**编辑前**的正文，此刻跳转会落到错的位置。
+    ///
+    /// 这里在标题**前面**插入一段，让所有行偏移右移，然后立刻（解析落地之前）点击
+    /// 大纲行；跳转必须按新偏移落到标题行首，而不是旧偏移。
+    @Test func outlineRevealWaitsForFreshPackageAfterTyping() async throws {
+        let source = "前言\n\n# 目标\n\n正文"
+        let storage = NSTextStorage(string: source)
+        let coordinator = RenderCoordinator()
+        coordinator.attach(storage: storage)
+        coordinator.onTextEdited = {}
+        let textView = EditorTextView.make(textStorage: storage)
+        coordinator.textView = textView
+
+        storage.replaceCharacters(in: NSRange(location: 0, length: 0), with: "")
+        #expect(await waitForApplied(coordinator, atLeast: 1))
+        let heading = try #require(coordinator.outline.first)
+        let staleLocation = heading.lineRange.location
+
+        // 在标题前插入，让标题行整体右移；随即在解析落地前点大纲。
+        textView.setSelectedRange(NSRange(location: 0, length: 0))
+        let revision = coordinator.appliedRevision
+        textView.insertText("插入一段文字", replacementRange: NSRange(location: NSNotFound, length: 0))
+        coordinator.reveal(heading: heading)
+        #expect(
+            textView.selectedRange().location != staleLocation,
+            "脏区未清时就按旧行偏移跳了"
+        )
+
+        #expect(await waitForApplied(coordinator, atLeast: revision + 1))
+        let fresh = try #require(coordinator.outline.first)
+        #expect(fresh.lineRange.location != staleLocation, "前提：插入确实让标题行右移了")
+        #expect(
+            textView.selectedRange() == NSRange(location: fresh.lineRange.location, length: 0),
+            "最新 outline 落地后应补做跳转，实得 \(textView.selectedRange())"
+        )
+    }
+
+    /// 大纲跳转把标题送到视口**靠上**的位置。
+    ///
+    /// `scrollRangeToVisible` 只做最小滚动：从上往下跳时目标停在视口*底*边，跳过去
+    /// 的那一节整个在屏幕外。这里断言落位在顶端余量附近，并顺带断言它没停在下半屏。
+    @Test func outlineRevealLandsHeadingNearViewportTop() async throws {
+        var lines = ["# 一、开头"]
+        lines += (0..<60).map { "第一节正文 \($0)" }
+        lines.append("# 二、中间")
+        lines += (0..<60).map { "第二节正文 \($0)" }
+        let source = lines.joined(separator: "\n")
+
+        let storage = NSTextStorage(string: source)
+        let coordinator = RenderCoordinator()
+        coordinator.attach(storage: storage)
+        coordinator.onTextEdited = {}
+        let textView = EditorTextView.make(textStorage: storage)
+        coordinator.textView = textView
+
+        let scrollView = NSScrollView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
+        textView.minSize = .zero
+        textView.maxSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.containerSize = NSSize(
+            width: 0, height: CGFloat.greatestFiniteMagnitude
+        )
+        textView.textContainer?.widthTracksTextView = true
+        scrollView.documentView = textView
+
+        storage.replaceCharacters(in: NSRange(location: 0, length: 0), with: "")
+        #expect(await waitForApplied(coordinator, atLeast: 1))
+        let layoutManager = try #require(textView.textLayoutManager)
+        let contentManager = try #require(layoutManager.textContentManager)
+        layoutManager.ensureLayout(for: layoutManager.documentRange)
+        scrollView.layoutSubtreeIfNeeded()
+
+        let second = try #require(coordinator.outline.last)
+
+        // 从文首往下跳。
+        scrollView.contentView.scroll(to: .zero)
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+        coordinator.reveal(heading: second)
+
+        let location = try #require(contentManager.location(
+            contentManager.documentRange.location,
+            offsetBy: second.lineRange.location
+        ))
+        let fragment = try #require(layoutManager.textLayoutFragment(for: location))
+        let headingTop = fragment.layoutFragmentFrame.minY + textView.textContainerOrigin.y
+        let visible = textView.visibleRect
+        let offsetInViewport = headingTop - visible.minY
+
+        #expect(
+            offsetInViewport >= 0 && offsetInViewport <= 24,
+            "标题该落在视口顶端 12pt 余量附近，实得距顶 \(offsetInViewport)pt"
+        )
+        #expect(
+            offsetInViewport < visible.height / 2,
+            "标题落到了下半屏——最小滚动的老行为"
+        )
+    }
+
     @Test func realisticTypingCadenceKeepsWholeDocumentParsingSingleFlight() async {
         let source = PerformanceTests.corpus(kb: 200)
         let storage = NSTextStorage(string: source)

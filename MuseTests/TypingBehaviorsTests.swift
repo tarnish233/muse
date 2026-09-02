@@ -1435,6 +1435,72 @@ import Testing
         #expect(textView.selectedRange() == NSRange(location: 0, length: 0))
     }
 
+    /// 点击复选框**不许移动视口**。
+    ///
+    /// 曾经会：`toggleTaskCheckbox` 走 `super.insertText`，而 `NSTextView.insertText`
+    /// 把*光标*滚进视野、不是被替换的区间。光标还停在上次编辑处（可能几千 pt 之外）
+    /// 时，切一个屏幕上的复选框就把整个视口拽过去（实测 y 4020 → 0）。
+    ///
+    /// 断言两件事：视口一动不动，且光标落到被点那一行的正文起点。
+    @Test func clickingCheckboxNeitherScrollsNorLosesTheCaret() throws {
+        var lines = (0..<120).map { "段落 \($0) 一些正文内容" }
+        lines.append("- [ ] 待办甲")
+        let source = lines.joined(separator: "\n")
+        let storage = NSTextStorage(string: source)
+        let textView = EditorTextView.make(textStorage: storage)
+
+        let scrollView = NSScrollView(frame: NSRect(x: 0, y: 0, width: 600, height: 300))
+        textView.minSize = .zero
+        textView.maxSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.containerSize = NSSize(
+            width: 0, height: CGFloat.greatestFiniteMagnitude
+        )
+        textView.textContainer?.widthTracksTextView = true
+        scrollView.documentView = textView
+        let window = NSWindow(
+            contentRect: scrollView.frame,
+            styleMask: [.borderless], backing: .buffered, defer: false
+        )
+        window.contentView = scrollView
+        defer { window.contentView = nil }
+
+        let engine = RenderEngine()
+        _ = engine.render(package: engine.prepare(source), selection: nil, into: storage)
+        let layoutManager = try #require(textView.textLayoutManager)
+        layoutManager.ensureLayout(for: layoutManager.documentRange)
+        scrollView.layoutSubtreeIfNeeded()
+
+        // 光标停在文首，视口滚到文末的待办处。
+        textView.setSelectedRange(NSRange(location: 0, length: 0))
+        scrollView.contentView.scroll(to: NSPoint(x: 0, y: max(0, textView.frame.height - 300)))
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+        layoutManager.ensureLayout(for: layoutManager.documentRange)
+
+        let rect = try #require(textView.taskCheckboxCursorRects().first)
+        let center = CGPoint(x: rect.midX, y: rect.midY)
+        let visibleBefore = textView.visibleRect
+
+        #expect(textView.toggleTaskCheckbox(at: center))
+        #expect(storage.string.hasSuffix("- [x] 待办甲"))
+        #expect(
+            textView.visibleRect.origin == visibleBefore.origin,
+            "视口被拽走了：\(visibleBefore.origin) → \(textView.visibleRect.origin)"
+        )
+
+        let ns = storage.string as NSString
+        let line = ns.lineRange(for: NSRange(location: ns.length - 1, length: 0))
+        #expect(
+            textView.selectedRange() == NSRange(location: line.location + 6, length: 0),
+            "光标应落在被点那一行 `- [x] ` 之后，实得 \(textView.selectedRange())"
+        )
+    }
+
     @Test func taskCheckboxUsesRealFragmentHitFrameAndUndo() throws {
         let source = "前😀文\n\n- [ ] task"
         let storage = NSTextStorage(string: source)
@@ -1480,12 +1546,14 @@ import Testing
             y: resolvedTarget.inkBounds.midY + textView.textContainerOrigin.y
         )
 
-        #expect(textView.taskCheckboxToggleRange(at: CGPoint(x: 2, y: 2)) == nil)
-        #expect(textView.taskCheckboxToggleRange(at: CGPoint(
+        #expect(textView.taskCheckboxHit(at: CGPoint(x: 2, y: 2)) == nil)
+        #expect(textView.taskCheckboxHit(at: CGPoint(
             x: resolvedTarget.bodyStartX + 4 + textView.textContainerOrigin.x,
             y: inkCenter.y
         )) == nil)
-        #expect(textView.taskCheckboxToggleRange(at: inkCenter) == NSRange(location: 9, length: 1))
+        #expect(textView.taskCheckboxHit(at: inkCenter)?.toggleRange == NSRange(location: 9, length: 1))
+        // 光标落在 marker 之后的正文起点（`前😀文\n\n` 占 6 个 UTF-16 + `- [ ] ` 占 6）。
+        #expect(textView.taskCheckboxHit(at: inkCenter)?.caretLocation == 12)
         #expect(textView.toggleTaskCheckbox(at: inkCenter))
         #expect(storage.string == "前😀文\n\n- [x] task")
 
@@ -1515,7 +1583,7 @@ import Testing
         // so a shared coordinate bug cannot make this test prove itself.
         let point = try #require(checkboxInkCenter(in: textView))
         let stateLocation = (source as NSString).range(of: "[x]").location + 1
-        #expect(textView.taskCheckboxToggleRange(at: point) == NSRange(location: stateLocation, length: 1))
+        #expect(textView.taskCheckboxHit(at: point)?.toggleRange == NSRange(location: stateLocation, length: 1))
         #expect(textView.toggleTaskCheckbox(at: point))
         #expect((storage.string as NSString).substring(with: NSRange(location: stateLocation, length: 1)) == " ")
     }

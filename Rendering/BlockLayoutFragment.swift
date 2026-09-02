@@ -651,10 +651,19 @@ public nonisolated final class MuseLayoutFragment: NSTextLayoutFragment {
 
     /// Click target and source toggle range for a rendered task checkbox.
     ///
-    /// The frame comes from the exact geometry used by drawing. The range is
-    /// relative to this fragment's text element and covers only the state
-    /// character inside `[ ]`, `[x]`, or `[X]`.
-    public func taskCheckboxHitTarget() -> (frame: CGRect, toggleRange: NSRange)? {
+    /// The frame comes from the exact geometry used by drawing. The ranges are
+    /// relative to this fragment's text element.
+    public struct TaskCheckboxHitTarget: Equatable, Sendable {
+        /// 命中矩形，与绘制用的 marker 几何同源。
+        public let frame: CGRect
+        /// `[ ]` / `[x]` / `[X]` 里那一个状态字符。
+        public let toggleRange: NSRange
+        /// marker 之后的正文起点。点击复选框后光标落在这里——不能落进
+        /// `[ ]` 内部，那几个字符是折叠掉的结构字符，在里面打字会拆坏复选框。
+        public let contentOffset: Int
+    }
+
+    public func taskCheckboxHitTarget() -> TaskCheckboxHitTarget? {
         guard let resolved = resolvedMarker(),
               case .task = resolved.glyph,
               let markerFrame = frame(of: resolved, at: layoutFragmentFrame.origin)
@@ -674,9 +683,10 @@ public nonisolated final class MuseLayoutFragment: NSTextLayoutFragment {
         // Keep the visual glyph easy to click without allowing the entire
         // indentation lane to toggle the task accidentally.
         let hitFrame = markerFrame.insetBy(dx: -3, dy: -2)
-        return (
+        return TaskCheckboxHitTarget(
             frame: hitFrame,
-            toggleRange: NSRange(location: taskRange.location + 1, length: 1)
+            toggleRange: NSRange(location: taskRange.location + 1, length: 1),
+            contentOffset: min(info.markerLocation + info.markerLength, resolved.string.length)
         )
     }
 

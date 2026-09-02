@@ -1439,7 +1439,7 @@ import Testing
         for rect in rects {
             let center = CGPoint(x: rect.midX, y: rect.midY)
             #expect(
-                textView.taskCheckboxToggleRange(at: center) != nil,
+                textView.taskCheckboxHit(at: center) != nil,
                 "光标矩形 \(rect) 的中心点击不中复选框"
             )
         }

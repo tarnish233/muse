@@ -80,6 +80,10 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
     /// 用旧的 UTF-16 区间跳到错误单元格；命令本身仍被消费，不会写进 Markdown。
     /// 若某条命令新增了表格行，剩余命令会继续等待下一份 AST，绝不复用旧坐标。
     private var pendingTableNavigations: [TableNavigationDirection] = []
+    /// 渲染尚未追上输入时收到的大纲跳转。`OutlineHeading.lineRange` 是 package 派生
+    /// 的行区间，脏区未清时它对应的是**编辑前**的行偏移，直接用会跳到错位置。
+    /// 存下 id，等最新 outline 重建后按新区间执行。
+    private var pendingOutlineReveal: OutlineHeading.ID?
     private struct ActiveTableSelection: Equatable {
         let tableID: Int
         let anchorRow: Int
@@ -364,6 +368,7 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
         } else {
             pendingTableNavigations.removeAll(keepingCapacity: true)
         }
+        drainPendingOutlineReveal()
         scheduleBlockImagePreparation(package: package, revision: rev)
     }
 
@@ -1973,14 +1978,71 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
     }
 
     /// 侧边栏点击 heading 时调用：把选区放到标题行首并滚动可见。
+    ///
+    /// `heading.lineRange` 来自 `makeOutline`，是 package 派生的区间。脏区未清时
+    /// `lastPackage` 对应的是编辑前的正文，此刻跳转会按旧行偏移定位——项目里其余
+    /// 消费 package 派生区间的地方都有 `pendingDirtyRange == nil` 闸门，这里原来
+    /// 漏了。改为排队等最新 outline，而不是丢掉这次点击。
     public func reveal(heading: OutlineHeading) {
+        guard pendingDirtyRange == nil else {
+            pendingOutlineReveal = heading.id
+            return
+        }
+        performReveal(heading: heading)
+    }
+
+    private func performReveal(heading: OutlineHeading) {
         guard let textView, let storage = textStorage else { return }
         let length = storage.length
         guard heading.lineRange.location + heading.lineRange.length <= length else { return }
         let caret = NSRange(location: heading.lineRange.location, length: 0)
         textView.setSelectedRange(caret)
+        // 先做一次最小滚动：它顺带保证目标那一段已经排好版，下面量 fragment 才有
+        // 值可量。然后再精确定位——两步都在同一帧里，看不到中间态。
         textView.scrollRangeToVisible(heading.lineRange)
+        scrollHeadingNearTop(at: caret.location, in: textView)
         textView.window?.makeFirstResponder(textView)
+    }
+
+    /// 大纲跳转时标题行距视口顶端留出的余量。贴死顶边看着像被截断。
+    private static let outlineRevealTopMargin: CGFloat = 12
+
+    /// 把标题行送到视口靠上的位置。
+    ///
+    /// `scrollRangeToVisible` 只做**最小**滚动：从上往下跳时，目标停在视口*底*边，
+    /// 跳过去的那一节整个在屏幕外，等于跳了又没跳。这里主动定位，两个方向都让
+    /// 这一节从顶部开始。
+    ///
+    /// 文档末尾附近够不到那么下面，所以按可滚动范围夹住——夹不住就会滚到空白。
+    private func scrollHeadingNearTop(at location: Int, in textView: NSTextView) {
+        guard let scrollView = textView.enclosingScrollView,
+              let layoutManager = textView.textLayoutManager,
+              let contentManager = layoutManager.textContentManager,
+              let textLocation = contentManager.location(
+                contentManager.documentRange.location, offsetBy: location
+              ),
+              let fragment = layoutManager.textLayoutFragment(for: textLocation)
+        else { return }
+
+        let clipView = scrollView.contentView
+        let targetY = fragment.layoutFragmentFrame.minY
+            + textView.textContainerOrigin.y
+            - Self.outlineRevealTopMargin
+        let maxY = max(0, clipView.documentRect.height - clipView.bounds.height)
+        clipView.scroll(to: CGPoint(
+            x: clipView.bounds.origin.x,
+            y: min(max(0, targetY), maxY)
+        ))
+        scrollView.reflectScrolledClipView(clipView)
+    }
+
+    /// 最新 outline 落地后补做排队中的跳转。按 id 在**新** outline 里重新取区间；
+    /// 那个标题已经被这次编辑删掉时就丢弃，绝不复用旧坐标。
+    private func drainPendingOutlineReveal() {
+        guard let id = pendingOutlineReveal else { return }
+        pendingOutlineReveal = nil
+        guard let heading = outline.first(where: { $0.id == id }) else { return }
+        performReveal(heading: heading)
     }
 
     // MARK: - 内部

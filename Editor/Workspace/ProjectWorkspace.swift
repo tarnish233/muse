@@ -4,14 +4,12 @@ import Observation
 @MainActor
 @Observable
 final class ProjectWorkspace {
-    static let shared = ProjectWorkspace()
-
     struct StoredProject: Codable, Equatable {
         let bookmark: Data
     }
 
     private enum Constants {
-        static let projectsKey = "Muse.workspace.projects"
+        static let projectKey = "Muse.workspace.project"
         static let readableExtensions = Set(["md", "markdown", "mdown", "mkd", "txt", "text"])
     }
 
@@ -20,18 +18,18 @@ final class ProjectWorkspace {
         var errorDescription: String? { message }
     }
 
-    private(set) var projects: [WorkspaceProject] = []
-    private(set) var trees: [URL: [WorkspaceNode]] = [:]
+    private(set) var project: WorkspaceProject?
+    private(set) var tree: [WorkspaceNode] = []
     var presentedError: String?
 
     private let fileManager: FileManager
     private let bookmarking: WorkspaceBookmarking
     private let projectStore: WorkspaceProjectStore
     private let treeLoader: WorkspaceTreeLoader
-    private var bookmarksByURL: [URL: Data] = [:]
-    private var securityScopedURLs: Set<URL> = []
-    private var refreshTasks: [URL: Task<Void, Never>] = [:]
-    private var refreshGenerations: [URL: Int] = [:]
+    private var bookmark: Data?
+    private var securityScopedURL: URL?
+    private var refreshTask: Task<Void, Never>?
+    private var refreshGeneration = 0
     private var unresolvedProjectStoreError: Error?
 
     init(
@@ -43,95 +41,71 @@ final class ProjectWorkspace {
     ) {
         self.fileManager = fileManager
         self.bookmarking = bookmarking ?? .live()
-        self.projectStore = projectStore ?? .userDefaults(defaults, key: Constants.projectsKey)
+        self.projectStore = projectStore ?? .userDefaults(defaults, key: Constants.projectKey)
         let resolvedFileSystem = fileSystem ?? .live(fileManager: fileManager)
-        self.treeLoader = WorkspaceTreeLoader(fileSystem: resolvedFileSystem)
-        restoreProjects()
+        treeLoader = WorkspaceTreeLoader(fileSystem: resolvedFileSystem)
+        restoreProject()
     }
 
-    func addProject(at rootURL: URL) throws {
+    func openProject(at rootURL: URL) throws {
         let url = rootURL.standardizedFileURL
         var isDirectory: ObjCBool = false
         guard fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue else {
             throw CocoaError(.fileNoSuchFile)
         }
 
-        guard !projects.contains(where: { $0.rootURL == url }) else {
+        if project?.rootURL == url {
             beginAccessing(url)
-            refreshProject(at: url)
+            refreshProject()
             return
         }
 
-        let bookmark = try bookmarking.create(url)
-        var nextProjects = projects
-        nextProjects.append(WorkspaceProject(rootURL: url))
-        nextProjects.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
-        var nextBookmarks = bookmarksByURL
-        nextBookmarks[url] = bookmark
-        try saveSnapshot(projects: nextProjects, bookmarks: nextBookmarks)
+        let nextProject = WorkspaceProject(rootURL: url)
+        let nextBookmark = try bookmarking.create(url)
+        try saveSnapshot(project: nextProject, bookmark: nextBookmark)
 
-        projects = nextProjects
-        bookmarksByURL = nextBookmarks
+        resetCurrentProjectState()
+        project = nextProject
+        bookmark = nextBookmark
         beginAccessing(url)
-        refreshProject(at: url)
+        refreshProject()
     }
 
     func createProject(at rootURL: URL) throws {
         try fileManager.createDirectory(at: rootURL, withIntermediateDirectories: true)
-        try addProject(at: rootURL)
+        try openProject(at: rootURL)
     }
 
-    func removeProject(_ project: WorkspaceProject) {
-        let url = project.rootURL.standardizedFileURL
-        let nextProjects = projects.filter { $0.id != project.id }
-        var nextBookmarks = bookmarksByURL
-        nextBookmarks[url] = nil
-
+    func closeProject() {
         do {
-            try saveSnapshot(projects: nextProjects, bookmarks: nextBookmarks)
+            try saveSnapshot(project: nil, bookmark: nil)
         } catch {
             presentedError = error.localizedDescription
             return
         }
 
-        projects = nextProjects
-        bookmarksByURL = nextBookmarks
-        trees[url] = nil
-        refreshTasks[url]?.cancel()
-        refreshTasks[url] = nil
-        refreshGenerations[url] = nil
-        if securityScopedURLs.remove(url) != nil {
-            url.stopAccessingSecurityScopedResource()
-        }
+        resetCurrentProjectState()
+        project = nil
+        bookmark = nil
     }
 
-    func children(of project: WorkspaceProject) -> [WorkspaceNode] {
-        trees[project.rootURL] ?? []
-    }
-
-    func refreshAll() {
-        for project in projects {
-            refreshProject(at: project.rootURL)
-        }
-    }
-
-    func refreshProject(at rootURL: URL) {
-        let root = rootURL.standardizedFileURL
-        let generation = (refreshGenerations[root] ?? 0) + 1
-        refreshGenerations[root] = generation
-        refreshTasks[root]?.cancel()
+    func refreshProject() {
+        guard let root = project?.rootURL.standardizedFileURL else { return }
+        refreshGeneration += 1
+        let generation = refreshGeneration
+        refreshTask?.cancel()
 
         let loader = treeLoader
-        refreshTasks[root] = Task { [weak self] in
+        refreshTask = Task { [weak self] in
             let outcome = await loader.loadTree(at: root)
             guard let self,
-                  self.refreshGenerations[root] == generation,
-                  self.projects.contains(where: { $0.rootURL == root })
+                  self.refreshGeneration == generation,
+                  self.project?.rootURL == root
             else { return }
 
             switch outcome {
             case let .success(nodes, warnings):
-                self.trees[root] = nodes
+                self.tree = nodes
                 self.report(warnings)
             case let .failure(message):
                 // 短暂的根目录错误不能破坏上一次成功树快照。
@@ -139,17 +113,16 @@ final class ProjectWorkspace {
             case .cancelled:
                 break
             }
-            if self.refreshGenerations[root] == generation {
-                self.refreshTasks[root] = nil
+            if self.refreshGeneration == generation {
+                self.refreshTask = nil
             }
         }
     }
 
     /// 测试与需要强一致快照的调用方可等待当前（以及等待期间替换它的）刷新完成。
-    func waitForRefresh(at rootURL: URL) async {
-        let root = rootURL.standardizedFileURL
-        while let task = refreshTasks[root] {
-            await task.value
+    func waitForRefresh() async {
+        while let refreshTask {
+            await refreshTask.value
         }
     }
 
@@ -191,15 +164,15 @@ final class ProjectWorkspace {
     }
 
     func project(containing url: URL) -> WorkspaceProject? {
+        guard let project else { return nil }
         let path = url.standardizedFileURL.path
-        return projects
-            .filter { path == $0.rootURL.path || path.hasPrefix($0.rootURL.path + "/") }
-            .max { $0.rootURL.path.count < $1.rootURL.path.count }
+        let rootPath = project.rootURL.path
+        return path == rootPath || path.hasPrefix(rootPath + "/") ? project : nil
     }
 
     func refreshProject(containing url: URL) {
-        guard let project = project(containing: url) else { return }
-        refreshProject(at: project.rootURL)
+        guard project(containing: url) != nil else { return }
+        refreshProject()
     }
 
     private func validatedName(_ rawName: String, kind: WorkspaceCreationRequest.Kind) throws -> String {
@@ -213,107 +186,92 @@ final class ProjectWorkspace {
         return name
     }
 
-    private func restoreProjects() {
+    private func restoreProject() {
         guard let data = projectStore.load() else { return }
-        let stored: [StoredProject]
+        let stored: StoredProject?
         do {
-            stored = try JSONDecoder().decode([StoredProject].self, from: data)
+            stored = try JSONDecoder().decode(StoredProject?.self, from: data)
         } catch {
             do {
                 let backupLocation = try projectStore.backupCorruptData(data)
                 unresolvedProjectStoreError = nil
-                report(["项目列表数据无法读取。原数据已备份到 \(backupLocation)。"])
+                report(["项目数据无法读取。原数据已备份到 \(backupLocation)。"])
             } catch {
-                let message = "项目列表数据无法读取，且备份失败。为避免覆盖原数据，保存已暂停：\(error.localizedDescription)"
+                let message = "项目数据无法读取，且备份失败。为避免覆盖原数据，保存已暂停：\(error.localizedDescription)"
                 unresolvedProjectStoreError = ProjectStoreRecoveryError(message: message)
                 report([message])
             }
             return
         }
 
-        var restoredProjects: [WorkspaceProject] = []
-        var restoredBookmarks: [URL: Data] = [:]
+        guard let stored else { return }
+        let resolution: WorkspaceBookmarkResolution
+        do {
+            resolution = try bookmarking.resolve(stored.bookmark)
+        } catch {
+            report([error.localizedDescription])
+            return
+        }
+
+        let url = resolution.url.standardizedFileURL
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            return
+        }
+
+        var restoredBookmark = stored.bookmark
         var restorationErrors: [Error] = []
-        var needsRewrite = false
-
-        for item in stored {
-            let resolution: WorkspaceBookmarkResolution
+        if resolution.isStale {
             do {
-                resolution = try bookmarking.resolve(item.bookmark)
+                restoredBookmark = try bookmarking.create(url)
+                try saveSnapshot(project: WorkspaceProject(rootURL: url), bookmark: restoredBookmark)
             } catch {
-                restorationErrors.append(error)
-                continue
-            }
-
-            let url = resolution.url.standardizedFileURL
-            var isDirectory: ObjCBool = false
-            guard fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue,
-                  restoredBookmarks[url] == nil
-            else { continue }
-
-            var bookmark = item.bookmark
-            if resolution.isStale {
-                do {
-                    bookmark = try bookmarking.create(url)
-                    needsRewrite = true
-                } catch {
-                    // The resolved URL remains usable; preserve its last valid bookmark.
-                    restorationErrors.append(error)
-                }
-            }
-
-            restoredProjects.append(WorkspaceProject(rootURL: url))
-            restoredBookmarks[url] = bookmark
-        }
-
-        restoredProjects.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
-        projects = restoredProjects
-        bookmarksByURL = restoredBookmarks
-
-        for project in projects {
-            beginAccessing(project.rootURL)
-            refreshProject(at: project.rootURL)
-        }
-
-        if needsRewrite {
-            do {
-                try persistProjects()
-            } catch {
+                // The resolved URL remains usable; preserve its last valid bookmark.
                 restorationErrors.append(error)
             }
         }
+
+        project = WorkspaceProject(rootURL: url)
+        bookmark = restoredBookmark
+        beginAccessing(url)
+        refreshProject()
         report(restorationErrors.map(\.localizedDescription))
     }
 
-    private func persistProjects() throws {
-        try saveSnapshot(projects: projects, bookmarks: bookmarksByURL)
-    }
-
-    private func saveSnapshot(projects: [WorkspaceProject], bookmarks: [URL: Data]) throws {
+    private func saveSnapshot(project: WorkspaceProject?, bookmark: Data?) throws {
         if let unresolvedProjectStoreError {
             throw unresolvedProjectStoreError
         }
-        let stored = try projects.map { project -> StoredProject in
-            guard let bookmark = bookmarks[project.rootURL.standardizedFileURL] else {
-                throw WorkspaceOperationError.incompleteProjectBookmarks
+        let stored: StoredProject?
+        if project != nil {
+            guard let bookmark else {
+                throw WorkspaceOperationError.missingProjectBookmark
             }
-            return StoredProject(bookmark: bookmark)
+            stored = StoredProject(bookmark: bookmark)
+        } else {
+            stored = nil
         }
-        let data = try JSONEncoder().encode(stored)
-        try projectStore.save(data)
+        try projectStore.save(JSONEncoder().encode(stored))
     }
 
     private func report(_ messages: [String]) {
         guard let first = messages.first else { return }
-        if messages.count == 1 {
-            presentedError = first
-        } else {
-            presentedError = "\(first)\n另有 \(messages.count - 1) 个项目条目无法读取。"
+        presentedError = first
+    }
+
+    private func resetCurrentProjectState() {
+        refreshGeneration += 1
+        refreshTask?.cancel()
+        refreshTask = nil
+        tree = []
+        if let securityScopedURL {
+            securityScopedURL.stopAccessingSecurityScopedResource()
+            self.securityScopedURL = nil
         }
     }
 
     private func beginAccessing(_ url: URL) {
-        guard !securityScopedURLs.contains(url), url.startAccessingSecurityScopedResource() else { return }
-        securityScopedURLs.insert(url)
+        guard securityScopedURL != url, url.startAccessingSecurityScopedResource() else { return }
+        securityScopedURL = url
     }
 }

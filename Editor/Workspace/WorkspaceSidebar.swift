@@ -11,35 +11,25 @@ struct WorkspaceSidebar: View {
 
     var body: some View {
         CodexSidebarSurface {
-            VStack(spacing: 0) {
-                WorkspaceSidebarHeader(
-                    createProject: createProject,
-                    openProject: openProject
-                )
-
-                if workspace.projects.isEmpty {
-                    emptyState
-                } else {
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 6) {
-                            ForEach(workspace.projects) { project in
-                                WorkspaceProjectTree(
-                                    project: project,
-                                    nodes: workspace.children(of: project),
-                                    selectedFileURL: selectedFileURL,
-                                    createFile: { requestCreation(.file, in: $0) },
-                                    createFolder: { requestCreation(.folder, in: $0) },
-                                    openFile: selectFile,
-                                    revealInFinder: revealInFinder,
-                                    removeProject: { workspace.removeProject(project) }
-                                )
-                            }
-                        }
-                        .padding(.horizontal, 10)
-                        .padding(.bottom, 12)
-                    }
-                    .museSoftScrollEdges()
+            if let project = workspace.project {
+                ScrollView {
+                    WorkspaceProjectTree(
+                        project: project,
+                        nodes: workspace.tree,
+                        selectedFileURL: selectedFileURL,
+                        createFile: { requestCreation(.file, in: $0) },
+                        createFolder: { requestCreation(.folder, in: $0) },
+                        openFile: selectFile,
+                        revealInFinder: revealInFinder,
+                        refreshProject: workspace.refreshProject,
+                        removeProject: workspace.closeProject
+                    )
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
                 }
+                .museSoftScrollEdges()
+            } else {
+                emptyState
             }
         }
         .sheet(item: $creationRequest) { request in
@@ -109,7 +99,7 @@ struct WorkspaceSidebar: View {
         panel.allowsMultipleSelection = false
 
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        perform { try workspace.addProject(at: url) }
+        perform { try workspace.openProject(at: url) }
     }
 
     private func requestCreation(_ kind: WorkspaceCreationRequest.Kind, in parentURL: URL) {

@@ -7,9 +7,9 @@ struct EditorShellView: View {
     let document: MuseDocument
     @Bindable var chromeState: EditorChromeState
     @Bindable private var location: DocumentLocationState
+    @Bindable private var workspace: ProjectWorkspace
     let navigation: EditorDocumentNavigation
     @ObservedObject private var renderer: RenderCoordinator
-    @State private var workspace = ProjectWorkspace.shared
     @State private var projectSidebarWidth = EditorChromeMetrics.projectSidebarDefaultWidth
     @State private var outlineSidebarWidth = EditorChromeMetrics.outlineSidebarDefaultWidth
     @State private var selectedHeadingID: Int?
@@ -18,11 +18,13 @@ struct EditorShellView: View {
     init(
         document: MuseDocument,
         chromeState: EditorChromeState,
+        workspace: ProjectWorkspace,
         navigation: EditorDocumentNavigation
     ) {
         self.document = document
         self.chromeState = chromeState
         self.location = document.location
+        self.workspace = workspace
         self.navigation = navigation
         renderer = document.renderer
     }

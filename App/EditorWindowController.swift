@@ -6,6 +6,7 @@ import SwiftUI
 @MainActor
 final class EditorWindowController: NSWindowController {
     private let chromeState: EditorChromeState
+    private let workspace: ProjectWorkspace
     private let navigation: EditorDocumentNavigation
     private let hostingController: NSHostingController<EditorShellView>
     private var activeDocument: MuseDocument
@@ -16,15 +17,18 @@ final class EditorWindowController: NSWindowController {
 
     init(document: MuseDocument) {
         let chromeState = EditorChromeState()
+        let workspace = ProjectWorkspace()
         let navigation = EditorDocumentNavigation()
         let hosting = NSHostingController(
             rootView: EditorShellView(
                 document: document,
                 chromeState: chromeState,
+                workspace: workspace,
                 navigation: navigation
             )
         )
         self.chromeState = chromeState
+        self.workspace = workspace
         self.navigation = navigation
         hostingController = hosting
         activeDocument = document
@@ -218,6 +222,7 @@ final class EditorWindowController: NSWindowController {
         hostingController.rootView = EditorShellView(
             document: document,
             chromeState: chromeState,
+            workspace: workspace,
             navigation: navigation
         )
         window?.title = document.displayName

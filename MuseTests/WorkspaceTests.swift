@@ -21,13 +21,13 @@ import Testing
         try workspace.createProject(at: root)
         let notes = try workspace.createItem(.folder, named: "Notes", in: root)
         let document = try workspace.createItem(.file, named: "First", in: notes)
-        await workspace.waitForRefresh(at: root)
+        await workspace.waitForRefresh()
 
-        #expect(workspace.projects.map(\.rootURL) == [root])
+        #expect(workspace.project?.rootURL == root)
         #expect(document.lastPathComponent == "First.md")
         #expect(FileManager.default.fileExists(atPath: notes.path))
         #expect(FileManager.default.fileExists(atPath: document.path))
-        #expect(workspace.children(of: workspace.projects[0]).first?.name == "Notes")
+        #expect(workspace.tree.first?.name == "Notes")
     }
 
     @Test func foldersSortBeforeFilesAndNamesUseFinderOrdering() async throws {
@@ -38,9 +38,9 @@ import Testing
         _ = try workspace.createItem(.file, named: "10.md", in: root)
         _ = try workspace.createItem(.file, named: "2.md", in: root)
         _ = try workspace.createItem(.folder, named: "Archive", in: root)
-        await workspace.waitForRefresh(at: root)
+        await workspace.waitForRefresh()
 
-        let names = workspace.children(of: workspace.projects[0]).map(\.name)
+        let names = workspace.tree.map(\.name)
         #expect(names == ["Archive", "2.md", "10.md"])
     }
 
@@ -49,10 +49,9 @@ import Testing
         defer { try? FileManager.default.removeItem(at: root) }
 
         try workspace.createProject(at: root)
-        let project = try #require(workspace.projects.first)
-        workspace.removeProject(project)
+        workspace.closeProject()
 
-        #expect(workspace.projects.isEmpty)
+        #expect(workspace.project == nil)
         #expect(FileManager.default.fileExists(atPath: root.path))
     }
 
@@ -60,7 +59,7 @@ import Testing
         let (workspace, root, _, _) = try makeWorkspace()
         defer { try? FileManager.default.removeItem(at: root) }
         try workspace.createProject(at: root)
-        await workspace.waitForRefresh(at: root)
+        await workspace.waitForRefresh()
 
         #expect(throws: WorkspaceOperationError.self) {
             try workspace.createItem(.file, named: "bad/name", in: root)
@@ -69,82 +68,47 @@ import Testing
         #expect(workspace.canOpen(root.appending(path: "image.png")) == false)
     }
 
-    @Test func staleBookmarksRestoreCompleteSnapshotWithOneWrite() throws {
-        let firstRoot = try makeDirectory(named: "First")
-        let secondRoot = try makeDirectory(named: "Second")
-        defer {
-            try? FileManager.default.removeItem(at: firstRoot)
-            try? FileManager.default.removeItem(at: secondRoot)
-        }
-
-        let oldFirst = Data([1])
-        let oldSecond = Data([2])
-        let refreshedFirst = Data([9])
-        let store = StoreRecorder(data: try encodedBookmarks([oldFirst, oldSecond]))
-        let bookmarking = WorkspaceBookmarking(
-            create: { url in
-                #expect(url.standardizedFileURL == firstRoot.standardizedFileURL)
-                return refreshedFirst
-            },
-            resolve: { data in
-                if data == oldFirst {
-                    return WorkspaceBookmarkResolution(url: firstRoot, isStale: true)
-                }
-                return WorkspaceBookmarkResolution(url: secondRoot, isStale: false)
-            }
-        )
-
+    @Test func staleBookmarkRestoresProjectAndRewritesOnce() throws {
+        let root = try makeDirectory(named: "Stale")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let oldBookmark = Data([1])
+        let refreshedBookmark = Data([9])
+        let store = StoreRecorder(data: try encodedBookmark(oldBookmark))
         let workspace = ProjectWorkspace(
-            bookmarking: bookmarking,
+            bookmarking: WorkspaceBookmarking(
+                create: { url in
+                    #expect(url.standardizedFileURL == root.standardizedFileURL)
+                    return refreshedBookmark
+                },
+                resolve: { _ in WorkspaceBookmarkResolution(url: root, isStale: true) }
+            ),
             projectStore: store.store
         )
 
-        let restoredURLs = workspace.projects.map(\.rootURL).sorted { $0.path < $1.path }
-        let expectedURLs = [firstRoot.standardizedFileURL, secondRoot.standardizedFileURL]
-            .sorted { $0.path < $1.path }
-        #expect(restoredURLs == expectedURLs)
+        #expect(workspace.project?.rootURL == root.standardizedFileURL)
         #expect(store.saved.count == 1)
-        #expect(try decodedBookmarks(store.saved[0]) == [refreshedFirst, oldSecond])
+        #expect(try decodedBookmark(store.saved[0]) == refreshedBookmark)
     }
 
     @Test func failedStaleRegenerationRetainsPreviousBookmark() throws {
-        let firstRoot = try makeDirectory(named: "FirstFailure")
-        let secondRoot = try makeDirectory(named: "SecondRefresh")
-        defer {
-            try? FileManager.default.removeItem(at: firstRoot)
-            try? FileManager.default.removeItem(at: secondRoot)
-        }
-
-        let oldFirst = Data([3])
-        let oldSecond = Data([4])
-        let refreshedSecond = Data([8])
-        let store = StoreRecorder(data: try encodedBookmarks([oldFirst, oldSecond]))
-        let bookmarking = WorkspaceBookmarking(
-            create: { url in
-                if url.standardizedFileURL == firstRoot.standardizedFileURL {
-                    throw TestFailure.expected
-                }
-                return refreshedSecond
-            },
-            resolve: { data in
-                WorkspaceBookmarkResolution(
-                    url: data == oldFirst ? firstRoot : secondRoot,
-                    isStale: true
-                )
-            }
-        )
-
+        let root = try makeDirectory(named: "StaleFailure")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let oldBookmark = Data([3])
+        let store = StoreRecorder(data: try encodedBookmark(oldBookmark))
         let workspace = ProjectWorkspace(
-            bookmarking: bookmarking,
+            bookmarking: WorkspaceBookmarking(
+                create: { _ in throw TestFailure.expected },
+                resolve: { _ in WorkspaceBookmarkResolution(url: root, isStale: true) }
+            ),
             projectStore: store.store
         )
 
-        #expect(workspace.projects.count == 2)
-        #expect(store.saved.count == 1)
-        #expect(try decodedBookmarks(store.saved[0]) == [oldFirst, refreshedSecond])
+        #expect(workspace.project?.rootURL == root.standardizedFileURL)
+        #expect(store.saved.isEmpty)
+        #expect(workspace.presentedError != nil)
     }
 
-    @Test func corruptStoredProjectsAreBackedUpBeforeSavingReplacement() throws {
+    @Test func corruptStoredProjectIsBackedUpBeforeSavingReplacement() throws {
         let root = try makeDirectory(named: "CorruptStore")
         defer { try? FileManager.default.removeItem(at: root) }
         let original = Data("not valid project JSON".utf8)
@@ -162,11 +126,11 @@ import Testing
         #expect(store.backups[store.backupLocation] == original)
         #expect(workspace.presentedError?.contains(store.backupLocation) == true)
 
-        try workspace.addProject(at: root)
+        try workspace.openProject(at: root)
 
         let saved = try #require(store.data)
-        #expect(try decodedBookmarks(saved) == [bookmark])
-        #expect(workspace.projects.map(\.rootURL) == [root.standardizedFileURL])
+        #expect(try decodedBookmark(saved) == bookmark)
+        #expect(workspace.project?.rootURL == root.standardizedFileURL)
     }
 
     @Test func failedCorruptStoreBackupBlocksReplacementSave() throws {
@@ -187,7 +151,7 @@ import Testing
         #expect(store.backups.isEmpty)
 
         do {
-            try workspace.addProject(at: root)
+            try workspace.openProject(at: root)
             Issue.record("备份失败后不应覆盖原项目数据")
         } catch {
             #expect(error.localizedDescription.contains("保存已暂停"))
@@ -195,14 +159,14 @@ import Testing
 
         #expect(store.data == original)
         #expect(store.saved.isEmpty)
-        #expect(workspace.projects.isEmpty)
+        #expect(workspace.project == nil)
     }
 
     @Test func userDefaultsStoreWritesCorruptBackupUnderSeparateTimestampedKey() throws {
         let suiteName = "MuseWorkspaceStoreBackupTests-\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
-        let key = "Muse.workspace.projects.test"
+        let key = "Muse.workspace.project.test"
         let original = Data("corrupt".utf8)
         let store = WorkspaceProjectStore.userDefaults(defaults, key: key)
 
@@ -213,7 +177,7 @@ import Testing
         #expect(defaults.data(forKey: key) == nil)
     }
 
-    @Test func missingStoredProjectsAreSilentAndDoNotBlockSaving() throws {
+    @Test func missingStoredProjectIsSilentAndDoesNotBlockSaving() throws {
         let root = try makeDirectory(named: "MissingStore")
         defer { try? FileManager.default.removeItem(at: root) }
         let bookmark = Data([7])
@@ -228,13 +192,13 @@ import Testing
 
         #expect(workspace.presentedError == nil)
 
-        try workspace.addProject(at: root)
+        try workspace.openProject(at: root)
 
         #expect(store.saved.count == 1)
-        #expect(try decodedBookmarks(store.saved[0]) == [bookmark])
+        #expect(try decodedBookmark(store.saved[0]) == bookmark)
     }
 
-    @Test func addingProjectCommitsOnlyAfterBookmarkCreationSucceeds() throws {
+    @Test func openingProjectCommitsOnlyAfterBookmarkCreationSucceeds() throws {
         let root = try makeDirectory(named: "BookmarkFailure")
         defer { try? FileManager.default.removeItem(at: root) }
         let store = StoreRecorder()
@@ -247,15 +211,15 @@ import Testing
         )
 
         #expect(throws: TestFailure.self) {
-            try workspace.addProject(at: root)
+            try workspace.openProject(at: root)
         }
-        #expect(workspace.projects.isEmpty)
+        #expect(workspace.project == nil)
         #expect(store.saved.isEmpty)
     }
 
-    @Test func removingProjectDeletesOnlyMatchingBookmark() throws {
-        let firstRoot = try makeDirectory(named: "RemoveFirst")
-        let secondRoot = try makeDirectory(named: "KeepSecond")
+    @Test func openingAnotherProjectReplacesTheCurrentProject() throws {
+        let firstRoot = try makeDirectory(named: "FirstProject")
+        let secondRoot = try makeDirectory(named: "SecondProject")
         defer {
             try? FileManager.default.removeItem(at: firstRoot)
             try? FileManager.default.removeItem(at: secondRoot)
@@ -263,26 +227,73 @@ import Testing
 
         let firstBookmark = Data([5])
         let secondBookmark = Data([6])
-        let store = StoreRecorder(data: try encodedBookmarks([firstBookmark, secondBookmark]))
+        let store = StoreRecorder()
         let workspace = ProjectWorkspace(
             bookmarking: WorkspaceBookmarking(
-                create: { _ in throw TestFailure.expected },
-                resolve: { data in
-                    WorkspaceBookmarkResolution(
-                        url: data == firstBookmark ? firstRoot : secondRoot,
-                        isStale: false
-                    )
-                }
+                create: { url in
+                    url.standardizedFileURL == firstRoot.standardizedFileURL
+                        ? firstBookmark
+                        : secondBookmark
+                },
+                resolve: { _ in throw TestFailure.expected }
             ),
             projectStore: store.store
         )
 
-        let firstProject = try #require(workspace.projects.first { $0.rootURL == firstRoot.standardizedFileURL })
-        workspace.removeProject(firstProject)
+        try workspace.openProject(at: firstRoot)
+        try workspace.openProject(at: secondRoot)
 
-        #expect(workspace.projects.map(\.rootURL) == [secondRoot.standardizedFileURL])
-        #expect(store.saved.count == 1)
-        #expect(try decodedBookmarks(store.saved[0]) == [secondBookmark])
+        #expect(workspace.project?.rootURL == secondRoot.standardizedFileURL)
+        #expect(store.saved.count == 2)
+        #expect(try decodedBookmark(store.saved[1]) == secondBookmark)
+    }
+
+    @Test func separateWorkspaceInstancesKeepProjectsIndependent() throws {
+        let firstRoot = try makeDirectory(named: "FirstWindow")
+        let secondRoot = try makeDirectory(named: "SecondWindow")
+        defer {
+            try? FileManager.default.removeItem(at: firstRoot)
+            try? FileManager.default.removeItem(at: secondRoot)
+        }
+        let bookmarking = WorkspaceBookmarking(
+            create: { url in Data(url.path.utf8) },
+            resolve: { _ in throw TestFailure.expected }
+        )
+        let firstWorkspace = ProjectWorkspace(
+            bookmarking: bookmarking,
+            projectStore: StoreRecorder().store
+        )
+        let secondWorkspace = ProjectWorkspace(
+            bookmarking: bookmarking,
+            projectStore: StoreRecorder().store
+        )
+
+        try firstWorkspace.openProject(at: firstRoot)
+        try secondWorkspace.openProject(at: secondRoot)
+
+        #expect(firstWorkspace.project?.rootURL == firstRoot.standardizedFileURL)
+        #expect(secondWorkspace.project?.rootURL == secondRoot.standardizedFileURL)
+    }
+
+    @Test func closingProjectPersistsAnEmptyWorkspaceWithoutDeletingDirectory() throws {
+        let root = try makeDirectory(named: "CloseProject")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = StoreRecorder()
+        let workspace = ProjectWorkspace(
+            bookmarking: WorkspaceBookmarking(
+                create: { _ in Data([5]) },
+                resolve: { _ in throw TestFailure.expected }
+            ),
+            projectStore: store.store
+        )
+
+        try workspace.openProject(at: root)
+        workspace.closeProject()
+
+        #expect(workspace.project == nil)
+        let saved = try #require(store.saved.last)
+        #expect(try decodedBookmark(saved) == nil)
+        #expect(FileManager.default.fileExists(atPath: root.path))
     }
 
     @Test func rootEnumerationFailurePreservesPreviousSnapshot() async throws {
@@ -292,14 +303,13 @@ import Testing
         try Data().write(to: file)
         let state = FileSystemState(root: root, entries: [file])
         let workspace = try await makeInjectedWorkspace(root: root, fileSystem: state.fileSystem)
-        let project = try #require(workspace.projects.first)
-        #expect(workspace.children(of: project).map(\.name) == ["visible.md"])
+        #expect(workspace.tree.map(\.name) == ["visible.md"])
 
         state.failRoot = true
-        workspace.refreshProject(at: root)
-        await workspace.waitForRefresh(at: root)
+        workspace.refreshProject()
+        await workspace.waitForRefresh()
 
-        #expect(workspace.children(of: project).map(\.name) == ["visible.md"])
+        #expect(workspace.tree.map(\.name) == ["visible.md"])
         #expect(workspace.presentedError != nil)
     }
 
@@ -312,9 +322,8 @@ import Testing
         state.metadataFailures.insert(bad)
 
         let workspace = try await makeInjectedWorkspace(root: root, fileSystem: state.fileSystem)
-        let project = try #require(workspace.projects.first)
 
-        #expect(workspace.children(of: project).map(\.name) == ["good.md"])
+        #expect(workspace.tree.map(\.name) == ["good.md"])
         #expect(workspace.presentedError != nil)
     }
 
@@ -328,8 +337,7 @@ import Testing
         state.directoryFailures.insert(folder)
 
         let workspace = try await makeInjectedWorkspace(root: root, fileSystem: state.fileSystem)
-        let project = try #require(workspace.projects.first)
-        let nodes = workspace.children(of: project)
+        let nodes = workspace.tree
 
         #expect(nodes.map(\.name) == ["Folder", "visible.md"])
         #expect(nodes.first?.isFolder == true)
@@ -346,13 +354,13 @@ import Testing
         state.enumerationDelay = 0.25
         let clock = ContinuousClock()
         let elapsed = clock.measure {
-            workspace.refreshProject(at: root)
+            workspace.refreshProject()
         }
 
         let milliseconds = Double(elapsed.components.seconds) * 1_000
             + Double(elapsed.components.attoseconds) / 1e15
         #expect(milliseconds < 50)
-        await workspace.waitForRefresh(at: root)
+        await workspace.waitForRefresh()
     }
 
     private func makeDirectory(named name: String) throws -> URL {
@@ -375,17 +383,17 @@ import Testing
             projectStore: store.store,
             fileSystem: fileSystem
         )
-        try workspace.addProject(at: root)
-        await workspace.waitForRefresh(at: root)
+        try workspace.openProject(at: root)
+        await workspace.waitForRefresh()
         return workspace
     }
 
-    private func encodedBookmarks(_ bookmarks: [Data]) throws -> Data {
-        try JSONEncoder().encode(bookmarks.map(ProjectWorkspace.StoredProject.init(bookmark:)))
+    private func encodedBookmark(_ bookmark: Data?) throws -> Data {
+        try JSONEncoder().encode(bookmark.map(ProjectWorkspace.StoredProject.init(bookmark:)))
     }
 
-    private func decodedBookmarks(_ data: Data) throws -> [Data] {
-        try JSONDecoder().decode([ProjectWorkspace.StoredProject].self, from: data).map(\.bookmark)
+    private func decodedBookmark(_ data: Data) throws -> Data? {
+        try JSONDecoder().decode(ProjectWorkspace.StoredProject?.self, from: data)?.bookmark
     }
 
     private enum TestFailure: Error {
@@ -397,7 +405,7 @@ import Testing
         var saved: [Data] = []
         var backups: [String: Data] = [:]
         var backupError: Error?
-        let backupLocation = "Muse.workspace.projects.corrupt-test"
+        let backupLocation = "Muse.workspace.project.corrupt-test"
 
         init(data: Data? = nil) {
             self.data = data

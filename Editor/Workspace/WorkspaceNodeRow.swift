@@ -7,8 +7,7 @@ struct WorkspaceNodeRow: View {
     let createFolder: (URL) -> Void
     let openFile: (URL) -> Void
     let revealInFinder: (URL) -> Void
-
-    @State private var isExpanded = false
+    @Binding var expansion: WorkspaceTreeExpansion
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -20,7 +19,10 @@ struct WorkspaceNodeRow: View {
                         .opacity(node.isFolder ? 1 : 0)
                         .frame(width: 9, height: 18)
 
-                    Image(systemName: node.isFolder ? "folder" : "doc.text")
+                    Image(systemName: WorkspaceTreeIcon.systemName(
+                        isFolder: node.isFolder,
+                        isExpanded: isExpanded
+                    ))
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
 
@@ -46,7 +48,8 @@ struct WorkspaceNodeRow: View {
                         createFile: createFile,
                         createFolder: createFolder,
                         openFile: openFile,
-                        revealInFinder: revealInFinder
+                        revealInFinder: revealInFinder,
+                        expansion: $expansion
                     )
                     .padding(.leading, 16)
                 }
@@ -59,9 +62,13 @@ struct WorkspaceNodeRow: View {
         selectedFileURL == node.url.standardizedFileURL
     }
 
+    private var isExpanded: Bool {
+        node.isFolder && expansion.containsFolder(node.url)
+    }
+
     private func activate() {
         if node.isFolder {
-            isExpanded.toggle()
+            expansion.toggleFolder(node.url)
         } else {
             openFile(node.url)
         }

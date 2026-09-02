@@ -78,9 +78,15 @@ struct EditorShellView: View {
                 openFile: navigation.open
             )
         }
+        // Keep sidebar contents at their expanded geometry while the outer frame
+        // collapses. This clips text at the moving edge instead of fading or
+        // reflowing each label during the close animation.
+        .frame(width: projectSidebarWidth)
         .background(EditorSurface.sidebar)
-        .frame(width: chromeState.isProjectSidebarPresented ? projectSidebarWidth : 0)
-        .opacity(chromeState.isProjectSidebarPresented ? 1 : 0)
+        .frame(
+            width: chromeState.isProjectSidebarPresented ? projectSidebarWidth : 0,
+            alignment: .leading
+        )
         .clipped()
         .allowsHitTesting(chromeState.isProjectSidebarPresented)
     }

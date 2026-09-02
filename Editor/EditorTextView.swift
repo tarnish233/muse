@@ -309,12 +309,15 @@ final class EditorTextView: NSTextView {
     var tablePasteHandler: ((NSPasteboard) -> Bool)?
     var tableCurrentSelectionProvider: (() -> (tableID: Int, bounds: TableSelectionBounds)?)?
     var tableDimensionProvider: ((Int) -> (rows: Int, columns: Int)?)?
+    var viewportLocationChangeHandler: ((Int?) -> Void)?
     var clipboardCopyMode: ClipboardCopyMode = .markdownSource
     var clipboardPasteboard = NSPasteboard.general
     var copiesWholeLineWhenSelectionIsEmpty = false
     private(set) var isTypewriterModeEnabled = false
     private var contentInsetsBeforeTypewriterMode: NSEdgeInsets?
     private var typewriterViewportHeight: CGFloat = 0
+    private var hasPublishedViewportLocation = false
+    private var lastPublishedViewportLocation: Int?
     private var pendingTypewriterPositionTask: Task<Void, Never>?
     /// 非表格选区的系统默认属性。表格选区由 MuseLayoutFragment 按真实字形位置画，
     /// 这里只把 TextKit 那个会受 kern 干扰的背景关掉。
@@ -889,6 +892,7 @@ final class EditorTextView: NSTextView {
         super.layout()
         invalidateCheckboxCursorRects()
         syncTableChrome()
+        publishViewportLocationIfNeeded()
     }
 
     /// 观察 clip view 的 bounds 变化来接住滚动。
@@ -912,6 +916,7 @@ final class EditorTextView: NSTextView {
         )
         updateTypewriterInsets()
         scheduleTypewriterCaretPosition()
+        publishViewportLocationIfNeeded()
     }
 
     @objc private func clipViewBoundsDidChange() {
@@ -919,6 +924,43 @@ final class EditorTextView: NSTextView {
         hoveredTableControl = nil
         invalidateCheckboxCursorRects()
         syncTableChrome()
+        publishViewportLocationIfNeeded()
+    }
+
+    /// 当前页面中部偏上的正文位置。只通过 TextKit 2 fragment 做坐标映射，返回
+    /// 所在段落的 UTF-16 起点；目录侧再据此查找最近的上一个标题。
+    func visibleDocumentLocation(in viewport: CGRect? = nil) -> Int? {
+        guard let layoutManager = textLayoutManager,
+              let contentManager = layoutManager.textContentManager
+        else { return nil }
+
+        let visible = viewport ?? visibleRect
+        guard visible.isEmpty == false else { return nil }
+        let y = max(0, Self.outlineTrackingY(in: visible) - textContainerOrigin.y)
+        guard let fragment = layoutManager.textLayoutFragment(for: CGPoint(x: 0, y: y)) else {
+            return nil
+        }
+        return contentManager.offset(
+            from: contentManager.documentRange.location,
+            to: fragment.rangeInElement.location
+        )
+    }
+
+    /// 标题经过视口高度 40% 的基准线时切换大纲高亮；该位置比正中略高，
+    /// 同时避免标题刚从顶部出现就过早切换。
+    static func outlineTrackingY(in viewport: CGRect) -> CGFloat {
+        viewport.minY + viewport.height * 0.4
+    }
+
+    private func publishViewportLocationIfNeeded() {
+        guard let viewportLocationChangeHandler else { return }
+        let location = visibleDocumentLocation()
+        guard hasPublishedViewportLocation == false || lastPublishedViewportLocation != location else {
+            return
+        }
+        hasPublishedViewportLocation = true
+        lastPublishedViewportLocation = location
+        viewportLocationChangeHandler(location)
     }
 
     // MARK: - M4 editing behavior

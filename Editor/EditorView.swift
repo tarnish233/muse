@@ -78,9 +78,13 @@ struct EditorView: NSViewRepresentable {
         textView.tableDimensionProvider = { [weak renderer = document.renderer] tableID in
             renderer?.tableDimensions(tableID: tableID)
         }
+        textView.viewportLocationChangeHandler = { [weak renderer = document.renderer] location in
+            renderer?.updateVisibleHeading(at: location)
+        }
         document.renderer.setPresentationMode(isSourceMode ? .source : .rendered)
         // 初次渲染发生在 textView 挂接之前（selection 为空），挂接后补齐显隐。
         document.renderer.refreshMarkerVisibility(into: document.buffer.textStorage)
+        document.renderer.updateVisibleHeading(at: textView.visibleDocumentLocation())
 
         return scrollView
     }

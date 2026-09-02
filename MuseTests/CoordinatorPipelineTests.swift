@@ -57,6 +57,47 @@ import Testing
         #expect(!coordinator.statusText.contains("tokens"))
     }
 
+    @Test func outlineHighlightFollowsVisibleSectionInsteadOfCaret() async throws {
+        let source = "导言\n\n# 第一章\n第一章正文\n\n## 第二节\n第二节正文"
+        let storage = NSTextStorage(string: source)
+        let coordinator = RenderCoordinator()
+        coordinator.attach(storage: storage)
+        coordinator.onTextEdited = {}
+        storage.replaceCharacters(in: NSRange(location: 0, length: storage.length), with: source)
+        #expect(await waitForApplied(coordinator, atLeast: 1))
+        #expect(coordinator.outline.count == 2)
+
+        let firstHeading = try #require(coordinator.outline.first)
+        let secondHeading = try #require(coordinator.outline.last)
+        let nsSource = source as NSString
+
+        let introduction = nsSource.range(of: "导言").location
+        coordinator.updateVisibleHeading(at: introduction)
+        #expect(coordinator.visibleHeadingID == nil)
+
+        let firstBody = nsSource.range(of: "第一章正文").location
+        coordinator.updateVisibleHeading(at: firstBody)
+        #expect(coordinator.visibleHeadingID == firstHeading.id)
+
+        let secondBody = nsSource.range(of: "第二节正文").location
+        coordinator.updateVisibleHeading(at: secondBody)
+        #expect(coordinator.visibleHeadingID == secondHeading.id)
+
+        let textView = EditorTextView.make(textStorage: storage)
+        textView.setSelectedRange(NSRange(location: firstBody, length: 0))
+        coordinator.updateMarkerVisibility(selection: textView.selectedRange(), into: storage)
+        #expect(coordinator.visibleHeadingID == secondHeading.id)
+    }
+
+    @Test func outlineTrackingLineIsSlightlyAboveViewportMiddle() {
+        let viewport = CGRect(x: 0, y: 120, width: 600, height: 500)
+        let trackingY = EditorTextView.outlineTrackingY(in: viewport)
+
+        #expect(trackingY == 320)
+        #expect(trackingY > viewport.minY + viewport.height / 3)
+        #expect(trackingY < viewport.midY)
+    }
+
     @Test func editsRemainLiteralWhileSourceModeIsActive() async {
         let source = "# title\nplain"
         let storage = NSTextStorage(string: source)

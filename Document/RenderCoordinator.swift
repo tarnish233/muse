@@ -33,6 +33,8 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
     @Published public private(set) var presentationMode: RenderEngine.PresentationMode = .rendered
     /// 文档大纲（heading 层级），供侧边栏导航使用；随每次渲染应用刷新。
     @Published public private(set) var outline: [OutlineHeading] = []
+    /// 当前可视正文所属的最近一个标题，供侧边栏跟随滚动位置高亮。
+    @Published public private(set) var visibleHeadingID: Int?
 
     /// 文档目录条目。UTF-16 范围可以直接交给 AppKit 选区/滚动 API。
     public struct OutlineHeading: Sendable, Identifiable, Equatable {
@@ -51,6 +53,7 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
     private let engine = RenderEngine()
     private let preparationWorker = RenderPreparationWorker()
     private var revision = 0
+    private var visibleDocumentLocation: Int?
     private var parseTask: Task<Void, Never>?
     /// 当前 revision 的解析结果若在输入法候选态返回，保留最新请求并暂停消费循环；
     /// 组合输入结束后继续，而不是在主 actor 上忙等或永久遗失 pending dirty。
@@ -346,6 +349,7 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
         lastAppliedDirtyLines = appliedLines
         appliedRevision = rev
         outline = Self.makeOutline(from: package, storageString: storage.string)
+        refreshVisibleHeading()
         reapplyActiveTableSelection(package: package, storage: storage)
 
         let elapsed = start.duration(to: clock.now)
@@ -1838,6 +1842,13 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
         }
     }
 
+    /// 滚动或布局变化时更新可视正文锚点。标题按源码顺序排列，用二分查找避免
+    /// 在高频滚动路径中随标题数量线性退化。
+    public func updateVisibleHeading(at documentLocation: Int?) {
+        visibleDocumentLocation = documentLocation
+        refreshVisibleHeading()
+    }
+
     /// Controls whether editable block syntax (for example `# ` and `> `) is
     /// revealed under the caret while the editor remains in rendered mode.
     public func setRevealsCurrentBlockSource(_ enabled: Bool) {
@@ -1973,6 +1984,36 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
     }
 
     // MARK: - 内部
+
+    private func refreshVisibleHeading() {
+        let headingID = Self.headingID(
+            in: outline,
+            at: visibleDocumentLocation
+        )
+        guard visibleHeadingID != headingID else { return }
+        visibleHeadingID = headingID
+    }
+
+    private static func headingID(
+        in outline: [OutlineHeading],
+        at documentLocation: Int?
+    ) -> Int? {
+        guard let documentLocation, outline.isEmpty == false else { return nil }
+
+        var lowerBound = 0
+        var upperBound = outline.count
+        while lowerBound < upperBound {
+            let middle = lowerBound + (upperBound - lowerBound) / 2
+            if outline[middle].lineRange.location <= documentLocation {
+                lowerBound = middle + 1
+            } else {
+                upperBound = middle
+            }
+        }
+
+        guard lowerBound > 0 else { return nil }
+        return outline[lowerBound - 1].id
+    }
 
     private func reconcileVisibility(
         package: RenderEngine.Package,

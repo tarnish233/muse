@@ -12,7 +12,6 @@ struct EditorShellView: View {
     @ObservedObject private var renderer: RenderCoordinator
     @State private var projectSidebarWidth = EditorChromeMetrics.projectSidebarDefaultWidth
     @State private var outlineSidebarWidth = EditorChromeMetrics.outlineSidebarDefaultWidth
-    @State private var selectedHeadingID: Int?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     init(
@@ -58,7 +57,6 @@ struct EditorShellView: View {
         .ignoresSafeArea(.container, edges: .top)
         .animation(sidebarAnimation, value: chromeState.isProjectSidebarPresented)
         .animation(sidebarAnimation, value: chromeState.isOutlinePresented)
-        .onChange(of: selectedHeadingID, revealSelectedHeading)
         .onChange(of: location.fileURL) { oldURL, newURL in
             if let oldURL {
                 workspace.refreshProject(containing: oldURL)
@@ -120,7 +118,8 @@ struct EditorShellView: View {
 
             DocumentOutlineView(
                 renderer: renderer,
-                selectedHeadingID: $selectedHeadingID
+                highlightedHeadingID: renderer.visibleHeadingID,
+                selectHeading: renderer.reveal
             )
         }
         .background(EditorSurface.sidebar)
@@ -166,10 +165,4 @@ struct EditorShellView: View {
         reduceMotion ? .linear(duration: 0.01) : .spring(response: 0.28, dampingFraction: 1)
     }
 
-    private func revealSelectedHeading() {
-        guard let selectedHeadingID,
-              let heading = renderer.outline.first(where: { $0.id == selectedHeadingID })
-        else { return }
-        renderer.reveal(heading: heading)
-    }
 }

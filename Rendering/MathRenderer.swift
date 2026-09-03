@@ -54,7 +54,12 @@ final class MathRenderer: NSObject, WKNavigationDelegate, WKScriptMessageHandler
     }
 
     private let cache = NSCache<NSString, MathRenderArtifact>()
+    /// 每次真正写入新缓存产物时递增。协调器用它区分“缓存可用”与“当前 storage 已消费”。
+    private(set) var artifactGeneration: UInt64 = 0
     private var invalidExpressions = Set<String>()
+    private var beforeCachingArtifactHooksForTesting: [
+        MathRenderRequest: @Sendable () async -> Void
+    ] = [:]
     private var webView: WKWebView?
     private var hostWindow: NSWindow?
     private var isPageLoaded = false
@@ -83,9 +88,9 @@ final class MathRenderer: NSObject, WKNavigationDelegate, WKScriptMessageHandler
         cache.object(forKey: request.cacheKey)
     }
 
-    /// 生成并缓存一个公式。返回 true 仅表示本次新增了可用产物。
+    /// 生成并缓存一个公式。返回 true 表示调用结束时已有可用产物，可能来自缓存命中。
     func prepare(_ request: MathRenderRequest) async -> Bool {
-        if cachedArtifact(for: request) != nil { return false }
+        if cachedArtifact(for: request) != nil { return true }
         let invalidKey = request.cacheKey as String
         if invalidExpressions.contains(invalidKey) { return false }
 
@@ -93,23 +98,29 @@ final class MathRenderer: NSObject, WKNavigationDelegate, WKScriptMessageHandler
         // 同时请求公式；在 MainActor 上排队，避免并发 tex2svgPromise 互相重入。
         await acquirePreparationSlot()
         defer { releasePreparationSlot() }
-        guard cachedArtifact(for: request) == nil,
-              !invalidExpressions.contains(invalidKey)
-        else { return false }
+        if cachedArtifact(for: request) != nil { return true }
+        guard !invalidExpressions.contains(invalidKey) else { return false }
 
         do {
             try Task.checkCancellation()
             try await ensurePageLoaded()
             try Task.checkCancellation()
             let artifact = try await renderWithMathJax(request)
-            try Task.checkCancellation()
+            if let hook = beforeCachingArtifactHooksForTesting[request] {
+                await hook()
+            }
 
-            // 另一个文档可能在本次 await 期间已填充同一缓存。
-            guard cachedArtifact(for: request) == nil else { return false }
-            cache.setObject(artifact, forKey: request.cacheKey)
-            return true
+            // evaluateJavaScript 的 continuation 不响应 Task 取消。即使调用方在等待期间
+            // 被连续输入取消，已经付出完整 WebKit 往返得到的产物也必须先进入缓存，
+            // 再让取消只阻止陈旧 revision 刷新 storage。
+            if cachedArtifact(for: request) == nil {
+                cache.setObject(artifact, forKey: request.cacheKey)
+                artifactGeneration &+= 1
+            }
+            try Task.checkCancellation()
+            return cachedArtifact(for: request) != nil
         } catch is CancellationError {
-            return false
+            return cachedArtifact(for: request) != nil
         } catch RendererError.invalidBridgeResponse {
             invalidExpressions.insert(invalidKey)
             return false
@@ -120,6 +131,17 @@ final class MathRenderer: NSObject, WKNavigationDelegate, WKScriptMessageHandler
             // WebContent 进程或资源加载失败属于可恢复故障；不负缓存，下一轮可重试。
             resetWebView()
             return false
+        }
+    }
+
+    func setBeforeCachingArtifactHookForTesting(
+        for request: MathRenderRequest,
+        hook: (@Sendable () async -> Void)?
+    ) {
+        if let hook {
+            beforeCachingArtifactHooksForTesting[request] = hook
+        } else {
+            beforeCachingArtifactHooksForTesting.removeValue(forKey: request)
         }
     }
 

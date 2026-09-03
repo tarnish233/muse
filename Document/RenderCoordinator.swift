@@ -88,6 +88,9 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
     private var imagePreparationTask: Task<Void, Never>?
     private var imagePreparationGeneration = 0
     private var needsMathRefresh = false
+    /// 最近一次已把 MathRenderer 当时全部可用产物同步进当前 storage 的缓存代次。
+    /// 只比较纯数值，不在输入热路径读取 NSTextStorage 属性。
+    private var appliedMathArtifactGeneration: UInt64 = 0
     private var mathPreparationTask: Task<Void, Never>?
     private var mathPreparationGeneration = 0
     /// 渲染尚未追上输入时收到的表格导航命令。等最新 AST 落地后按顺序执行，避免
@@ -219,7 +222,6 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
         revision += 1
         imagePreparationTask?.cancel()
         mathPreparationTask?.cancel()
-        needsMathRefresh = false
 
         // `pendingDirtyRange` 已经随每次编辑重基到当前坐标系；本轮快照与范围属于同一 revision。
         // 旧解析即使在新输入之后完成，也会由 revision guard 丢弃，不能清空这份 pending 状态。
@@ -328,6 +330,8 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
         isApplyingAttributes = true
         var appliedLines: ClosedRange<Int>?
         let requiresFullImageRefresh = needsImageRefresh
+        let requiresMathRefresh = needsMathRefresh && presentationMode == .rendered
+        var appliedAllMathArtifacts = false
         suppressUndo {
             if requiresFullImageRefresh {
                 _ = engine.render(
@@ -341,6 +345,7 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
                 appliedLines = 0...max(0, package.lineStarts.count - 1)
                 revealCache.removeAll(keepingCapacity: true)
                 lastReconcileWriteCount = 0
+                appliedAllMathArtifacts = presentationMode == .rendered
             } else {
                 let previousPackage = lastPackage // 结构变更的陈旧样式判定需要旧 package
                 let dirtyLines = engine.applyDirty(package: package, previousPackage: previousPackage,
@@ -354,11 +359,23 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
                     revealCache.removeAll(keepingCapacity: true)
                     lastReconcileWriteCount = 0
                 }
+                if requiresMathRefresh {
+                    _ = engine.refreshMathArtifacts(
+                        package: package,
+                        selection: textView?.selectedRange(),
+                        revealsCurrentBlockSource: revealsCurrentBlockSource,
+                        into: storage
+                    )
+                    appliedAllMathArtifacts = true
+                }
             }
             appliedPresentationMode = presentationMode
             textView?.needsDisplay = true
         }
         isApplyingAttributes = false
+        if appliedAllMathArtifacts {
+            recordMathArtifactsApplied()
+        }
 
         // `apply` 在 MainActor 上同步完成；没有字符编辑能在这段期间插入。
         // 只有与当前 revision 对应的 package 才能成为 storage 属性与光标流的权威来源。
@@ -497,14 +514,17 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
 
         mathPreparationTask = Task(priority: .utility) { [weak self] in
             guard let self else { return }
-            var preparedAny = false
             for request in requests {
                 guard !Task.isCancelled,
                       self.mathPreparationGeneration == generation,
                       self.revision == requestedRevision
                 else { return }
-                if await MathRenderer.shared.prepare(request) {
-                    preparedAny = true
+                if await MathRenderer.shared.prepare(request),
+                   self.appliedMathArtifactGeneration != MathRenderer.shared.artifactGeneration {
+                    // 产物可用与发起它的 revision 无关。即使该任务刚在 WebKit await 期间
+                    // 被新输入取消，也要保留“缓存尚未写入 storage”的事实，交给最新
+                    // package 在安全窗口消费。
+                    self.needsMathRefresh = true
                 }
             }
             guard !Task.isCancelled,
@@ -512,10 +532,7 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
                   self.revision == requestedRevision
             else { return }
             self.mathPreparationTask = nil
-            if preparedAny {
-                self.needsMathRefresh = true
-                self.applyMathRefreshIfPossible()
-            }
+            self.applyMathRefreshIfPossible()
         }
     }
 
@@ -1909,6 +1926,7 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
     var revisionForTesting: Int { revision }
     var pendingDirtyRangeForTesting: NSRange? { pendingDirtyRange }
     var isParseDeferredForMarkedTextForTesting: Bool { isParseDeferredForMarkedText }
+    var needsMathRefreshForTesting: Bool { needsMathRefresh }
 
     func waitForImagePreparationForTesting() async {
         let task = imagePreparationTask
@@ -2070,7 +2088,7 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
         isApplyingAttributes = false
         appliedPresentationMode = presentationMode
         if presentationMode == .rendered {
-            needsMathRefresh = false
+            recordMathArtifactsApplied()
             scheduleMathPreparation(package: package, revision: revision)
         } else {
             mathPreparationTask?.cancel()
@@ -2101,7 +2119,9 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
         isApplyingAttributes = false
         appliedPresentationMode = presentationMode
         needsImageRefresh = false
-        needsMathRefresh = false
+        if presentationMode == .rendered {
+            recordMathArtifactsApplied()
+        }
         revealCache.removeAll(keepingCapacity: true)
         lastReconcileWriteCount = 0
     }
@@ -2127,6 +2147,11 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
             textView?.needsDisplay = true
         }
         isApplyingAttributes = false
+        recordMathArtifactsApplied()
+    }
+
+    private func recordMathArtifactsApplied() {
+        appliedMathArtifactGeneration = MathRenderer.shared.artifactGeneration
         needsMathRefresh = false
     }
 

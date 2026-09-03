@@ -7,6 +7,34 @@ import Testing
 @Suite @MainActor struct CoordinatorPipelineTests {
     let engine = RenderEngine()
 
+    private actor MathArtifactCacheGate {
+        private var entered = false
+        private var released = false
+        private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+        func enterAndWait() async {
+            entered = true
+            guard released == false else { return }
+            await withCheckedContinuation { continuation in
+                if released {
+                    continuation.resume()
+                } else {
+                    releaseWaiters.append(continuation)
+                }
+            }
+        }
+
+        func hasEntered() -> Bool { entered }
+
+        func open() {
+            guard released == false else { return }
+            released = true
+            let waiters = releaseWaiters
+            releaseWaiters.removeAll(keepingCapacity: false)
+            for waiter in waiters { waiter.resume() }
+        }
+    }
+
     private func weight(_ font: NSFont?) -> Double {
         let traits = font?.fontDescriptor.object(forKey: .traits) as? [NSFontDescriptor.TraitKey: Any]
         return (traits?[.weight] as? NSNumber)?.doubleValue ?? 0
@@ -41,6 +69,18 @@ import Testing
             try? await Task.sleep(for: .milliseconds(2))
         }
         return true
+    }
+
+    private func waitForMathCacheGate(
+        _ gate: MathArtifactCacheGate,
+        timeoutMs: Int = 15_000
+    ) async -> Bool {
+        let deadline = ContinuousClock.now + .milliseconds(timeoutMs)
+        while true {
+            if await gate.hasEntered() { return true }
+            if ContinuousClock.now > deadline { return false }
+            try? await Task.sleep(for: .milliseconds(2))
+        }
     }
 
     @Test func statusReportsCharactersAndRenderDuration() async {
@@ -105,6 +145,141 @@ import Testing
         #expect(storage.attribute(.museBlock, at: 0, effectiveRange: nil) as? String
                 == BlockVisual.math.rawValue)
         #expect(storage.string == source)
+    }
+
+    /// WebKit continuation 不响应 Task 取消：连续编辑取消协调器任务后，已经生成的
+    /// SVG 仍必须先进入缓存，不能把整次 MathJax 往返白白丢掉。
+    @Test func cancelledMathPreparationStillCachesCompletedArtifact() async throws {
+        let uniqueSuffix = UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        let source = "$$\nx_{\(uniqueSuffix)}+1\n$$\n\ntail"
+        let package = engine.prepare(source)
+        let token = try #require(package.tokens.first { $0.mathExpression != nil })
+        let expression = try #require(token.mathExpression)
+        let request = MathRenderer.shared.request(expression: expression, display: true)
+        #expect(MathRenderer.shared.cachedArtifact(for: request) == nil)
+
+        let gate = MathArtifactCacheGate()
+        MathRenderer.shared.setBeforeCachingArtifactHookForTesting(for: request) {
+            await gate.enterAndWait()
+        }
+        defer {
+            MathRenderer.shared.setBeforeCachingArtifactHookForTesting(for: request, hook: nil)
+        }
+
+        let storage = NSTextStorage(string: source)
+        let coordinator = RenderCoordinator()
+        coordinator.attach(storage: storage)
+        coordinator.onTextEdited = {}
+        storage.replaceCharacters(in: NSRange(location: 0, length: storage.length), with: source)
+
+        guard await waitForApplied(coordinator, atLeast: 1) else {
+            await gate.open()
+            Issue.record("Initial formula package was not applied.")
+            return
+        }
+        guard await waitForMathCacheGate(gate) else {
+            await gate.open()
+            Issue.record("MathJax did not reach the pre-cache test gate.")
+            return
+        }
+
+        coordinator.setParseLoopPausedForTesting(true)
+        for character in "abc" {
+            storage.replaceCharacters(
+                in: NSRange(location: storage.length, length: 0),
+                with: String(character)
+            )
+        }
+        let editedRevision = coordinator.revisionForTesting
+        await gate.open()
+        await coordinator.waitForMathPreparationForTesting()
+
+        #expect(editedRevision >= 4)
+        #expect(MathRenderer.shared.cachedArtifact(for: request) != nil)
+        #expect(storage.attribute(.museMathArtifact, at: 0, effectiveRange: nil) == nil)
+        #expect(storage.string == source + "abc")
+    }
+
+    /// 缓存产物若在 marked-text 窗口错过 storage 刷新，后续编辑不能清掉待刷新
+    /// 信号；缓存命中也必须继续报告“产物可用”，让最新 package 最终写入真实存储。
+    @Test func cachedMathArtifactMissedDuringEditEventuallyReachesStorage() async throws {
+        let uniqueSuffix = UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        let source = "$$\ny_{\(uniqueSuffix)}+2\n$$\n\ntail"
+        let package = engine.prepare(source)
+        let token = try #require(package.tokens.first { $0.mathExpression != nil })
+        let expression = try #require(token.mathExpression)
+        let request = MathRenderer.shared.request(expression: expression, display: true)
+        #expect(MathRenderer.shared.cachedArtifact(for: request) == nil)
+
+        let gate = MathArtifactCacheGate()
+        MathRenderer.shared.setBeforeCachingArtifactHookForTesting(for: request) {
+            await gate.enterAndWait()
+        }
+        defer {
+            MathRenderer.shared.setBeforeCachingArtifactHookForTesting(for: request, hook: nil)
+        }
+
+        let storage = NSTextStorage(string: source)
+        let coordinator = RenderCoordinator()
+        coordinator.attach(storage: storage)
+        coordinator.onTextEdited = {}
+        storage.replaceCharacters(in: NSRange(location: 0, length: storage.length), with: source)
+
+        guard await waitForApplied(coordinator, atLeast: 1) else {
+            await gate.open()
+            Issue.record("Initial formula package was not applied.")
+            return
+        }
+        guard await waitForMathCacheGate(gate) else {
+            await gate.open()
+            Issue.record("MathJax did not reach the pre-cache test gate.")
+            return
+        }
+
+        // 用独立 NSTextStorage 上的真实 marked text 阻塞属性刷新，不污染被测正文。
+        let markedStorage = NSTextStorage(string: source)
+        let markedTextView = EditorTextView.make(textStorage: markedStorage)
+        let window = host(markedTextView)
+        defer { window.contentView = nil }
+        markedTextView.setSelectedRange(NSRange(location: markedStorage.length, length: 0))
+        markedTextView.setMarkedText(
+            "候",
+            selectedRange: NSRange(location: 1, length: 0),
+            replacementRange: NSRange(location: NSNotFound, length: 0)
+        )
+        #expect(markedTextView.hasMarkedText())
+        coordinator.textView = markedTextView
+
+        await gate.open()
+        await coordinator.waitForMathPreparationForTesting()
+        MathRenderer.shared.setBeforeCachingArtifactHookForTesting(for: request, hook: nil)
+
+        #expect(MathRenderer.shared.cachedArtifact(for: request) != nil)
+        #expect(storage.attribute(.museMathArtifact, at: 0, effectiveRange: nil) == nil)
+        #expect(coordinator.needsMathRefreshForTesting)
+        #expect(await MathRenderer.shared.prepare(request))
+
+        coordinator.setParseLoopPausedForTesting(true)
+        storage.replaceCharacters(
+            in: NSRange(location: storage.length, length: 0),
+            with: "!"
+        )
+        let editedRevision = coordinator.revisionForTesting
+        #expect(coordinator.needsMathRefreshForTesting)
+
+        markedTextView.unmarkText()
+        markedTextView.setSelectedRange(NSRange(location: storage.length, length: 0))
+        coordinator.setParseLoopPausedForTesting(false)
+        #expect(await waitForApplied(coordinator, atLeast: editedRevision))
+        await coordinator.waitForMathPreparationForTesting()
+
+        let artifact = try #require(
+            storage.attribute(.museMathArtifact, at: 0, effectiveRange: nil)
+                as? MathRenderArtifact
+        )
+        #expect(artifact.size.width > 1)
+        #expect(coordinator.needsMathRefreshForTesting == false)
+        #expect(storage.string == source + "!")
     }
 
     @Test func outlineHighlightFollowsVisibleSectionInsteadOfCaret() async throws {

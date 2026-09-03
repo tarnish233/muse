@@ -96,15 +96,16 @@ struct EditorShellView: View {
             CodexDocumentTitlebar(
                 title: location.displayName,
                 windowControls: chromeState.windowControls,
-                reservesWindowControls: !chromeState.isProjectSidebarPresented
+                reservesWindowControls: !chromeState.isProjectSidebarPresented,
+                reservesOutlineToggle: !chromeState.isOutlinePresented,
+                renderer: renderer
             )
             .frame(height: EditorChromeMetrics.titlebarHeight)
 
             EditorDetailView(
                 document: document,
                 isSourceMode: chromeState.isSourceMode,
-                previewBaseURL: location.directoryURL,
-                renderer: renderer
+                previewBaseURL: location.directoryURL
             )
                 .frame(minWidth: 400, maxWidth: .infinity, maxHeight: .infinity)
         }

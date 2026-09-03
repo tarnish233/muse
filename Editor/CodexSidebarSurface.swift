@@ -3,7 +3,6 @@ import SwiftUI
 enum EditorSurface {
     static let sidebar = Color(nsColor: .windowBackgroundColor)
     static let main = Color(nsColor: .textBackgroundColor)
-    static let divider = Color.primary.opacity(0.08)
 }
 
 struct CodexSidebarSurface<Content: View>: View {

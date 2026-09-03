@@ -1,7 +1,14 @@
 import CoreGraphics
 
 enum EditorChromeMetrics {
-    static let titlebarHeight: CGFloat = 46
+    /// Chrome band height. `2 ×` the traffic-light centerline, so a
+    /// `titlebarControlSize`-tall control landing on that line gets equal
+    /// clearance above and below it — AppKit centers the buttons 16pt down (see
+    /// `WindowControlsGeometry`), which also makes this exactly the system
+    /// titlebar height, so `WindowControlsGeometry.unavailable`'s band-centered
+    /// fallback now agrees with the windowed measurement instead of sitting 7pt
+    /// lower.
+    static let titlebarHeight: CGFloat = 32
     static let projectSidebarDefaultWidth: CGFloat = 280
     static let outlineSidebarDefaultWidth: CGFloat = 300
     static let projectSidebarRange: ClosedRange<CGFloat> = 240...380

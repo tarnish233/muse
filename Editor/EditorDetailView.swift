@@ -5,7 +5,6 @@ struct EditorDetailView: View {
     let document: MuseDocument
     let isSourceMode: Bool
     let previewBaseURL: URL?
-    @ObservedObject var renderer: RenderCoordinator
 
     var body: some View {
         EditorView(
@@ -15,11 +14,5 @@ struct EditorDetailView: View {
         )
             .id(ObjectIdentifier(document))
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .overlay(alignment: .bottomTrailing) {
-                RenderStatusView(renderer: renderer)
-                    .padding(.trailing, 30)
-                    .padding(.bottom, 6)
-                    .allowsHitTesting(false)
-            }
     }
 }

@@ -62,8 +62,13 @@ import Testing
         let geometry = try #require(WindowControlsGeometry.measured(in: makeWindow()))
         let controlCenter = geometry.controlTopInset + EditorChromeMetrics.titlebarControlSize / 2
         #expect(abs(controlCenter - geometry.centerY) < 0.01)
-        // 原实现把控件在 46pt 条里居中，中心线落在 23pt —— 低 7pt，正是要修的错位。
-        #expect(abs(controlCenter - EditorChromeMetrics.titlebarHeight / 2) > 5)
+
+        // `titlebarHeight / 2` 不能再当反例：band 现在正好对称在这条中心线上
+        // （32 = 2×16），两种实现的结果重合。改为喂一条人造中心线——写死实现会
+        // 无视它、仍旧给 16pt。
+        let moved = WindowControlsGeometry(centerY: 40, trailingEdge: geometry.trailingEdge)
+        let movedCenter = moved.controlTopInset + EditorChromeMetrics.titlebarControlSize / 2
+        #expect(abs(movedCenter - 40) < 0.01)
     }
 
     /// `NSHostingView.isFlipped == true`：转进内容视图后 `midY` 本身已经是「距顶

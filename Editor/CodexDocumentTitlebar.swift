@@ -5,6 +5,11 @@ struct CodexDocumentTitlebar: View {
     let title: String
     let windowControls: WindowControlsGeometry
     let reservesWindowControls: Bool
+    let reservesOutlineToggle: Bool
+    /// Held, not observed. `RenderStatusView` does the observing, so a status
+    /// publish on every keystroke re-renders only the readout instead of
+    /// invalidating this whole band.
+    let renderer: RenderCoordinator
 
     var body: some View {
         HStack(spacing: 10) {
@@ -18,27 +23,39 @@ struct CodexDocumentTitlebar: View {
                 .truncationMode(.middle)
 
             Spacer(minLength: 12)
+
+            // A readout, not a control: it must never eat a titlebar drag. Fixed
+            // so a long filename truncates (it already does, mid-string) instead
+            // of squeezing the digits.
+            RenderStatusView(renderer: renderer)
+                .fixedSize()
+                .allowsHitTesting(false)
         }
-        // Sits on the traffic-light centerline like the toggles do, instead of
-        // centering in the band. Centering here would leave the title 7pt below
-        // the outline toggle at the other end of the same row.
+        // Sits on the traffic-light centerline like the toggles do, read from the
+        // window rather than centered in the band. The band is sized to `2 ×` that
+        // line (see `EditorChromeMetrics.titlebarHeight`), so this lands with equal
+        // clearance above and below — but the alignment still comes from the
+        // measurement, so it survives AppKit moving the buttons.
         .frame(height: EditorChromeMetrics.titlebarControlSize)
         .padding(.top, windowControls.controlTopInset)
         .padding(.leading, leadingInset)
-        .padding(.trailing, EditorChromeMetrics.documentTitleTrailingInset)
+        .padding(.trailing, trailingInset)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .contentShape(.rect)
         .background(EditorSurface.main)
-        .overlay(alignment: .bottom) {
-            Rectangle()
-                .fill(EditorSurface.divider)
-                .frame(height: 1)
-        }
     }
 
     private var leadingInset: CGFloat {
         reservesWindowControls
             ? windowControls.documentTitleInset
+            : EditorChromeMetrics.documentTitleEdgeInset
+    }
+
+    /// Mirrors `leadingInset`: clear the outline toggle while it floats over this
+    /// column, otherwise sit on the body text's own right margin.
+    private var trailingInset: CGFloat {
+        reservesOutlineToggle
+            ? EditorChromeMetrics.documentTitleTrailingInset
             : EditorChromeMetrics.documentTitleEdgeInset
     }
 }

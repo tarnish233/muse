@@ -46,7 +46,18 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
         public let lineRange: NSRange
     }
 
+    private let imagePreparer: @Sendable (URL) async -> Bool
+
     public override init() {
+        imagePreparer = { url in
+            let result = await ImageResolver.prepareImage(url: url)
+            return result.cacheChanged
+        }
+        super.init()
+    }
+
+    init(imagePreparer: @escaping @Sendable (URL) async -> Bool) {
+        self.imagePreparer = imagePreparer
         super.init()
     }
 
@@ -377,10 +388,10 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
         revision requestedRevision: Int
     ) {
         let urls = Set(package.blockImageDestinations.compactMap { destination -> URL? in
-            guard let url = ImageResolver.resolvedURL(destination: destination, baseURL: imageBaseURL),
-                  url.isFileURL
-            else { return nil }
-            return url.standardizedFileURL
+            guard let url = ImageResolver.resolvedURL(destination: destination, baseURL: imageBaseURL) else {
+                return nil
+            }
+            return url.isFileURL ? url.standardizedFileURL : url.absoluteURL
         })
 
         imagePreparationTask?.cancel()
@@ -391,21 +402,58 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
             return
         }
 
+        let imagePreparer = imagePreparer
         imagePreparationTask = Task(priority: .utility) { [weak self] in
-            var cacheChanged = false
-            for url in urls {
-                guard !Task.isCancelled else { return }
-                cacheChanged = await ImageResolver.prepareLocalImage(url: url) || cacheChanged
-            }
-            guard !Task.isCancelled, let self,
-                  self.imagePreparationGeneration == generation,
-                  self.revision == requestedRevision
-            else { return }
-            self.imagePreparationTask = nil
-            guard cacheChanged else { return }
-            self.needsImageRefresh = true
-            self.applyImageRefreshIfPossible()
+            guard let self else { return }
+            await self.prepareImagesAndRefresh(
+                urls,
+                maximumConcurrentCount: 4,
+                using: imagePreparer,
+                generation: generation,
+                revision: requestedRevision
+            )
         }
+    }
+
+    /// 大文档可能引用很多远程图片；限制并发数，避免一次渲染把所有连接同时打满。
+    /// 每张图片准备完成就立即重排，不让一个慢请求阻塞同页其他图片的显示。
+    private func prepareImagesAndRefresh(
+        _ urls: Set<URL>,
+        maximumConcurrentCount: Int,
+        using imagePreparer: @escaping @Sendable (URL) async -> Bool,
+        generation: Int,
+        revision requestedRevision: Int
+    ) async {
+        await withTaskGroup(of: Bool.self) { group in
+            var iterator = urls.makeIterator()
+            let initialCount = min(max(1, maximumConcurrentCount), urls.count)
+            for _ in 0..<initialCount {
+                guard let url = iterator.next() else { break }
+                group.addTask { await imagePreparer(url) }
+            }
+
+            while let changed = await group.next() {
+                guard !Task.isCancelled,
+                      imagePreparationGeneration == generation,
+                      revision == requestedRevision
+                else {
+                    group.cancelAll()
+                    return
+                }
+                if changed {
+                    needsImageRefresh = true
+                    applyImageRefreshIfPossible()
+                }
+                if let url = iterator.next(), Task.isCancelled == false {
+                    group.addTask { await imagePreparer(url) }
+                }
+            }
+        }
+        guard !Task.isCancelled,
+              imagePreparationGeneration == generation,
+              revision == requestedRevision
+        else { return }
+        imagePreparationTask = nil
     }
 
     // MARK: - 表格可视化编辑
@@ -1798,6 +1846,11 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
     var revisionForTesting: Int { revision }
     var pendingDirtyRangeForTesting: NSRange? { pendingDirtyRange }
     var isParseDeferredForMarkedTextForTesting: Bool { isParseDeferredForMarkedText }
+
+    func waitForImagePreparationForTesting() async {
+        let task = imagePreparationTask
+        await task?.value
+    }
 
     func applyParsedForTesting(
         package: RenderEngine.Package,

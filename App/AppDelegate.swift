@@ -45,7 +45,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         let fileMenuItem = NSMenuItem()
         mainMenu.addItem(fileMenuItem)
         let fileMenu = NSMenu(title: "文件")
-        fileMenu.addItem(withTitle: "新建", action: #selector(NSDocumentController.newDocument(_:)), keyEquivalent: "n")
+        let newItem = NSMenuItem(
+            title: "新建",
+            action: #selector(createNewDocumentOrWorkspaceFile(_:)),
+            keyEquivalent: "n"
+        )
+        newItem.target = self
+        fileMenu.addItem(newItem)
+        let newFolderItem = NSMenuItem(
+            title: "新建文件夹",
+            action: #selector(WorkspaceCommandResponder.newWorkspaceFolder(_:)),
+            keyEquivalent: "n"
+        )
+        newFolderItem.keyEquivalentModifierMask = [.command, .shift]
+        fileMenu.addItem(newFolderItem)
         fileMenu.addItem(withTitle: "打开…", action: #selector(NSDocumentController.openDocument(_:)), keyEquivalent: "o")
         fileMenu.addItem(.separator())
         fileMenu.addItem(withTitle: "存储", action: #selector(NSDocument.save(_:)), keyEquivalent: "s")
@@ -121,6 +134,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     @objc private func toggleSourceMode(_ sender: Any?) {
         guard let controller = NSApp.keyWindow?.windowController as? EditorWindowController else { return }
         controller.toggleSourceMode()
+    }
+
+    @objc private func createNewDocumentOrWorkspaceFile(_ sender: Any?) {
+        let workspaceAction = #selector(WorkspaceCommandResponder.newWorkspaceFile(_:))
+        guard !NSApp.sendAction(workspaceAction, to: nil, from: sender) else { return }
+        NSDocumentController.shared.newDocument(sender)
     }
 
     @objc private func showSettings(_ sender: Any?) {

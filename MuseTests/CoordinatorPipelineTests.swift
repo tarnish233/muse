@@ -57,6 +57,32 @@ import Testing
         #expect(!coordinator.statusText.contains("tokens"))
     }
 
+    /// 正文协调器必须调度 HTTP(S) 块图片，并在缓存准备完成后重新应用图片属性。
+    /// 下载由确定性闭包替代，不让单元测试访问公网。
+    @Test(.tags(.networking))
+    func remoteBlockImageIsPreparedAndReflowed() async throws {
+        let png = try #require(Data(base64Encoded:
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        ))
+        let remoteURL = try #require(URL(string: "https://images.example/\(UUID().uuidString).png"))
+        let coordinator = RenderCoordinator { requestedURL in
+            guard requestedURL == remoteURL else { return false }
+            return ImageResolver.cacheRemoteImageData(png, at: requestedURL)
+        }
+        let source = "![图床图片](\(remoteURL.absoluteString))"
+        let storage = NSTextStorage(string: source)
+        coordinator.attach(storage: storage)
+        coordinator.onTextEdited = {}
+
+        storage.replaceCharacters(in: NSRange(location: 0, length: storage.length), with: source)
+        #expect(await waitForApplied(coordinator, atLeast: 1))
+        await coordinator.waitForImagePreparationForTesting()
+
+        #expect(storage.attribute(.museImageURL, at: 0, effectiveRange: nil) as? String
+                == remoteURL.absoluteString)
+        #expect(RenderEngine.imageSize(in: storage, at: 0) == NSSize(width: 1, height: 1))
+    }
+
     @Test func outlineHighlightFollowsVisibleSectionInsteadOfCaret() async throws {
         let source = "导言\n\n# 第一章\n第一章正文\n\n## 第二节\n第二节正文"
         let storage = NSTextStorage(string: source)

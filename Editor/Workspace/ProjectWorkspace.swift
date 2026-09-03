@@ -26,6 +26,7 @@ final class ProjectWorkspace {
     private let bookmarking: WorkspaceBookmarking
     private let projectStore: WorkspaceProjectStore
     private let treeLoader: WorkspaceTreeLoader
+    private let fileOperations: WorkspaceFileOperations
     private var bookmark: Data?
     private var securityScopedURL: URL?
     private var refreshTask: Task<Void, Never>?
@@ -37,13 +38,15 @@ final class ProjectWorkspace {
         fileManager: FileManager = .default,
         bookmarking: WorkspaceBookmarking? = nil,
         projectStore: WorkspaceProjectStore? = nil,
-        fileSystem: WorkspaceFileSystem? = nil
+        fileSystem: WorkspaceFileSystem? = nil,
+        fileOperations: WorkspaceFileOperations = WorkspaceFileOperations()
     ) {
         self.fileManager = fileManager
         self.bookmarking = bookmarking ?? .live()
         self.projectStore = projectStore ?? .userDefaults(defaults, key: Constants.projectKey)
         let resolvedFileSystem = fileSystem ?? .live(fileManager: fileManager)
         treeLoader = WorkspaceTreeLoader(fileSystem: resolvedFileSystem)
+        self.fileOperations = fileOperations
         restoreProject()
     }
 
@@ -147,16 +150,46 @@ final class ProjectWorkspace {
 
     @discardableResult
     func rename(_ node: WorkspaceNode, to rawName: String) throws -> URL {
-        let name = try validatedName(rawName, kind: node.isFolder ? .folder : .file)
-        let destination = node.url.deletingLastPathComponent().appending(path: name)
+        let name = try validatedName(rawName)
+        let destination = node.url.deletingLastPathComponent().appending(
+            path: name,
+            directoryHint: node.isFolder ? .isDirectory : .notDirectory
+        )
+        guard destination.standardizedFileURL != node.url.standardizedFileURL else {
+            return node.url
+        }
         try fileManager.moveItem(at: node.url, to: destination)
         refreshProject(containing: destination)
         return destination
     }
 
-    func moveToTrash(_ node: WorkspaceNode) throws {
-        _ = try fileManager.trashItem(at: node.url, resultingItemURL: nil)
-        refreshProject(containing: node.url)
+    @discardableResult
+    func moveToTrash(_ node: WorkspaceNode) throws -> URL? {
+        let belongsToCurrentProject = project(containing: node.url) != nil
+        var resultingURL: NSURL?
+        try fileManager.trashItem(at: node.url, resultingItemURL: &resultingURL)
+        if belongsToCurrentProject {
+            refreshProject()
+        }
+        return resultingURL as URL?
+    }
+
+    @discardableResult
+    func pasteItems(_ sourceURLs: [URL], into parentURL: URL) async throws -> [URL] {
+        guard !sourceURLs.isEmpty else {
+            throw WorkspaceOperationError.clipboardContainsNoFiles
+        }
+        guard let targetProject = project(containing: parentURL) else {
+            throw WorkspaceOperationError.invalidPasteDestination
+        }
+
+        let targetRootURL = targetProject.rootURL.standardizedFileURL
+        defer {
+            if project?.rootURL == targetRootURL {
+                refreshProject()
+            }
+        }
+        return try await fileOperations.copyItems(sourceURLs, into: parentURL)
     }
 
     func canOpen(_ url: URL) -> Bool {
@@ -176,12 +209,17 @@ final class ProjectWorkspace {
     }
 
     private func validatedName(_ rawName: String, kind: WorkspaceCreationRequest.Kind) throws -> String {
-        var name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !name.isEmpty, name != ".", name != "..", !name.contains("/") else {
-            throw WorkspaceOperationError.invalidName
-        }
+        var name = try validatedName(rawName)
         if kind == .file, URL(fileURLWithPath: name).pathExtension.isEmpty {
             name += ".md"
+        }
+        return name
+    }
+
+    private func validatedName(_ rawName: String) throws -> String {
+        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, name != ".", name != "..", !name.contains("/") else {
+            throw WorkspaceOperationError.invalidName
         }
         return name
     }

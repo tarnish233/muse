@@ -3,10 +3,7 @@ import SwiftUI
 struct WorkspaceNodeRow: View {
     let node: WorkspaceNode
     let selectedFileURL: URL?
-    let createFile: (URL) -> Void
-    let createFolder: (URL) -> Void
-    let openFile: (URL) -> Void
-    let revealInFinder: (URL) -> Void
+    let actions: WorkspaceNodeActions
     @Binding var expansion: WorkspaceTreeExpansion
 
     var body: some View {
@@ -45,10 +42,7 @@ struct WorkspaceNodeRow: View {
                     WorkspaceNodeRow(
                         node: child,
                         selectedFileURL: selectedFileURL,
-                        createFile: createFile,
-                        createFolder: createFolder,
-                        openFile: openFile,
-                        revealInFinder: revealInFinder,
+                        actions: actions,
                         expansion: $expansion
                     )
                     .padding(.leading, 16)
@@ -67,10 +61,11 @@ struct WorkspaceNodeRow: View {
     }
 
     private func activate() {
+        actions.focus(node)
         if node.isFolder {
             expansion.toggleFolder(node.url)
         } else {
-            openFile(node.url)
+            actions.openFile(node.url)
         }
     }
 
@@ -78,19 +73,41 @@ struct WorkspaceNodeRow: View {
     private func nodeMenu() -> some View {
         if node.isFolder {
             Button("新建文件", systemImage: "doc.badge.plus") {
-                createFile(node.url)
+                actions.createFile(node.url)
             }
+            .keyboardShortcut("n", modifiers: .command)
             Button("新建文件夹", systemImage: "folder.badge.plus") {
-                createFolder(node.url)
+                actions.createFolder(node.url)
             }
+            .keyboardShortcut("n", modifiers: [.command, .shift])
             Divider()
         } else {
             Button("打开", systemImage: "doc.text") {
-                openFile(node.url)
+                actions.openFile(node.url)
             }
+            Divider()
         }
+
+        Button("复制", systemImage: "doc.on.doc") {
+            actions.copyItem(node)
+        }
+        .keyboardShortcut("c", modifiers: .command)
+        Button("复制路径", systemImage: "link") {
+            actions.copyPath(node)
+        }
+        Button("复制相对路径", systemImage: "arrow.turn.down.right") {
+            actions.copyRelativePath(node)
+        }
+        Divider()
+        Button("重命名", systemImage: "pencil") {
+            actions.rename(node)
+        }
+        Button("删除", systemImage: "trash", role: .destructive) {
+            actions.delete(node)
+        }
+        Divider()
         Button("在访达中显示", systemImage: "finder") {
-            revealInFinder(node.url)
+            actions.revealInFinder(node.url)
         }
     }
 }

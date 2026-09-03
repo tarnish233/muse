@@ -874,12 +874,12 @@ public struct RenderEngine {
             return result
         }
 
-        /// 目的地 → 本地文件与图片，按次渲染记忆（包括负结果）。
+        /// 目的地 → 已准备好的本地/远程图片，按次渲染记忆（包括负结果）。
         func image(destination: String) -> ResolvedImage? {
             if let cached = resolvedImages[destination] { return cached }
             let resolved = ImageResolver.resolvedURL(destination: destination, baseURL: imageBaseURL)
                 .flatMap { url -> ResolvedImage? in
-                    guard let image = ImageResolver.cachedLocalImage(url: url) else { return nil }
+                    guard let image = ImageResolver.cachedImage(url: url) else { return nil }
                     return ResolvedImage(url: url, image: image)
                 }
             resolvedImages[destination] = resolved
@@ -1194,9 +1194,9 @@ public struct RenderEngine {
         let displaySize: NSSize
         if let resolved = context.image(destination: destination) {
             displaySize = ImageResolver.displaySize(for: resolved.image.size)
-            attributes[.museImagePath] = resolved.url.standardizedFileURL.path
+            attributes[.museImageURL] = resolved.url.absoluteURL.absoluteString
         } else {
-            // 加载不到（文件缺失或远程地址）：仍然按块呈现，绘制层画一个带
+            // 尚未加载或加载失败：仍然按块呈现，绘制层画一个带
             // 目的地文字的占位框——比把源码摊在正文里更能说明「这里是一张图」。
             displaySize = Theme.imagePlaceholderSize
         }

@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Testing
 
@@ -42,6 +43,154 @@ import Testing
 
         let names = workspace.tree.map(\.name)
         #expect(names == ["Archive", "2.md", "10.md"])
+    }
+
+    @Test func renameUsesTheExactRequestedNameAndRefreshesTheTree() async throws {
+        let (workspace, root, _, _) = try makeWorkspace()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        try workspace.createProject(at: root)
+        _ = try workspace.createItem(.file, named: "Draft", in: root)
+        await workspace.waitForRefresh()
+        let node = try #require(workspace.tree.first)
+
+        let renamedURL = try workspace.rename(node, to: "README")
+        await workspace.waitForRefresh()
+
+        #expect(renamedURL.lastPathComponent == "README")
+        #expect(FileManager.default.fileExists(atPath: node.url.path) == false)
+        #expect(FileManager.default.fileExists(atPath: renamedURL.path))
+        #expect(workspace.tree.map(\.name) == ["README"])
+    }
+
+    @Test func moveToTrashRemovesTheItemAndRefreshesTheTree() async throws {
+        let (workspace, root, _, _) = try makeWorkspace()
+        var trashedURL: URL?
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            if let trashedURL {
+                try? FileManager.default.removeItem(at: trashedURL)
+            }
+        }
+
+        try workspace.createProject(at: root)
+        _ = try workspace.createItem(.file, named: "Trash Me", in: root)
+        await workspace.waitForRefresh()
+        let node = try #require(workspace.tree.first)
+
+        trashedURL = try workspace.moveToTrash(node)
+        await workspace.waitForRefresh()
+
+        #expect(FileManager.default.fileExists(atPath: node.url.path) == false)
+        #expect(workspace.tree.isEmpty)
+    }
+
+    @Test func relativePathUsesTheProjectRootAndRejectsSiblings() {
+        let root = URL(fileURLWithPath: "/tmp/笔记")
+        let project = WorkspaceProject(rootURL: root)
+
+        #expect(project.relativePath(to: root) == ".")
+        #expect(project.relativePath(to: root.appending(path: "章节/第一篇.md")) == "章节/第一篇.md")
+        #expect(project.relativePath(to: URL(fileURLWithPath: "/tmp/笔记备份/第一篇.md")) == nil)
+    }
+
+    @Test func workspaceClipboardCopiesFileURLsAndText() throws {
+        let pasteboard = NSPasteboard(name: .init("MuseWorkspaceTests-\(UUID().uuidString)"))
+        let directory = try makeDirectory(named: "Clipboard")
+        defer {
+            pasteboard.clearContents()
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let clipboard = WorkspaceClipboard(pasteboard: pasteboard)
+        let fileURL = directory.appending(path: "Clipboard.md")
+        try Data().write(to: fileURL)
+
+        try clipboard.copyItem(at: fileURL)
+        let copiedURL = pasteboard.readObjects(forClasses: [NSURL.self])?.first as? URL
+        #expect(copiedURL?.standardizedFileURL == fileURL.standardizedFileURL)
+        #expect(clipboard.fileURLs().map(\.standardizedFileURL) == [fileURL.standardizedFileURL])
+
+        try clipboard.copyText("章节/第一篇.md")
+        #expect(pasteboard.string(forType: .string) == "章节/第一篇.md")
+        #expect(clipboard.fileURLs().isEmpty)
+    }
+
+    @Test func workspaceCommandResponderRoutesSystemShortcutSelectors() {
+        let responder = WorkspaceCommandResponder()
+        var receivedActions: [String] = []
+        responder.configure(
+            canCopyItem: false,
+            copyItem: { receivedActions.append("copy") },
+            pasteItems: { receivedActions.append("paste") },
+            createFile: { receivedActions.append("new-file") },
+            createFolder: { receivedActions.append("new-folder") }
+        )
+
+        responder.copy(nil)
+        #expect(receivedActions.isEmpty)
+
+        responder.configure(
+            canCopyItem: true,
+            copyItem: { receivedActions.append("copy") },
+            pasteItems: { receivedActions.append("paste") },
+            createFile: { receivedActions.append("new-file") },
+            createFolder: { receivedActions.append("new-folder") }
+        )
+
+        #expect(responder.tryToPerform(#selector(WorkspaceCommandResponder.copy(_:)), with: nil))
+        #expect(responder.tryToPerform(#selector(WorkspaceCommandResponder.paste(_:)), with: nil))
+        #expect(responder.tryToPerform(#selector(WorkspaceCommandResponder.newWorkspaceFile(_:)), with: nil))
+        #expect(responder.tryToPerform(#selector(WorkspaceCommandResponder.newWorkspaceFolder(_:)), with: nil))
+        #expect(receivedActions == ["copy", "paste", "new-file", "new-folder"])
+    }
+
+    @Test func pasteCopiesFilesAndFoldersWithUniqueNamesThenRefreshesTheTree() async throws {
+        let (workspace, root, _, _) = try makeWorkspace()
+        let sourceRoot = try makeDirectory(named: "PasteSource")
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            try? FileManager.default.removeItem(at: sourceRoot)
+        }
+
+        let sourceFile = sourceRoot.appending(path: "Note.md")
+        try Data("pasted text".utf8).write(to: sourceFile)
+        let sourceFolder = sourceRoot.appending(path: "Assets", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: sourceFolder, withIntermediateDirectories: false)
+        try Data("nested".utf8).write(to: sourceFolder.appending(path: "item.txt"))
+
+        try workspace.createProject(at: root)
+        let firstPaste = try await workspace.pasteItems([sourceFile, sourceFolder], into: root)
+        let secondPaste = try await workspace.pasteItems([sourceFile, sourceFolder], into: root)
+        await workspace.waitForRefresh()
+        let firstPastedFile = try #require(firstPaste.first)
+        let secondPastedFolder = try #require(secondPaste.last)
+
+        #expect(firstPaste.map(\.lastPathComponent) == ["Note.md", "Assets"])
+        #expect(secondPaste.map(\.lastPathComponent) == ["Note 副本.md", "Assets 副本"])
+        #expect(try String(contentsOf: firstPastedFile, encoding: .utf8) == "pasted text")
+        #expect(
+            try String(contentsOf: secondPastedFolder.appending(path: "item.txt"), encoding: .utf8) == "nested"
+        )
+        #expect(Set(workspace.tree.map(\.name)) == Set(["Note.md", "Note 副本.md", "Assets", "Assets 副本"]))
+    }
+
+    @Test func pasteRejectsCopyingAFolderIntoItself() async throws {
+        let (workspace, root, _, _) = try makeWorkspace()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        try workspace.createProject(at: root)
+        let folderURL = try workspace.createItem(.folder, named: "Folder", in: root)
+
+        do {
+            try await workspace.pasteItems([folderURL], into: folderURL)
+            Issue.record("不应允许把文件夹复制到自身。")
+        } catch WorkspaceOperationError.cannotCopyFolderIntoItself {
+            // 预期错误。
+        } catch {
+            Issue.record("收到错误类型不正确：\(error)")
+        }
+
+        #expect(FileManager.default.fileExists(atPath: folderURL.appending(path: "Folder").path) == false)
     }
 
     @Test func removingProjectDoesNotDeleteItsDirectory() throws {

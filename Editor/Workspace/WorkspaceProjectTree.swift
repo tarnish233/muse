@@ -4,9 +4,7 @@ struct WorkspaceProjectTree: View {
     let project: WorkspaceProject
     let nodes: [WorkspaceNode]
     let selectedFileURL: URL?
-    let createFile: (URL) -> Void
-    let createFolder: (URL) -> Void
-    let openFile: (URL) -> Void
+    let nodeActions: WorkspaceNodeActions
     let revealInFinder: (URL) -> Void
     let refreshProject: () -> Void
     let removeProject: () -> Void
@@ -22,10 +20,7 @@ struct WorkspaceProjectTree: View {
                     WorkspaceNodeRow(
                         node: node,
                         selectedFileURL: selectedFileURL,
-                        createFile: createFile,
-                        createFolder: createFolder,
-                        openFile: openFile,
-                        revealInFinder: revealInFinder,
+                        actions: nodeActions,
                         expansion: $expansion
                     )
                     .padding(.leading, 17)
@@ -104,11 +99,11 @@ struct WorkspaceProjectTree: View {
     }
 
     private func createFileInProject() {
-        createFile(project.rootURL)
+        nodeActions.createFile(project.rootURL)
     }
 
     private func createFolderInProject() {
-        createFolder(project.rootURL)
+        nodeActions.createFolder(project.rootURL)
     }
 
     private func collapseAllFolders() {

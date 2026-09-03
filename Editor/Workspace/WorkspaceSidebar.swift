@@ -7,7 +7,12 @@ struct WorkspaceSidebar: View {
     let openFile: (URL) -> Void
 
     @State private var creationRequest: WorkspaceCreationRequest?
+    @State private var renamingNode: WorkspaceNode?
+    @State private var pasteRequest: PasteRequest?
     @State private var alert: WorkspaceAlert?
+    @State private var focusedNode: WorkspaceNode?
+    @State private var shortcutFocusGeneration = 0
+    private let clipboard = WorkspaceClipboard()
 
     var body: some View {
         CodexSidebarSurface {
@@ -17,15 +22,36 @@ struct WorkspaceSidebar: View {
                         project: project,
                         nodes: workspace.tree,
                         selectedFileURL: selectedFileURL,
-                        createFile: { requestCreation(.file, in: $0) },
-                        createFolder: { requestCreation(.folder, in: $0) },
-                        openFile: selectFile,
+                        nodeActions: nodeActions,
                         revealInFinder: revealInFinder,
                         refreshProject: workspace.refreshProject,
                         removeProject: workspace.closeProject
                     )
                     .padding(.horizontal, 10)
                     .padding(.vertical, 7)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .contentShape(.rect)
+                .contextMenu {
+                    WorkspaceBackgroundMenu(
+                        paste: { requestPaste(into: project.rootURL) },
+                        createFile: { requestCreation(.file, in: project.rootURL) },
+                        createFolder: { requestCreation(.folder, in: project.rootURL) },
+                        refresh: workspace.refreshProject
+                    )
+                }
+                .onTapGesture(perform: requestShortcutFocus)
+                .background {
+                    WorkspaceShortcutResponder(
+                        focusGeneration: shortcutFocusGeneration,
+                        canCopyItem: focusedNode != nil,
+                        copyItem: copyFocusedNode,
+                        pasteItems: pasteIntoProjectRoot,
+                        createFile: createFileInProjectRoot,
+                        createFolder: createFolderInProjectRoot
+                    )
+                    .frame(width: 0, height: 0)
+                    .accessibilityHidden(true)
                 }
                 .museSoftScrollEdges()
             } else {
@@ -34,9 +60,22 @@ struct WorkspaceSidebar: View {
         }
         .sheet(item: $creationRequest) { request in
             WorkspaceNameSheet(
-                request: request,
+                title: request.kind.title,
+                prompt: request.kind.prompt,
+                initialName: request.kind.initialName,
+                submitTitle: "创建",
                 onCancel: dismissCreation,
                 onSubmit: createRequestedItem
+            )
+        }
+        .sheet(item: $renamingNode) { node in
+            WorkspaceNameSheet(
+                title: "重命名",
+                prompt: "输入新名称",
+                initialName: node.name,
+                submitTitle: "重命名",
+                onCancel: dismissRename,
+                onSubmit: { renameRequestedItem(node, to: $0) }
             )
         }
         .alert(item: $alert) { alert in
@@ -46,6 +85,9 @@ struct WorkspaceSidebar: View {
             guard let message else { return }
             alert = WorkspaceAlert(message: message)
             workspace.presentedError = nil
+        }
+        .task(id: pasteRequest?.id) {
+            await performPasteRequest()
         }
     }
 
@@ -67,6 +109,21 @@ struct WorkspaceSidebar: View {
         .padding(.horizontal, 12)
         .padding(.top, 12)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var nodeActions: WorkspaceNodeActions {
+        WorkspaceNodeActions(
+            createFile: { requestCreation(.file, in: $0) },
+            createFolder: { requestCreation(.folder, in: $0) },
+            openFile: selectFile,
+            revealInFinder: revealInFinder,
+            copyItem: copyItem,
+            copyPath: copyPath,
+            copyRelativePath: copyRelativePath,
+            rename: requestRename,
+            delete: deleteNode,
+            focus: focusNode
+        )
     }
 
     private func compactAction(_ title: String, action: @escaping () -> Void) -> some View {
@@ -123,6 +180,95 @@ struct WorkspaceSidebar: View {
         }
     }
 
+    private func requestRename(_ node: WorkspaceNode) {
+        renamingNode = node
+    }
+
+    private func dismissRename() {
+        renamingNode = nil
+    }
+
+    private func renameRequestedItem(_ node: WorkspaceNode, to name: String) {
+        do {
+            try workspace.rename(node, to: name)
+            renamingNode = nil
+        } catch {
+            alert = WorkspaceAlert(message: error.localizedDescription)
+        }
+    }
+
+    private func deleteNode(_ node: WorkspaceNode) {
+        perform { try workspace.moveToTrash(node) }
+    }
+
+    private func copyItem(_ node: WorkspaceNode) {
+        focusNode(node)
+        perform { try clipboard.copyItem(at: node.url) }
+    }
+
+    private func copyPath(_ node: WorkspaceNode) {
+        perform { try clipboard.copyText(node.url.path) }
+    }
+
+    private func copyRelativePath(_ node: WorkspaceNode) {
+        perform {
+            guard let relativePath = workspace.project?.relativePath(to: node.url) else {
+                throw WorkspaceOperationError.itemOutsideProject
+            }
+            try clipboard.copyText(relativePath)
+        }
+    }
+
+    private func requestPaste(into parentURL: URL) {
+        requestShortcutFocus()
+        let sourceURLs = clipboard.fileURLs()
+        guard !sourceURLs.isEmpty else {
+            alert = WorkspaceAlert(message: WorkspaceOperationError.clipboardContainsNoFiles.localizedDescription)
+            return
+        }
+        pasteRequest = PasteRequest(sourceURLs: sourceURLs, parentURL: parentURL)
+    }
+
+    private func focusNode(_ node: WorkspaceNode) {
+        focusedNode = node
+        requestShortcutFocus()
+    }
+
+    private func requestShortcutFocus() {
+        shortcutFocusGeneration &+= 1
+    }
+
+    private func copyFocusedNode() {
+        guard let focusedNode else { return }
+        copyItem(focusedNode)
+    }
+
+    private func pasteIntoProjectRoot() {
+        guard let rootURL = workspace.project?.rootURL else { return }
+        requestPaste(into: rootURL)
+    }
+
+    private func createFileInProjectRoot() {
+        guard let rootURL = workspace.project?.rootURL else { return }
+        requestCreation(.file, in: rootURL)
+    }
+
+    private func createFolderInProjectRoot() {
+        guard let rootURL = workspace.project?.rootURL else { return }
+        requestCreation(.folder, in: rootURL)
+    }
+
+    private func performPasteRequest() async {
+        guard let request = pasteRequest else { return }
+        do {
+            try await workspace.pasteItems(request.sourceURLs, into: request.parentURL)
+        } catch is CancellationError {
+            // SwiftUI 会在侧边栏消失或下一次粘贴开始时取消当前任务。
+        } catch {
+            alert = WorkspaceAlert(message: error.localizedDescription)
+        }
+    }
+
     private func selectFile(_ url: URL) {
         guard workspace.canOpen(url) else {
             alert = WorkspaceAlert(message: WorkspaceOperationError.unsupportedDocument.localizedDescription)
@@ -142,5 +288,11 @@ struct WorkspaceSidebar: View {
         } catch {
             alert = WorkspaceAlert(message: error.localizedDescription)
         }
+    }
+
+    private struct PasteRequest {
+        let id = UUID()
+        let sourceURLs: [URL]
+        let parentURL: URL
     }
 }

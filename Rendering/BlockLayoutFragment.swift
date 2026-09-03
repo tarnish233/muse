@@ -407,10 +407,13 @@ public nonisolated final class MuseLayoutFragment: NSTextLayoutFragment {
         return font.pointSize >= 1
     }
 
-    /// 块图片解析后的本地路径。
-    var imagePath: String? {
+    /// 块图片解析后的绝对 URL（本地与远程共用）。
+    var imageURL: URL? {
         guard let string = elementString, string.length > 0 else { return nil }
-        return string.attribute(.museImagePath, at: 0, effectiveRange: nil) as? String
+        guard let value = string.attribute(.museImageURL, at: 0, effectiveRange: nil) as? String else {
+            return nil
+        }
+        return URL(string: value)
     }
 
     /// 块图片的目的地字符串（占位框上显示）。
@@ -1018,8 +1021,8 @@ public nonisolated final class MuseLayoutFragment: NSTextLayoutFragment {
             height: size.height
         )
 
-        if let path = imagePath,
-           let image = ImageResolver.cachedLocalImage(url: URL(fileURLWithPath: path)) {
+        if let url = imageURL,
+           let image = ImageResolver.cachedImage(url: url) {
             NSGraphicsContext.saveGraphicsState()
             NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: true)
             image.draw(in: box, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)

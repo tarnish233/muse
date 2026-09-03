@@ -523,8 +523,8 @@ import Testing
         #expect(storage.string == source)
         #expect(storage.attribute(.museBlock, at: 0, effectiveRange: nil) as? String
                 == BlockVisual.image.rawValue)
-        #expect(storage.attribute(.museImagePath, at: 0, effectiveRange: nil) as? String
-                == asset.url.standardizedFileURL.path)
+        #expect(storage.attribute(.museImageURL, at: 0, effectiveRange: nil) as? String
+                == asset.url.absoluteURL.absoluteString)
 
         let size = try #require(RenderEngine.imageSize(in: storage, at: 0))
         let expected = ImageResolver.displaySize(for: asset.pixelSize)
@@ -561,7 +561,7 @@ import Testing
                 "endEditing 的属性修复应当抹掉非 U+FFFC 上的附件")
     }
 
-    /// 加载不到的图片（文件缺失或远程地址）仍按块呈现：绘制层画带目的地文字的
+    /// 加载不到的图片仍按块呈现：绘制层画带目的地文字的
     /// 占位框，比把源码摊回正文更能说明「这里是一张图」。
     @Test func unloadableBlockImageFallsBackToPlaceholderBox() {
         let source = "![截图](https://example.com/a.png)"
@@ -570,10 +570,30 @@ import Testing
 
         #expect(storage.attribute(.museBlock, at: 0, effectiveRange: nil) as? String
                 == BlockVisual.image.rawValue)
-        #expect(storage.attribute(.museImagePath, at: 0, effectiveRange: nil) == nil)
+        #expect(storage.attribute(.museImageURL, at: 0, effectiveRange: nil) == nil)
         #expect(RenderEngine.imageSize(in: storage, at: 0) == Theme.imagePlaceholderSize)
         #expect(storage.attribute(.museImageDestination, at: 0, effectiveRange: nil) as? String
                 == "https://example.com/a.png")
+    }
+
+    /// 远程图片下载完成进入内存缓存后，正文渲染必须携带远程 URL 和真实尺寸，
+    /// 不能继续落回“图片无法加载”的占位框。
+    @Test(.tags(.networking))
+    func cachedRemoteBlockImageRendersInline() throws {
+        let asset = try ImageFixture()
+        let data = try Data(contentsOf: asset.url)
+        let remoteURL = try #require(URL(string: "https://images.example/\(UUID().uuidString).png"))
+        #expect(ImageResolver.cacheRemoteImageData(data, at: remoteURL))
+
+        let source = "![远程图片](\(remoteURL.absoluteString))"
+        let storage = NSTextStorage(string: source)
+        _ = engine.render(package: engine.prepare(source), selection: nil, into: storage)
+
+        #expect(storage.attribute(.museImageURL, at: 0, effectiveRange: nil) as? String
+                == remoteURL.absoluteString)
+        let size = try #require(RenderEngine.imageSize(in: storage, at: 0))
+        #expect(size == ImageResolver.displaySize(for: asset.pixelSize))
+        #expect(size != Theme.imagePlaceholderSize)
     }
 
     /// 夹在正文里的图片保持完整源码呈现（弱化成 marker 色），并且**不**变成块——

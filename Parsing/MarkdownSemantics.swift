@@ -121,10 +121,45 @@ public nonisolated struct MarkdownSemantics: Sendable {
         }
     }
 
+    /// swift-markdown 数学 AST 节点的纯值快照。
+    ///
+    /// 语义判断完全由 `.parseMath` 产生的节点负责；这里只把节点范围拆成编辑器需要的
+    /// 开/闭标记与正文范围，不自行识别 `$` 语法。
+    public struct MathSyntax: Sendable, Equatable {
+        public enum Kind: Sendable, Equatable {
+            case inline
+            case block(lastLine: Int)
+        }
+
+        public let kind: Kind
+        public let expression: String
+        public let openMarker: Range<Int>
+        public let closeMarker: Range<Int>
+        public let content: Range<Int>
+        public let line: Int
+
+        public init(
+            kind: Kind,
+            expression: String,
+            openMarker: Range<Int>,
+            closeMarker: Range<Int>,
+            content: Range<Int>,
+            line: Int
+        ) {
+            self.kind = kind
+            self.expression = expression
+            self.openMarker = openMarker
+            self.closeMarker = closeMarker
+            self.content = content
+            self.line = line
+        }
+    }
+
     public let lineKinds: [LineKind]
     public let links: [LinkSyntax]
     public let images: [LinkSyntax]
     public let inlineMarkers: [InlineMarker]
+    public let math: [MathSyntax]
     public let blocks: [BlockStructure]
     /// GFM 表格的源码几何（单元格与 `|` 区间、列对齐），供渲染层算列宽。
     public let tables: [TableStructure]
@@ -197,6 +232,23 @@ public nonisolated struct MarkdownSemantics: Sendable {
                          closingMarkerRange: marker.closeMarker, contentRange: marker.content,
                          line: marker.line)
         })
+        result.append(contentsOf: math.map { syntax in
+            let kind: Token.Kind
+            switch syntax.kind {
+            case .inline:
+                kind = .inlineMath
+            case let .block(lastLine):
+                kind = .blockMath(lastLine: lastLine)
+            }
+            return Token(
+                kind: kind,
+                markerRange: syntax.openMarker,
+                closingMarkerRange: syntax.closeMarker,
+                contentRange: syntax.content,
+                mathExpression: syntax.expression,
+                line: syntax.line
+            )
+        })
         result.append(contentsOf: links.map { link in
             Token(kind: .link, markerRange: link.openBracket, closingMarkerRange: link.tail,
                   contentRange: link.label, linkDestination: link.destination, line: link.line)
@@ -229,6 +281,8 @@ public nonisolated struct MarkdownSemantics: Sendable {
 
         var semanticWalker = SemanticWalker(bytes: bytes, lineStarts: lineStarts, lines: sourceLines)
         semanticWalker.visit(document)
+        var mathWalker = MathSyntaxWalker(bytes: bytes, lineStarts: lineStarts, lines: sourceLines)
+        mathWalker.visit(document)
 
         var lineKinds: [LineKind] = []
         for block in document.blockChildren {
@@ -262,6 +316,12 @@ public nonisolated struct MarkdownSemantics: Sendable {
             }
             return $0.openMarker.upperBound > $1.openMarker.upperBound
         }
+        self.math = mathWalker.math.sorted {
+            if $0.openMarker.lowerBound != $1.openMarker.lowerBound {
+                return $0.openMarker.lowerBound < $1.openMarker.lowerBound
+            }
+            return $0.openMarker.upperBound > $1.openMarker.upperBound
+        }
         self.blocks = semanticWalker.blocks.sorted {
             if $0.line != $1.line { return $0.line < $1.line }
             return $0.marker.lowerBound < $1.marker.lowerBound
@@ -271,6 +331,256 @@ public nonisolated struct MarkdownSemantics: Sendable {
         self.listItemLines = semanticWalker.listItemLines
         self.quoteLines = semanticWalker.quoteLines
         self.fenceLines = semanticWalker.fenceLines
+    }
+
+    /// 公式扩展只重写可能包含公式的 AST 叶节点，而不是复制整棵文档树。
+    ///
+    /// 当前 swift-markdown 数学提案通过 `MarkupRewriter` 复制整棵 AST；在 200 KB / 1 MB
+    /// 文档里，即使只有一个公式也会把解析退化到秒级。这里先用标准 AST 找到 Paragraph / Text
+    /// 叶节点，再把这些很小的节点文本交给同一个 `.parseMath` 扩展。`$` 字节只负责跳过
+    /// 不可能命中的叶节点；分隔符能否成立、表达式内容和范围仍全部取自数学 AST。
+    private struct MathSyntaxWalker: MarkupWalker {
+        let bytes: [UInt8]
+        let lineStarts: [Int]
+        let lines: [TokenScanner.Line]
+        var math = [MathSyntax]()
+
+        mutating func visitParagraph(_ paragraph: Paragraph) {
+            if appendBlockMath(from: paragraph) { return }
+            descendInto(paragraph)
+        }
+
+        mutating func visitText(_ text: Text) {
+            guard text.string.utf8.contains(0x24),
+                  let originalRange = byteRange(text),
+                  let sourceRange = text.range,
+                  sourceRange.lowerBound.line == sourceRange.upperBound.line
+            else { return }
+
+            let probe = Document(
+                parsing: text.string,
+                options: [.disableSmartOpts, .parseMath]
+            )
+            var collector = InlineMathProbe()
+            collector.visit(probe)
+            let line = sourceRange.lowerBound.line - 1
+            guard line >= 0, line < lines.count else { return }
+
+            for node in collector.nodes {
+                guard let localRange = node.range,
+                      localRange.lowerBound.line == 1,
+                      localRange.upperBound.line == 1
+                else { continue }
+                let lower = originalRange.lowerBound + localRange.lowerBound.column - 1
+                let upper = originalRange.lowerBound + localRange.upperBound.column - 1
+                guard lower >= originalRange.lowerBound,
+                      upper <= originalRange.upperBound,
+                      upper - lower >= 2
+                else { continue }
+                math.append(MathSyntax(
+                    kind: .inline,
+                    expression: node.code,
+                    openMarker: lower..<(lower + 1),
+                    closeMarker: (upper - 1)..<upper,
+                    content: (lower + 1)..<(upper - 1),
+                    line: line
+                ))
+            }
+        }
+
+        /// 返回 true 表示 Paragraph 已由数学 AST 确认为块公式，不再扫描其中的行内节点。
+        private mutating func appendBlockMath(from paragraph: Paragraph) -> Bool {
+            guard let range = byteRange(paragraph),
+                  let sourceRange = paragraph.range,
+                  !lines.isEmpty,
+                  range.lowerBound >= 0,
+                  range.upperBound <= bytes.count
+            else { return false }
+
+            // 优先把 Paragraph 对应的原始 UTF-8 切片交给数学扩展。不能使用
+            // Paragraph/Text 的 `.string` 重建：CommonMark 会先消费 `\!`、`\,`
+            // 这类合法 LaTeX 转义，也可能把下划线组合拆成强调节点，导致复杂公式
+            // 尚未进入数学 AST 就已经失真或被拒绝。
+            let exactSource = String(decoding: bytes[range], as: UTF8.self)
+            if exactSource.utf8.contains(0x24) {
+                let probe = Document(
+                    parsing: blockMathProbeSource(exactSource),
+                    options: [.disableSmartOpts, .parseMath]
+                )
+                if probe.child(at: 0) is BlockMath,
+                   appendBlockMath(
+                    expression: nil,
+                    range: range,
+                    sourceRange: sourceRange,
+                    containerTextRanges: nil
+                   ) {
+                    return true
+                }
+            }
+
+            // 引用等容器的 Paragraph 范围会跨过每一行的容器前缀，原始连续切片
+            // 不能单独构成 BlockMath；这种情况保留 AST 子节点重建作为回退。
+            var rawText = ""
+            var textRanges: [Range<Int>] = []
+            for child in paragraph.children {
+                if let text = child as? Text {
+                    rawText += text.string
+                    if let range = byteRange(text) {
+                        textRanges.append(range)
+                    }
+                } else if child is SoftBreak || child is LineBreak {
+                    rawText += "\n"
+                } else {
+                    return false
+                }
+            }
+            guard rawText.utf8.contains(0x24) else { return false }
+
+            let probe = Document(
+                parsing: rawText,
+                options: [.disableSmartOpts, .parseMath]
+            )
+            guard let blockMath = probe.child(at: 0) as? BlockMath else { return false }
+            return appendBlockMath(
+                expression: blockMath.code,
+                range: range,
+                sourceRange: sourceRange,
+                containerTextRanges: textRanges
+            )
+        }
+
+        private mutating func appendBlockMath(
+            expression suppliedExpression: String?,
+            range: Range<Int>,
+            sourceRange: SourceRange,
+            containerTextRanges: [Range<Int>]?
+        ) -> Bool {
+            let line = sourceRange.lowerBound.line - 1
+            guard line >= 0, line < lines.count else { return false }
+            let lastLine = min(
+                lineIndex(ofByte: max(range.upperBound - 1, range.lowerBound)) ?? line,
+                lines.count - 1
+            )
+            guard lastLine >= line else { return false }
+
+            let expression: String
+            if let suppliedExpression {
+                expression = suppliedExpression
+            } else if line == lastLine {
+                guard range.count >= 4 else { return false }
+                expression = String(
+                    decoding: bytes[(range.lowerBound + 2)..<(range.upperBound - 2)],
+                    as: UTF8.self
+                )
+            } else {
+                let contentStart = lines[line].next
+                let contentEnd = lines[max(line, lastLine - 1)].end
+                guard contentStart <= contentEnd,
+                      contentStart >= range.lowerBound,
+                      contentEnd <= range.upperBound
+                else { return false }
+                expression = String(decoding: bytes[contentStart..<contentEnd], as: UTF8.self)
+            }
+
+            if line == lastLine {
+                guard range.count >= 4 else { return false }
+                math.append(MathSyntax(
+                    kind: .block(lastLine: lastLine),
+                    expression: expression,
+                    openMarker: range.lowerBound..<(range.lowerBound + 2),
+                    closeMarker: (range.upperBound - 2)..<range.upperBound,
+                    content: (range.lowerBound + 2)..<(range.upperBound - 2),
+                    line: line
+                ))
+                return true
+            }
+
+            if containerTextRanges == nil {
+                guard range.count >= 4 else { return false }
+                let closeMarker = (range.upperBound - 2)..<range.upperBound
+                math.append(MathSyntax(
+                    kind: .block(lastLine: lastLine),
+                    expression: expression,
+                    openMarker: range.lowerBound..<(range.lowerBound + 2),
+                    closeMarker: closeMarker,
+                    content: min(lines[line].next, closeMarker.lowerBound)..<closeMarker.lowerBound,
+                    line: line
+                ))
+                return true
+            }
+
+            // 容器前缀（如 `> `）不属于 Paragraph 的 Text 子节点。首尾 Text 的 AST
+            // 范围因此能精确排除引用前缀，避免把它并进 `$$` 分隔符。
+            guard let openMarker = containerTextRanges?.first,
+                  let closeMarker = containerTextRanges?.last,
+                  openMarker.upperBound <= closeMarker.lowerBound
+            else { return false }
+            math.append(MathSyntax(
+                kind: .block(lastLine: lastLine),
+                expression: expression,
+                openMarker: openMarker,
+                closeMarker: closeMarker,
+                content: min(lines[line].next, closeMarker.lowerBound)..<closeMarker.lowerBound,
+                line: line
+            ))
+            return true
+        }
+
+        /// swift-markdown 当前的数学扩展在识别 `$$` 前会先跑 CommonMark 行内解析，
+        /// 因而 `_`、`*`、`\!` 等 LaTeX 字符可能把 Paragraph 拆成非 Text 子节点。
+        /// 探测串只保留分隔符与空白布局，屏蔽正文的行内语法；是否为块公式仍由
+        /// `.parseMath` 产生的 BlockMath 节点决定，真实表达式再从同一 AST 范围的
+        /// 原始 UTF-8 快照读取。
+        private func blockMathProbeSource(_ source: String) -> String {
+            String(source.map { character in
+                switch character {
+                case "$", " ", "\t", "\n", "\r":
+                    character
+                default:
+                    "x"
+                }
+            })
+        }
+
+        private func byteRange(_ markup: Markup) -> Range<Int>? {
+            guard let range = markup.range,
+                  let lower = MarkdownSemantics.byteOffset(
+                    range.lowerBound,
+                    lineStarts: lineStarts,
+                    lines: lines
+                  ),
+                  let upper = MarkdownSemantics.byteOffset(
+                    range.upperBound,
+                    lineStarts: lineStarts,
+                    lines: lines
+                  ),
+                  lower <= upper
+            else { return nil }
+            return lower..<upper
+        }
+
+        private func lineIndex(ofByte offset: Int) -> Int? {
+            guard !lineStarts.isEmpty else { return nil }
+            var low = 0
+            var high = lineStarts.count - 1
+            while low < high {
+                let middle = (low + high + 1) / 2
+                if lineStarts[middle] <= offset {
+                    low = middle
+                } else {
+                    high = middle - 1
+                }
+            }
+            return min(low, lines.count - 1)
+        }
+
+        private struct InlineMathProbe: MarkupWalker {
+            var nodes = [InlineMath]()
+
+            mutating func visitInlineMath(_ inlineMath: InlineMath) {
+                nodes.append(inlineMath)
+            }
+        }
     }
 
     /// 使用 swift-markdown 官方 walker 收集语义结构与 marker。

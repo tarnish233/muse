@@ -15,6 +15,23 @@ import Testing
         (font(at: location, in: storage)?.pointSize ?? 100) < 1
     }
 
+    private func prepareMath(in package: RenderEngine.Package) async {
+        for token in package.tokens {
+            guard let expression = token.mathExpression else { continue }
+            let display: Bool
+            switch token.kind {
+            case .blockMath:
+                display = true
+            case .inlineMath:
+                display = false
+            default:
+                continue
+            }
+            let request = MathRenderer.shared.request(expression: expression, display: display)
+            _ = await MathRenderer.shared.prepare(request)
+        }
+    }
+
     /// 字重数值（NSFont.Weight rawValue：regular=0，semibold≈0.3）。
     /// CJK 文本上 AppKit 会把系统字体解析成 PingFang 回退字体（实例不同），
     /// 因此中文位置的断言用字重/字号而不是字体实例相等。
@@ -203,6 +220,183 @@ import Testing
         let rule = (source as NSString).range(of: "---")
         #expect(font(at: rule.location, in: storage) == theme.codeFont())
         #expect(storage.attribute(.museBlock, at: rule.location, effectiveRange: nil) == nil)
+    }
+
+    // MARK: - 数学公式
+
+    @Test func inlineMathRendersWithoutChangingSourceAndRevealsAtCaret() async throws {
+        let source = "速度 $v=\\frac{s}{t}$ 结束\n下一行"
+        let nsSource = source as NSString
+        let formulaStart = nsSource.range(of: "$v=").location
+        let storage = NSTextStorage(string: source)
+        let package = engine.prepare(source)
+        await prepareMath(in: package)
+
+        _ = engine.render(
+            package: package,
+            selection: NSRange(location: storage.length, length: 0),
+            into: storage
+        )
+        let artifact = try #require(
+            storage.attribute(.museMathArtifact, at: formulaStart, effectiveRange: nil)
+                as? MathRenderArtifact
+        )
+        #expect(artifact.size.width > 1)
+        #expect(isHidden(formulaStart, in: storage))
+        #expect((storage.attribute(.kern, at: formulaStart, effectiveRange: nil) as? NSNumber)?.doubleValue ?? 0 > 1)
+        #expect(storage.string == source)
+
+        _ = engine.render(
+            package: package,
+            selection: NSRange(location: formulaStart + 3, length: 0),
+            into: storage
+        )
+        #expect(!isHidden(formulaStart, in: storage))
+        #expect(storage.attribute(.kern, at: formulaStart, effectiveRange: nil) == nil)
+        #expect(storage.string == source)
+    }
+
+    @Test func inlineMathDrawsThroughRealTextKit2Fragment() async throws {
+        let source = "正文 $\\sqrt{x^2+y^2}$ 结尾"
+        let storage = NSTextStorage(string: source)
+        let textView = EditorTextView.make(textStorage: storage)
+        textView.frame = NSRect(x: 0, y: 0, width: 640, height: 160)
+        textView.textContainer?.containerSize = NSSize(
+            width: 640,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+
+        let package = engine.prepare(source)
+        await prepareMath(in: package)
+        _ = engine.render(package: package, selection: nil, into: storage)
+        let fragment = try #require(customFragments(in: textView).first { fragment in
+            guard let paragraph = fragment.textElement as? NSTextParagraph else { return false }
+            let string = paragraph.attributedString
+            let marker = (string.string as NSString).range(of: "$")
+            guard marker.location != NSNotFound else { return false }
+            return string.attribute(.museMathArtifact, at: marker.location, effectiveRange: nil) != nil
+        })
+        let paragraph = try #require(fragment.textElement as? NSTextParagraph)
+        let attributed = paragraph.attributedString
+        let marker = (attributed.string as NSString).range(of: "$")
+        var formulaRange = NSRange(location: NSNotFound, length: 0)
+        let artifact = try #require(
+            attributed.attribute(
+                .museMathArtifact,
+                at: marker.location,
+                effectiveRange: &formulaRange
+            ) as? MathRenderArtifact
+        )
+        let line = try #require(fragment.textLineFragments.first { line in
+            NSLocationInRange(formulaRange.location, line.characterRange)
+                && NSLocationInRange(formulaRange.upperBound, line.characterRange)
+        })
+        let formulaX = line.locationForCharacter(at: formulaRange.location).x
+        let followingTextX = line.locationForCharacter(at: formulaRange.upperBound).x
+        #expect(
+            followingTextX >= formulaX + artifact.size.width - 1,
+            "行内公式没有为 SVG 宽度预留足够的 TextKit advance"
+        )
+        #expect(inlineMathPixelCount(of: fragment) > 0)
+        #expect(storage.string == source)
+    }
+
+    @Test func invalidInlineMathKeepsEditableSourceVisible() async {
+        let source = #"正文 $\notARealCommand{x}$ 结尾"#
+        let storage = NSTextStorage(string: source)
+        let formula = (source as NSString).range(of: "$\\notARealCommand")
+
+        let package = engine.prepare(source)
+        await prepareMath(in: package)
+        _ = engine.render(
+            package: package,
+            selection: NSRange(location: storage.length, length: 0),
+            into: storage
+        )
+
+        #expect(storage.attribute(.museMathArtifact, at: formula.location, effectiveRange: nil) == nil)
+        #expect(!isHidden(formula.location, in: storage))
+        #expect(storage.attribute(.kern, at: formula.location, effectiveRange: nil) == nil)
+        #expect(storage.string == source)
+    }
+
+    @Test func blockMathUsesOneTextKit2FragmentAndDrawsCachedFormula() async throws {
+        let source = "$$\n\\frac{a^2+b^2}{c^2}\n$$\n\n正文"
+        let storage = NSTextStorage(string: source)
+        let textView = EditorTextView.make(textStorage: storage)
+        textView.frame = NSRect(x: 0, y: 0, width: 640, height: 320)
+        textView.textContainer?.containerSize = NSSize(
+            width: 640,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+
+        let package = engine.prepare(source)
+        await prepareMath(in: package)
+        _ = engine.render(
+            package: package,
+            selection: NSRange(location: storage.length, length: 0),
+            into: storage
+        )
+
+        #expect(storage.string == source)
+        #expect(storage.attribute(.museBlock, at: 0, effectiveRange: nil) as? String
+                == BlockVisual.math.rawValue)
+        let fragments = customFragments(in: textView).filter {
+            $0.blockKind == BlockVisual.math.rawValue
+        }
+        let fragment = try #require(fragments.first)
+        #expect(fragments.count == 1)
+        #expect(fragment.mathArtifact?.size.width ?? 0 > 1)
+        #expect(blockPixelCount(of: fragment) > 0)
+
+        _ = engine.render(
+            package: package,
+            selection: NSRange(location: 5, length: 0),
+            into: storage
+        )
+        #expect(storage.attribute(.museBlock, at: 0, effectiveRange: nil) == nil)
+        #expect(!isHidden(0, in: storage))
+        #expect(storage.string == source)
+    }
+
+    @Test(
+        "竞品常见的复杂块公式应生成渲染产物",
+        arguments: [
+            #"\boldsymbol{O}^{(h)}_i=\mathrm{softmax}\!\left(\frac{\boldsymbol{Q}^{(h)}_i \boldsymbol{K}^{(r)}[\mathcal{I}^{(r)}_i]^\top}{\sqrt{d_h}}\right)\boldsymbol{V}^{(r)}[\mathcal{I}^{(r)}_i]"#,
+            #"\mathcal{L}_{\text{KL}}=\frac{1}{NH_{kv}}\sum_{i=1}^{N}\sum_{r=1}^{H_{kv}} D_{\text{KL}}\!\big(\mathrm{stopgrad}(P^{(r)}_{i,\cdot})\,\big\Vert\, P^{\text{idx},(r)}_{i,\cdot}\big)"#,
+            #"M^{\text{idx},(r)}_{i,b}=\max_{\substack{j\in\mathcal{B}_b\\ j\leqslant i}} S^{\text{idx},(r)}_{i,j},\qquad \mathcal{I}^{(r)}_i=\mathrm{TopK}_{b}\big(M^{\text{idx},(r)}_{i,\cdot},k\big)"#,
+        ]
+    )
+    func complexBlockMathRenders(_ expression: String) async throws {
+        let source = "$$\n\(expression)\n$$"
+        let storage = NSTextStorage(string: source)
+        let textView = EditorTextView.make(textStorage: storage)
+        textView.frame = NSRect(x: 0, y: 0, width: 720, height: 280)
+        textView.textContainer?.containerSize = NSSize(
+            width: 720,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+
+        let package = engine.prepare(source)
+        await prepareMath(in: package)
+        _ = engine.render(
+            package: package,
+            selection: nil,
+            into: storage
+        )
+
+        let artifact = try #require(
+            storage.attribute(.museMathArtifact, at: 0, effectiveRange: nil)
+                as? MathRenderArtifact
+        )
+        #expect(artifact.size.width > 1)
+        #expect(storage.attribute(.museBlock, at: 0, effectiveRange: nil) as? String
+                == BlockVisual.math.rawValue)
+        let fragment = try #require(customFragments(in: textView).first {
+            $0.blockKind == BlockVisual.math.rawValue
+        })
+        #expect(blockPixelCount(of: fragment) > 0)
+        #expect(storage.string == source)
     }
 
     @Test func renderedModeRestoresPreviewAfterSourceMode() {
@@ -1845,6 +2039,45 @@ import Testing
                 if pixel.contains(where: { $0 != 0xFF }) {
                     count += 1
                 }
+            }
+        }
+        return count
+    }
+
+    private func inlineMathPixelCount(of fragment: MuseLayoutFragment) -> Int {
+        let width = 640
+        let height = 160
+        guard let bitmap = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: width,
+            pixelsHigh: height,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bitmapFormat: [],
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ), let graphics = NSGraphicsContext(bitmapImageRep: bitmap) else { return 0 }
+
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = graphics
+        NSColor.white.setFill()
+        NSRect(x: 0, y: 0, width: width, height: height).fill()
+        fragment.drawInlineMathVisuals(at: CGPoint(x: 20, y: 40), in: graphics.cgContext)
+        graphics.flushGraphics()
+        NSGraphicsContext.restoreGraphicsState()
+
+        guard let data = bitmap.bitmapData else { return 0 }
+        let bytesPerPixel = max(1, bitmap.bitsPerPixel / 8)
+        var count = 0
+        for row in 0..<bitmap.pixelsHigh {
+            let rowStart = row * bitmap.bytesPerRow
+            for column in 0..<bitmap.pixelsWide {
+                let pixelStart = rowStart + column * bytesPerPixel
+                let pixel = UnsafeBufferPointer(start: data + pixelStart, count: bytesPerPixel)
+                if pixel.contains(where: { $0 != 0xFF }) { count += 1 }
             }
         }
         return count

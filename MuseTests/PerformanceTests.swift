@@ -82,6 +82,17 @@ import Testing
         try measure(kb: 200)
     }
 
+    @Test func perf200KBWithSparseMath() {
+        let source = "$x^2 + y^2$\n\n" + Self.corpus(kb: 200)
+        let duration = clock.measure {
+            _ = RenderEngine().prepare(source)
+        }
+        let elapsed = ms(duration)
+        print("[PERF] 200KB + 稀疏公式解析: \(elapsed) ms")
+        // 公式 AST 只能按候选叶节点付费，不能因一个 `$…$` 复制整棵大文档 AST。
+        #expect(elapsed < Self.fullPipelineBudgetMilliseconds)
+    }
+
     @Test func perf1MBSmoke() throws {
         let source = Self.corpus(kb: 1024)
         let parseDuration = clock.measure {

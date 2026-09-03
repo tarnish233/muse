@@ -16,6 +16,10 @@ public nonisolated struct Token: Equatable, Sendable {
         case strong
         case emphasis
         case inlineCode
+        /// `$…$` 行内公式。LaTeX 正文由 swift-markdown AST 随 token 携带。
+        case inlineMath
+        /// `$$…$$` 块级公式；lastLine 是闭合分隔符所在源码行。
+        case blockMath(lastLine: Int)
         case strikethrough
         case link
         case image
@@ -42,6 +46,10 @@ public nonisolated struct Token: Equatable, Sendable {
     /// 独占一行的图片按「块图片」呈现：整段折叠、行高撑成图片高度。夹在正文里的
     /// 图片保持语法呈现——判定在 AST 层做一次，渲染层与显隐层读同一个答案。
     public let isBlockImage: Bool
+    /// 公式 AST 节点给出的 LaTeX 正文（仅 `.inlineMath` / `.blockMath`）。
+    ///
+    /// 不从绘制回调重新扫描源码；这也是渲染层唯一消费的公式输入。
+    public let mathExpression: String?
     /// 所属行（0-based，按 \n 分隔）。
     public let line: Int
 
@@ -53,6 +61,7 @@ public nonisolated struct Token: Equatable, Sendable {
         linkDestination: Range<Int>? = nil,
         extraMarkerRanges: [Range<Int>] = [],
         isBlockImage: Bool = false,
+        mathExpression: String? = nil,
         line: Int
     ) {
         self.kind = kind
@@ -62,6 +71,7 @@ public nonisolated struct Token: Equatable, Sendable {
         self.linkDestination = linkDestination
         self.extraMarkerRanges = extraMarkerRanges
         self.isBlockImage = isBlockImage
+        self.mathExpression = mathExpression
         self.line = line
     }
 
@@ -96,6 +106,8 @@ public nonisolated struct Token: Equatable, Sendable {
     /// 直接改路径；点击仍然弹预览。
     public var markerVisibilityRanges: [Range<Int>] {
         if let inline = inlineImageRange { return [inline] }
+        if case .inlineMath = kind { return [sourceRange] }
+        if case .blockMath = kind { return [sourceRange] }
         if case .image = kind { return [] }
         return allMarkerRanges
     }
@@ -110,9 +122,9 @@ public nonisolated struct Token: Equatable, Sendable {
     /// marker 是否属于块级（其显隐由"光标是否在本行/块内"决定，而非选区相交）。
     public var isBlockMarker: Bool {
         switch kind {
-        case .heading, .unorderedListItem, .orderedListItem, .taskListItem, .blockquote, .codeFence, .table, .rule:
+        case .heading, .unorderedListItem, .orderedListItem, .taskListItem, .blockquote, .codeFence, .table, .blockMath, .rule:
             return true
-        case .strong, .emphasis, .inlineCode, .strikethrough, .link, .image:
+        case .strong, .emphasis, .inlineCode, .inlineMath, .strikethrough, .link, .image:
             return false
         }
     }

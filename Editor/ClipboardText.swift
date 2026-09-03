@@ -46,7 +46,8 @@ enum ClipboardText {
                 return [replacement(token.markerRange, with: "\(number). ")].compactMap { $0 }
             case let .taskListItem(_, checked):
                 return [replacement(token.markerRange, with: checked ? "☑ " : "☐ ")].compactMap { $0 }
-            case .codeFence, .strong, .emphasis, .inlineCode, .strikethrough, .link, .image:
+            case .codeFence, .strong, .emphasis, .inlineCode, .inlineMath, .blockMath,
+                 .strikethrough, .link, .image:
                 return [
                     replacement(token.markerRange),
                     replacement(token.closingMarkerRange),

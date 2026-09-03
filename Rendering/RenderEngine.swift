@@ -73,7 +73,7 @@ public struct RenderEngine {
                 switch token.kind {
                 case .table(let lastLine):
                     return startLine...max(startLine, min(lastLine, max(0, lineStarts.count - 1)))
-                case .codeFence:
+                case .codeFence, .blockMath:
                     let end = token.contentRange?.upperBound ?? token.markerRange.upperBound
                     return startLine...max(startLine, lineIndex(atUTF8: end))
                 default:
@@ -102,7 +102,7 @@ public struct RenderEngine {
                 maxEndLine = max(maxEndLine, lineRange.upperBound)
                 prefixMaxEndLines.append(maxEndLine)
                 switch token.kind {
-                case .codeFence, .table:
+                case .codeFence, .table, .blockMath:
                     structuralRanges.append(lineRange)
                 case let .blockquote(depth):
                     quoteDepths[token.line] = max(quoteDepths[token.line] ?? 0, depth)
@@ -254,6 +254,41 @@ public struct RenderEngine {
         storage.endEditing()
 
         return Stats(tokenCount: package.tokens.count)
+    }
+
+    /// 把异步完成的 MathJax 产物落到对应公式区间。
+    ///
+    /// 这里只访问 AST 已识别的公式 token，并重算这些 token 的当前显隐；不重写正文、
+    /// 不扫描属性之外的源码，也不把一次公式完成退化成整篇属性重建。
+    @discardableResult
+    public func refreshMathArtifacts(
+        package: Package,
+        selection: NSRange?,
+        revealsCurrentBlockSource: Bool = true,
+        into storage: NSTextStorage
+    ) -> Int {
+        let mathTokens = package.tokens.filter { $0.mathExpression != nil }
+        guard !mathTokens.isEmpty else { return 0 }
+
+        let context = StyleContext(
+            storage: storage,
+            package: package,
+            imageBaseURL: nil,
+            theme: theme
+        )
+        storage.beginEditing()
+        for token in mathTokens {
+            applyMathStyle(token, package: package, into: storage, context: context)
+        }
+        for entry in computedVisibility(
+            package: package,
+            selection: selection,
+            revealsCurrentBlockSource: revealsCurrentBlockSource
+        ) where entry.mathRange != nil {
+            apply(entry, imageBaseURL: nil, into: storage)
+        }
+        storage.endEditing()
+        return mathTokens.count
     }
 
     // MARK: - 脏行增量应用（输入热路径）
@@ -488,6 +523,12 @@ public struct RenderEngine {
         /// 行内图片的 `![` 与 `](目的地)` 子区间（回显时恢复源码字体）。
         public let imageMarkerSubRange: NSRange?
         public let imageClosingSubRange: NSRange?
+        /// 公式源码的完整范围；非公式为 nil。
+        public let mathRange: NSRange?
+        public let mathMarkerSubRange: NSRange?
+        public let mathClosingSubRange: NSRange?
+        public let mathContentSubRange: NSRange?
+        public let mathIsBlock: Bool
 
         init(
             line: Int,
@@ -497,7 +538,12 @@ public struct RenderEngine {
             listDepth: Int?,
             inlineImageRange: NSRange? = nil,
             imageMarkerSubRange: NSRange? = nil,
-            imageClosingSubRange: NSRange? = nil
+            imageClosingSubRange: NSRange? = nil,
+            mathRange: NSRange? = nil,
+            mathMarkerSubRange: NSRange? = nil,
+            mathClosingSubRange: NSRange? = nil,
+            mathContentSubRange: NSRange? = nil,
+            mathIsBlock: Bool = false
         ) {
             self.line = line
             self.markerRelOffset = markerRelOffset
@@ -507,6 +553,11 @@ public struct RenderEngine {
             self.inlineImageRange = inlineImageRange
             self.imageMarkerSubRange = imageMarkerSubRange
             self.imageClosingSubRange = imageClosingSubRange
+            self.mathRange = mathRange
+            self.mathMarkerSubRange = mathMarkerSubRange
+            self.mathClosingSubRange = mathClosingSubRange
+            self.mathContentSubRange = mathContentSubRange
+            self.mathIsBlock = mathIsBlock
         }
     }
 
@@ -531,6 +582,31 @@ public struct RenderEngine {
                     inlineImageRange: spanNS,
                     imageMarkerSubRange: package.index.nsRange(token.markerRange),
                     imageClosingSubRange: token.closingMarkerRange.map(package.index.nsRange)
+                )]
+            }
+            let isBlockMath: Bool
+            switch token.kind {
+            case .inlineMath:
+                isBlockMath = false
+            case .blockMath:
+                isBlockMath = true
+            default:
+                isBlockMath = false
+            }
+            if token.mathExpression != nil {
+                let span = package.index.nsRange(token.sourceRange)
+                let identity = markerIdentity(for: token.sourceRange, package: package)
+                return [VisibilityEntry(
+                    line: identity.line,
+                    markerRelOffset: identity.relOffset,
+                    markerNS: span,
+                    state: state,
+                    listDepth: nil,
+                    mathRange: span,
+                    mathMarkerSubRange: package.index.nsRange(token.markerRange),
+                    mathClosingSubRange: token.closingMarkerRange.map(package.index.nsRange),
+                    mathContentSubRange: token.contentRange.map(package.index.nsRange),
+                    mathIsBlock: isBlockMath
                 )]
             }
             return token.markerVisibilityRanges.map { range in
@@ -587,6 +663,8 @@ public struct RenderEngine {
                     onCaret = touches(blockRange(token, package: package), selection: selection)
                 } else if case .codeFence = token.kind {
                     onCaret = tokenLineRange(token, package: package).contains(caretLine) // 光标在围栏块任意行
+                } else if case .blockMath = token.kind {
+                    onCaret = tokenLineRange(token, package: package).contains(caretLine)
                 } else {
                     onCaret = token.line == caretLine
                 }
@@ -770,6 +848,140 @@ public struct RenderEngine {
               let numbers = storage.attribute(.museImageSize, at: location, effectiveRange: nil) as? [NSNumber],
               numbers.count == 2 else { return nil }
         return NSSize(width: numbers[0].doubleValue, height: numbers[1].doubleValue)
+    }
+
+    /// 公式源码与原生绘制产物之间的显隐切换。
+    ///
+    /// 行内公式用开分隔符上的 kern 预留宽度；块公式只让首段落保留公式高度，后续
+    /// 源码段落折叠到 0.1pt。无效 LaTeX 没有 artifact，始终保留源码，避免空白丢失。
+    func applyMathVisibility(
+        state: MarkerState,
+        span: NSRange,
+        markerSubRange: NSRange?,
+        closingSubRange: NSRange?,
+        contentSubRange: NSRange?,
+        isBlock: Bool,
+        into storage: NSTextStorage
+    ) {
+        guard span.location >= 0, span.length > 0, span.upperBound <= storage.length else { return }
+        let source = storage.string as NSString
+        let artifact = storage.attribute(.museMathArtifact, at: span.location, effectiveRange: nil)
+            as? MathRenderArtifact
+
+        func revealSource() {
+            storage.removeAttribute(.kern, range: span)
+            storage.addAttributes([
+                .font: theme.codeFont(),
+                .foregroundColor: theme.text,
+            ], range: span)
+            if let markerSubRange {
+                storage.addAttributes(Self.markerVisibilityAttributes(state: .revealed), range: markerSubRange)
+            }
+            if let closingSubRange {
+                storage.addAttributes(Self.markerVisibilityAttributes(state: .revealed), range: closingSubRange)
+            }
+            if let contentSubRange, contentSubRange.length > 0 {
+                storage.addAttributes([
+                    .font: theme.codeFont(),
+                    .foregroundColor: theme.text,
+                ], range: contentSubRange)
+            }
+            let paragraphs = source.paragraphRange(for: span)
+            let sourceParagraph = storage.attribute(
+                .museMathSourceParagraph,
+                at: span.location,
+                effectiveRange: nil
+            ) as? NSParagraphStyle ?? theme.baseParagraph()
+            if !isBlock {
+                restoreInlineMathParagraph(
+                    paragraphs,
+                    sourceParagraph: sourceParagraph,
+                    in: storage
+                )
+                return
+            }
+            storage.removeAttribute(.museBlock, range: paragraphs)
+            storage.addAttribute(.paragraphStyle, value: sourceParagraph, range: paragraphs)
+        }
+
+        guard state == .hidden, let artifact else {
+            revealSource()
+            return
+        }
+
+        storage.addAttributes(Self.markerVisibilityAttributes(state: .hidden), range: span)
+        if isBlock {
+            let allParagraphs = source.paragraphRange(for: span)
+            let firstParagraph = source.paragraphRange(for: NSRange(location: span.location, length: 0))
+            storage.addAttributes([
+                .museBlock: BlockVisual.math.rawValue,
+                .paragraphStyle: theme.mathParagraph(height: artifact.size.height),
+            ], range: firstParagraph)
+            let remainingStart = firstParagraph.upperBound
+            if remainingStart < allParagraphs.upperBound {
+                storage.addAttribute(
+                    .paragraphStyle,
+                    value: theme.collapsedMathParagraph(),
+                    range: NSRange(location: remainingStart, length: allParagraphs.upperBound - remainingStart)
+                )
+            }
+        } else {
+            // 近零字号源码仍提供稳定编辑位置。TextKit 2 会在整形时压缩单个超大 kern，
+            // 因此把公式宽度均匀分配到源码字符之间；不插入 U+FFFC，也不会维护第二份正文。
+            // 额外 2pt 抵消 TextKit 的字形边界舍入，并给公式与后文留出最小呼吸空间。
+            // 末字符不加 kern，所有预留仍属于公式源码自身。
+            let kernCount = max(1, span.length - 1)
+            let reservedWidth = artifact.size.width + 2
+            storage.addAttribute(
+                .kern,
+                value: NSNumber(value: Double(reservedWidth / CGFloat(kernCount))),
+                range: NSRange(location: span.location, length: kernCount)
+            )
+            let paragraph = source.paragraphRange(for: span)
+            let sourceParagraph = storage.attribute(
+                .museMathSourceParagraph,
+                at: span.location,
+                effectiveRange: nil
+            ) as? NSParagraphStyle ?? theme.baseParagraph()
+            restoreInlineMathParagraph(
+                paragraph,
+                sourceParagraph: sourceParagraph,
+                in: storage
+            )
+        }
+    }
+
+    /// 从当前段落里仍处于隐藏态的行内公式重新推导行高。这样同一段有多个公式时，
+    /// 回显其中一个不会挤压其他公式；最后一个公式回显后则恢复原始段落样式。
+    private func restoreInlineMathParagraph(
+        _ paragraph: NSRange,
+        sourceParagraph: NSParagraphStyle,
+        in storage: NSTextStorage
+    ) {
+        let restored = sourceParagraph.mutableCopy() as? NSMutableParagraphStyle
+            ?? theme.baseParagraph()
+        var maximumFormulaHeight: CGFloat = 0
+        storage.enumerateAttribute(.museMathArtifact, in: paragraph) { value, range, _ in
+            guard let artifact = value as? MathRenderArtifact,
+                  range.length > 0,
+                  let display = storage.attribute(
+                    .museMathDisplay,
+                    at: range.location,
+                    effectiveRange: nil
+                  ) as? NSNumber,
+                  !display.boolValue,
+                  let font = storage.attribute(.font, at: range.location, effectiveRange: nil) as? NSFont,
+                  font.pointSize < 1
+            else { return }
+            maximumFormulaHeight = max(maximumFormulaHeight, artifact.size.height)
+        }
+        if maximumFormulaHeight > 0 {
+            restored.minimumLineHeight = max(
+                restored.minimumLineHeight,
+                maximumFormulaHeight + 2
+            )
+        }
+        storage.addAttribute(.paragraphStyle, value: restored, range: paragraph)
     }
 
     // MARK: - 样式
@@ -1118,6 +1330,9 @@ public struct RenderEngine {
                 .backgroundColor: theme.codeBackground,
             ], range: content)
 
+        case .inlineMath, .blockMath:
+            applyMathStyle(token, package: package, into: storage, context: context)
+
         case .link:
             storage.addAttributes([
                 .foregroundColor: theme.linkColor,
@@ -1139,6 +1354,53 @@ public struct RenderEngine {
         case .rule:
             break // 已在 content guard 之前处理（分隔线无内容区间）
         }
+    }
+
+    // MARK: - 公式
+
+    /// AST token → MathJax 缓存产物。这里只读取已经异步准备好的 SVG，不等待 WebKit。
+    private func applyMathStyle(
+        _ token: Token,
+        package: Package,
+        into storage: NSTextStorage,
+        context: StyleContext
+    ) {
+        guard let expression = token.mathExpression else { return }
+        let isBlock: Bool
+        switch token.kind {
+        case .blockMath:
+            isBlock = true
+        case .inlineMath:
+            isBlock = false
+        default:
+            return
+        }
+
+        let span = package.index.nsRange(token.sourceRange)
+        guard span.location >= 0, span.length > 0, span.upperBound <= storage.length else { return }
+        let sourceParagraph = storage.attribute(.museMathSourceParagraph, at: span.location, effectiveRange: nil)
+            as? NSParagraphStyle
+            ?? storage.attribute(.paragraphStyle, at: span.location, effectiveRange: nil) as? NSParagraphStyle
+            ?? theme.baseParagraph()
+        storage.addAttributes([
+            .museMathDisplay: NSNumber(value: isBlock),
+            .museMathSourceParagraph: sourceParagraph,
+        ], range: span)
+
+        let request = MathRenderer.shared.request(expression: expression, display: isBlock)
+        guard let artifact = MathRenderer.shared.cachedArtifact(for: request) else {
+            // 解析失败时不制造空白：保留可编辑源码，并把分隔符弱化。
+            storage.addAttributes([
+                .font: context.codeFont,
+                .foregroundColor: theme.text,
+            ], range: span)
+            storage.addAttributes([.foregroundColor: theme.markerText], range: package.index.nsRange(token.markerRange))
+            if let closing = token.closingMarkerRange {
+                storage.addAttributes([.foregroundColor: theme.markerText], range: package.index.nsRange(closing))
+            }
+            return
+        }
+        storage.addAttribute(.museMathArtifact, value: artifact, range: span)
     }
 
     // MARK: - 图片
@@ -1374,6 +1636,18 @@ public struct RenderEngine {
         into storage: NSTextStorage,
         skipHiddenListParagraph: Bool = false
     ) {
+        if let math = entry.mathRange {
+            applyMathVisibility(
+                state: entry.state,
+                span: math,
+                markerSubRange: entry.mathMarkerSubRange,
+                closingSubRange: entry.mathClosingSubRange,
+                contentSubRange: entry.mathContentSubRange,
+                isBlock: entry.mathIsBlock,
+                into: storage
+            )
+            return
+        }
         if let inline = entry.inlineImageRange {
             applyInlineImageVisibility(
                 state: entry.state,
@@ -1403,7 +1677,7 @@ public struct RenderEngine {
     /// token 覆盖的行区间。普通 token 从实际 UTF-8 源码范围推导，支持 soft line break。
     private func tokenLineRange(_ token: Token, package: Package) -> ClosedRange<Int> {
         switch token.kind {
-        case .codeFence:
+        case .codeFence, .blockMath:
             let end = token.contentRange?.upperBound ?? token.markerRange.upperBound
             let closeLine = lineIndex(atUTF8: end, package: package)
             return token.line...closeLine

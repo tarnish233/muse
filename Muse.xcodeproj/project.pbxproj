@@ -78,6 +78,7 @@
 			explicitFileTypes = {
 			};
 			explicitFolders = (
+				MathJax,
 			);
 			path = Rendering;
 			sourceTree = "<group>";
@@ -624,10 +625,10 @@
 /* Begin XCRemoteSwiftPackageReference section */
 		AA0000000000000000000001 /* XCRemoteSwiftPackageReference "swift-markdown" */ = {
 			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/swiftlang/swift-markdown";
+			repositoryURL = "https://github.com/aleroot/swift-markdown.git";
 			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 0.6.0;
+				kind = revision;
+				revision = f8788449125d87db951fd85d6fd2a47e7bb0e042;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */

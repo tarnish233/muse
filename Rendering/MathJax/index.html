@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; script-src 'self' 'unsafe-inline' file:; style-src 'unsafe-inline'; img-src data:; font-src 'self' file: data:; connect-src 'none'">
+  <script>
+    let resolveMathJax;
+    let rejectMathJax;
+    window.museMathState = 'configuring';
+    window.museMathReady = new Promise((resolve, reject) => {
+      resolveMathJax = resolve;
+      rejectMathJax = reject;
+    });
+    window.MathJax = {
+      tex: {
+        packages: { '[-]': ['noerrors', 'noundefined'] }
+      },
+      startup: {
+        typeset: false
+      },
+      svg: {
+        fontCache: 'local'
+      }
+    };
+
+    function didLoadMathJax() {
+      window.museMathState = 'script-loaded';
+      MathJax.startup.promise.then(() => {
+        window.museMathState = 'ready';
+        resolveMathJax();
+      }, error => {
+        window.museMathState = `startup-error: ${String(error)}`;
+        rejectMathJax(error);
+      });
+    }
+
+    const mathJaxScript = document.createElement('script');
+    mathJaxScript.async = true;
+    mathJaxScript.src = 'mathjax.js';
+    mathJaxScript.onload = didLoadMathJax;
+    mathJaxScript.onerror = () => {
+      window.museMathState = 'script-error';
+      rejectMathJax(new Error('MathJax failed to load'));
+    };
+    document.head.appendChild(mathJaxScript);
+
+    window.museMathBridge = {
+      render(id, expression, display, fontSize) {
+        this.renderAsync(id, expression, display, fontSize).then(
+          result => window.webkit.messageHandlers.mathResult.postMessage({ id, result }),
+          error => window.webkit.messageHandlers.mathResult.postMessage({
+            id,
+            failure: String(error),
+            state: window.museMathState
+          })
+        );
+        return true;
+      },
+
+      async renderAsync(id, expression, display, fontSize) {
+        await Promise.race([
+          window.museMathReady,
+          new Promise((_, reject) => setTimeout(
+            () => reject(new Error(`MathJax startup timed out (${window.museMathState})`)),
+            5000
+          ))
+        ]);
+        const container = await MathJax.tex2svgPromise(expression, { display });
+        if (container.querySelector('[data-mml-node="merror"], mjx-merror')) {
+          return { error: 'invalid-tex' };
+        }
+
+        container.style.position = 'absolute';
+        container.style.visibility = 'hidden';
+        container.style.fontSize = `${fontSize}px`;
+        container.style.color = '#000';
+        document.body.appendChild(container);
+
+        const svg = container.querySelector('svg');
+        if (!svg) {
+          container.remove();
+          return { error: 'missing-svg' };
+        }
+        const rect = svg.getBoundingClientRect();
+        const verticalAlign = Number.parseFloat(getComputedStyle(svg).verticalAlign) || 0;
+        svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+        svg.setAttribute('width', rect.width.toFixed(3));
+        svg.setAttribute('height', rect.height.toFixed(3));
+        svg.setAttribute('color', '#000');
+        svg.removeAttribute('style');
+
+        const serialized = new XMLSerializer()
+          .serializeToString(svg)
+          .replaceAll('currentColor', '#000000');
+        container.remove();
+        return {
+          svg: serialized,
+          width: rect.width,
+          height: rect.height,
+          verticalAlign
+        };
+      }
+    };
+  </script>
+</head>
+<body></body>
+</html>

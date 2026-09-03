@@ -83,6 +83,30 @@ import Testing
         #expect(RenderEngine.imageSize(in: storage, at: 0) == NSSize(width: 1, height: 1))
     }
 
+    /// 公式首次解析不阻塞属性应用；本地 MathJax 完成后，协调器只刷新公式属性并
+    /// 保持正文字符不变。表达式覆盖 iosMath 需要别名改写才能勉强支持的命令。
+    @Test func localMathJaxPreparesComplexFormulaAndRefreshesStorage() async throws {
+        let expression = #"M^{\text{idx},(r)}_{i,b}=\max_{\substack{j\in\mathcal{B}_b\\ j\leqslant i}} S^{\text{idx},(r)}_{i,j},\qquad \boldsymbol{Q}^{(r)}"#
+        let source = "$$\n\(expression)\n$$"
+        let storage = NSTextStorage(string: source)
+        let coordinator = RenderCoordinator()
+        coordinator.attach(storage: storage)
+        coordinator.onTextEdited = {}
+
+        storage.replaceCharacters(in: NSRange(location: 0, length: storage.length), with: source)
+        #expect(await waitForApplied(coordinator, atLeast: 1))
+        await coordinator.waitForMathPreparationForTesting()
+
+        let artifact = try #require(
+            storage.attribute(.museMathArtifact, at: 0, effectiveRange: nil)
+                as? MathRenderArtifact
+        )
+        #expect(artifact.size.width > 1)
+        #expect(storage.attribute(.museBlock, at: 0, effectiveRange: nil) as? String
+                == BlockVisual.math.rawValue)
+        #expect(storage.string == source)
+    }
+
     @Test func outlineHighlightFollowsVisibleSectionInsteadOfCaret() async throws {
         let source = "导言\n\n# 第一章\n第一章正文\n\n## 第二节\n第二节正文"
         let storage = NSTextStorage(string: source)

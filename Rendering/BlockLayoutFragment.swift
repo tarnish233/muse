@@ -262,13 +262,18 @@ public nonisolated final class MuseLayoutFragment: NSTextLayoutFragment {
         drawTableDragFeedback(at: point, in: context)
         drawTableSelection(at: point, in: context)
         super.draw(at: point, in: context)
+        drawInlineMathVisuals(at: point, in: context)
     }
 
     /// 通宽背景/竖线会超出字形包围盒，必须先把渲染面扩到容器宽度，否则被裁掉。
     public override var renderingSurfaceBounds: CGRect {
         let base = super.renderingSurfaceBounds
+        var result = base
+        for frame in inlineMathFrames(at: .zero) {
+            result = result.union(frame)
+        }
         guard blockKind != nil, let width = textLayoutManager?.textContainer?.size.width else {
-            return base
+            return result
         }
         let containerLeft = -layoutFragmentFrame.minX
         // Hidden list markers are drawn immediately before the first content
@@ -278,7 +283,7 @@ public nonisolated final class MuseLayoutFragment: NSTextLayoutFragment {
         let markerExtension: CGFloat = blockKind?.hasPrefix(BlockVisual.list.rawValue + ":") == true
             ? ListMarkerGeometry.defaultMarkerLaneWidth
             : 0
-        var extended = base.union(CGRect(x: containerLeft - markerExtension, y: 0,
+        var extended = result.union(CGRect(x: containerLeft - markerExtension, y: 0,
                                          width: width + markerExtension, height: layoutFragmentFrame.height))
         // 代码围栏首末行把背景延伸出内边距（与撑出的段落间距互补），
         // 渲染面必须覆盖延伸区，否则延伸部分被裁掉。
@@ -303,6 +308,14 @@ public nonisolated final class MuseLayoutFragment: NSTextLayoutFragment {
                 y: 0,
                 width: max(size.width, 1),
                 height: max(layoutFragmentFrame.height, size.height)
+            ))
+        }
+        if blockKind == BlockVisual.math.rawValue, let artifact = mathArtifact {
+            extended = extended.union(CGRect(
+                x: 0,
+                y: 0,
+                width: max(artifact.size.width, 1),
+                height: max(layoutFragmentFrame.height, artifact.size.height)
             ))
         }
         if blockKind == BlockVisual.table.rawValue,
@@ -428,6 +441,11 @@ public nonisolated final class MuseLayoutFragment: NSTextLayoutFragment {
               let numbers = string.attribute(.museImageSize, at: 0, effectiveRange: nil) as? [NSNumber],
               numbers.count == 2 else { return nil }
         return CGSize(width: numbers[0].doubleValue, height: numbers[1].doubleValue)
+    }
+
+    var mathArtifact: MathRenderArtifact? {
+        guard let string = elementString, string.length > 0 else { return nil }
+        return string.attribute(.museMathArtifact, at: 0, effectiveRange: nil) as? MathRenderArtifact
     }
 
     /// 块图片预览命中与绘制共用同一个图片盒，避免折叠源码字形的窄范围与视觉图像分叉。
@@ -761,9 +779,133 @@ public nonisolated final class MuseLayoutFragment: NSTextLayoutFragment {
         case BlockVisual.image.rawValue:
             drawImage(at: point, in: context, palette: palette, left: left, height: height)
 
+        case BlockVisual.math.rawValue:
+            drawBlockMath(
+                at: point,
+                in: context,
+                palette: palette,
+                left: left,
+                width: width,
+                height: height
+            )
+
         default:
             break
         }
+        context.restoreGState()
+    }
+
+    /// `$$…$$`：公式居中画进属性层预留的独占行盒。
+    private func drawBlockMath(
+        at point: CGPoint,
+        in context: CGContext,
+        palette: BlockVisualPaletteSnapshot,
+        left: CGFloat,
+        width: CGFloat,
+        height: CGFloat
+    ) {
+        guard let artifact = mathArtifact else { return }
+        let availableWidth = max(1, width - (point.x - left))
+        let box = CGRect(
+            x: point.x + max(0, (availableWidth - artifact.size.width) / 2),
+            y: point.y + max(0, (height - artifact.size.height) / 2),
+            width: min(artifact.size.width, availableWidth),
+            height: artifact.size.height
+        )
+        drawMathImage(artifact.image, in: box, color: palette.text, context: context)
+    }
+
+    /// `$…$`：属性层已在源码首字符上预留宽度，这里只按真实行基线覆盖绘制。
+    /// 只画行内公式、不画普通字形。生产路径由 `draw(at:in:)` 调用；测试用它确认
+    /// 公式不是仅有占位宽度、而是真正由 TextKit 2 fragment 落墨。
+    public func drawInlineMathVisuals(at point: CGPoint, in context: CGContext) {
+        guard let string = elementString, string.length > 0 else { return }
+        let color = BlockVisualPalette.shared.snapshot().text
+        string.enumerateAttribute(
+            .museMathArtifact,
+            in: NSRange(location: 0, length: string.length),
+            options: []
+        ) { value, range, _ in
+            guard let artifact = value as? MathRenderArtifact,
+                  range.length > 0,
+                  let display = string.attribute(.museMathDisplay, at: range.location, effectiveRange: nil)
+                    as? NSNumber,
+                  !display.boolValue,
+                  let font = string.attribute(.font, at: range.location, effectiveRange: nil) as? NSFont,
+                  font.pointSize < 1,
+                  let line = lineFragment(containing: range.location)
+            else { return }
+            let x = point.x + line.locationForCharacter(at: range.location).x
+            let baseline = point.y + line.glyphOrigin.y
+            let box = CGRect(
+                x: x,
+                y: baseline - artifact.ascent,
+                width: artifact.size.width,
+                height: artifact.size.height
+            )
+            drawMathImage(artifact.image, in: box, color: color, context: context)
+        }
+    }
+
+    private func inlineMathFrames(at point: CGPoint) -> [CGRect] {
+        guard let string = elementString, string.length > 0 else { return [] }
+        var frames: [CGRect] = []
+        string.enumerateAttribute(
+            .museMathArtifact,
+            in: NSRange(location: 0, length: string.length),
+            options: []
+        ) { value, range, _ in
+            guard let artifact = value as? MathRenderArtifact,
+                  range.length > 0,
+                  let display = string.attribute(.museMathDisplay, at: range.location, effectiveRange: nil)
+                    as? NSNumber,
+                  !display.boolValue,
+                  let font = string.attribute(.font, at: range.location, effectiveRange: nil) as? NSFont,
+                  font.pointSize < 1,
+                  let line = lineFragment(containing: range.location)
+            else { return }
+            frames.append(CGRect(
+                x: point.x + line.locationForCharacter(at: range.location).x,
+                y: point.y + line.glyphOrigin.y - artifact.ascent,
+                width: artifact.size.width,
+                height: artifact.size.height
+            ))
+        }
+        return frames
+    }
+
+    /// TextKit 2 的 `locationForCharacter` 只对所属 line fragment 有定义。段落换行后，
+    /// 公式可能落在任意视觉行，不能固定取第一行。
+    private func lineFragment(containing location: Int) -> NSTextLineFragment? {
+        textLineFragments.first { line in
+            NSLocationInRange(location, line.characterRange)
+                || (line.characterRange.length == 0 && location == line.characterRange.location)
+        }
+    }
+
+    private func drawMathImage(
+        _ image: NSImage,
+        in box: CGRect,
+        color: CGColor,
+        context: CGContext
+    ) {
+        context.saveGState()
+        context.beginTransparencyLayer(auxiliaryInfo: nil)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: true)
+        image.draw(
+            in: box,
+            from: .zero,
+            operation: .sourceOver,
+            fraction: 1,
+            respectFlipped: true,
+            hints: nil
+        )
+        NSGraphicsContext.restoreGraphicsState()
+        context.setBlendMode(.sourceIn)
+        context.setFillColor(color)
+        context.fill(box)
+        context.endTransparencyLayer()
         context.restoreGState()
     }
 

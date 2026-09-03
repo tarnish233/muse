@@ -98,6 +98,82 @@ import Testing
         #expect(image.isBlockImage)
     }
 
+    // MARK: - 数学公式
+
+    @Test func inlineMathComesFromASTWithExactUTF8Ranges() throws {
+        let source = "甲 $x^2 + y^2$ 乙"
+        let token = try #require(engine.prepare(source).tokens.first { $0.kind == .inlineMath })
+        let bytes = Array(source.utf8)
+
+        #expect(String(decoding: bytes[token.markerRange], as: UTF8.self) == "$")
+        #expect(String(decoding: bytes[try #require(token.contentRange)], as: UTF8.self) == "x^2 + y^2")
+        #expect(String(decoding: bytes[try #require(token.closingMarkerRange)], as: UTF8.self) == "$")
+        #expect(token.mathExpression == "x^2 + y^2")
+        #expect(token.markerVisibilityRanges == [token.sourceRange])
+    }
+
+    @Test func multilineBlockMathCarriesASTExpressionAndLineSpan() throws {
+        let source = "$$\n\\frac{a}{b}\n$$"
+        let token = try #require(engine.prepare(source).tokens.first {
+            if case .blockMath = $0.kind { return true }
+            return false
+        })
+
+        #expect(token.kind == .blockMath(lastLine: 2))
+        #expect(token.markerRange == 0..<2)
+        #expect(token.closingMarkerRange == 15..<17)
+        #expect(token.sourceRange == 0..<17)
+        #expect(token.mathExpression == #"\frac{a}{b}"#)
+        #expect(token.isBlockMarker)
+    }
+
+    @Test func currencyAndInlineCodeDoNotBecomeMath() {
+        let package = engine.prepare("费用是 $5 与 $10；代码 `$x$`")
+        #expect(package.tokens.allSatisfy { token in
+            switch token.kind {
+            case .inlineMath, .blockMath:
+                return false
+            default:
+                return true
+            }
+        })
+        #expect(package.tokens.contains { $0.kind == .inlineCode })
+    }
+
+    @Test func inlineMathInsideEmphasisKeepsAbsoluteUTF8Range() throws {
+        let source = "**能量 $E=mc^2$ 关系**"
+        let bytes = Array(source.utf8)
+        let token = try #require(engine.prepare(source).tokens.first { $0.kind == .inlineMath })
+
+        #expect(String(decoding: bytes[token.sourceRange], as: UTF8.self) == "$E=mc^2$")
+        #expect(token.mathExpression == "E=mc^2")
+    }
+
+    @Test func blockMathInsideQuoteUsesASTContentAndSourceDelimiters() throws {
+        let source = "> $$\n> \\sum_i x_i\n> $$"
+        let bytes = Array(source.utf8)
+        let token = try #require(engine.prepare(source).tokens.first {
+            if case .blockMath = $0.kind { return true }
+            return false
+        })
+
+        #expect(String(decoding: bytes[token.markerRange], as: UTF8.self) == "$$")
+        #expect(String(decoding: bytes[try #require(token.closingMarkerRange)], as: UTF8.self) == "$$")
+        #expect(token.mathExpression == #"\sum_i x_i"#)
+    }
+
+    @Test func complexKLBlockMathIsRecognizedAsOneASTToken() throws {
+        let expression = #"\mathcal{L}_{\text{KL}}=\frac{1}{NH_{kv}}\sum_{i=1}^{N}\sum_{r=1}^{H_{kv}} D_{\text{KL}}\!\big(\mathrm{stopgrad}(P^{(r)}_{i,\cdot})\,\big\Vert\, P^{\text{idx},(r)}_{i,\cdot}\big)"#
+        let source = "$$\n\(expression)\n$$"
+        let token = try #require(engine.prepare(source).tokens.first {
+            if case .blockMath = $0.kind { return true }
+            return false
+        })
+
+        #expect(token.mathExpression == expression)
+        #expect(token.sourceRange == 0..<source.utf8.count)
+    }
+
     // MARK: - GFM 表格几何
 
     /// 单元格墨迹与结构区（`|` + 填充空白）的还原。列宽度量只能用墨迹，

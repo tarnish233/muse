@@ -74,6 +74,8 @@ public enum BlockVisual: String {
     /// 行内图片独占一行时的块呈现：字符全部折叠，图片由绘制层画在
     /// 段落撑出的行高里（tech-plan §4.7 的 Phase 2 路线）。
     case image
+    /// `$$…$$` 块级公式：源码折叠后由布局 fragment 绘制缓存的原生公式图。
+    case math
     /// 列表（含任务）：值带后缀 ":u"（无序）/":o"（有序）/":t"（任务）。
     case list
 }
@@ -122,6 +124,12 @@ extension NSAttributedString.Key {
     /// 图片语法的目的地字符串（渲染引擎写入整个 `![标签](目的地)` 区间），
     /// 点击预览据此解析图片，不重新解析源码。
     public nonisolated static let museImageDestination = NSAttributedString.Key("museImageDestination")
+    /// MathJax 在异步准备阶段生成的不可变 SVG 公式绘制产物。
+    public nonisolated static let museMathArtifact = NSAttributedString.Key("museMathArtifact")
+    /// NSNumber(Bool)：true 为块公式，false 为行内公式。
+    public nonisolated static let museMathDisplay = NSAttributedString.Key("museMathDisplay")
+    /// 公式隐藏前的段落样式，回显源码时恢复，避免破坏标题/引用等外层语义。
+    public nonisolated static let museMathSourceParagraph = NSAttributedString.Key("museMathSourceParagraph")
 }
 
 /// 主题：字体与配色。亮/暗跟随系统外观（动态 NSColor）。
@@ -397,6 +405,41 @@ public nonisolated struct Theme: @unchecked Sendable {
         return p
     }
 
+    /// 块公式的独占行盒。源码多行中的后续段落另用 `collapsedMathParagraph` 折叠，
+    /// 只有开分隔符所在 fragment 获得这一高度并绘制一次公式。
+    public func mathParagraph(height: CGFloat) -> NSMutableParagraphStyle {
+        let p = NSMutableParagraphStyle()
+        let font = baseFont()
+        let reserved = max(
+            height + Theme.mathPaddingVertical * 2,
+            font.ascender - font.descender + font.leading
+        )
+        p.minimumLineHeight = reserved
+        p.maximumLineHeight = reserved
+        p.lineHeightMultiple = 1
+        p.paragraphSpacing = 8
+        p.paragraphSpacingBefore = 8
+        p.lineBreakMode = .byClipping
+        return p
+    }
+
+    public func collapsedMathParagraph() -> NSMutableParagraphStyle {
+        let p = NSMutableParagraphStyle()
+        p.minimumLineHeight = 0.1
+        p.maximumLineHeight = 0.1
+        p.lineHeightMultiple = 1
+        p.paragraphSpacing = 0
+        p.paragraphSpacingBefore = 0
+        p.lineBreakMode = .byClipping
+        return p
+    }
+
+    public nonisolated static let mathPaddingVertical: CGFloat = 8
+    public nonisolated static let inlineMathFontSize: CGFloat = 17
+    public nonisolated static let blockMathFontSize: CGFloat = 21
+    public nonisolated static let blockMathMaximumWidth: CGFloat = 640
+    public nonisolated static let inlineMathMaximumWidth: CGFloat = 320
+
     public nonisolated static let imagePaddingVertical: CGFloat = 6
 
     /// 加载不到的图片（文件缺失 / 远程地址）的占位框尺寸。
@@ -434,6 +477,7 @@ public nonisolated struct Theme: @unchecked Sendable {
 /// `NSAppearance.current`，而 TextKit 还可能缓存并复用 fragment。颜色不能在
 /// fragment 内直接从动态 `NSColor` 取 `cgColor`，否则外观切换后可能静默回落亮色。
 public nonisolated struct BlockVisualPaletteSnapshot: @unchecked Sendable {
+    public let text: CGColor
     public let quoteBackground: CGColor
     public let codeBackground: CGColor
     public let marker: CGColor
@@ -479,6 +523,7 @@ public nonisolated final class BlockVisualPalette: @unchecked Sendable {
     private static func snapshot(for appearance: NSAppearance) -> BlockVisualPaletteSnapshot {
         let theme = Theme.standard
         return BlockVisualPaletteSnapshot(
+            text: resolvedCGColor(theme.text, for: appearance),
             quoteBackground: resolvedCGColor(theme.quoteBackground, for: appearance),
             codeBackground: resolvedCGColor(theme.codeBackground, for: appearance),
             marker: resolvedCGColor(theme.markerText, for: appearance),

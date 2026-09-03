@@ -87,6 +87,9 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
     private var needsImageRefresh = false
     private var imagePreparationTask: Task<Void, Never>?
     private var imagePreparationGeneration = 0
+    private var needsMathRefresh = false
+    private var mathPreparationTask: Task<Void, Never>?
+    private var mathPreparationGeneration = 0
     /// 渲染尚未追上输入时收到的表格导航命令。等最新 AST 落地后按顺序执行，避免
     /// 用旧的 UTF-16 区间跳到错误单元格；命令本身仍被消费，不会写进 Markdown。
     /// 若某条命令新增了表格行，剩余命令会继续等待下一份 AST，绝不复用旧坐标。
@@ -215,6 +218,8 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
     private func scheduleParse(storage: NSTextStorage) {
         revision += 1
         imagePreparationTask?.cancel()
+        mathPreparationTask?.cancel()
+        needsMathRefresh = false
 
         // `pendingDirtyRange` 已经随每次编辑重基到当前坐标系；本轮快照与范围属于同一 revision。
         // 旧解析即使在新输入之后完成，也会由 revision guard 丢弃，不能清空这份 pending 状态。
@@ -381,6 +386,7 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
         }
         drainPendingOutlineReveal()
         scheduleBlockImagePreparation(package: package, revision: rev)
+        scheduleMathPreparation(package: package, revision: rev)
     }
 
     private func scheduleBlockImagePreparation(
@@ -454,6 +460,63 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
               revision == requestedRevision
         else { return }
         imagePreparationTask = nil
+    }
+
+    private func scheduleMathPreparation(
+        package: RenderEngine.Package,
+        revision requestedRevision: Int
+    ) {
+        mathPreparationTask?.cancel()
+        mathPreparationGeneration += 1
+        let generation = mathPreparationGeneration
+        guard presentationMode == .rendered else {
+            mathPreparationTask = nil
+            return
+        }
+
+        let requests = Set(package.tokens.compactMap { token -> MathRenderRequest? in
+            guard let expression = token.mathExpression else { return nil }
+            let display: Bool
+            switch token.kind {
+            case .blockMath:
+                display = true
+            case .inlineMath:
+                display = false
+            default:
+                return nil
+            }
+            return MathRenderer.shared.request(expression: expression, display: display)
+        }).sorted {
+            if $0.display != $1.display { return $0.display && !$1.display }
+            return $0.expression < $1.expression
+        }
+        guard !requests.isEmpty else {
+            mathPreparationTask = nil
+            return
+        }
+
+        mathPreparationTask = Task(priority: .utility) { [weak self] in
+            guard let self else { return }
+            var preparedAny = false
+            for request in requests {
+                guard !Task.isCancelled,
+                      self.mathPreparationGeneration == generation,
+                      self.revision == requestedRevision
+                else { return }
+                if await MathRenderer.shared.prepare(request) {
+                    preparedAny = true
+                }
+            }
+            guard !Task.isCancelled,
+                  self.mathPreparationGeneration == generation,
+                  self.revision == requestedRevision
+            else { return }
+            self.mathPreparationTask = nil
+            if preparedAny {
+                self.needsMathRefresh = true
+                self.applyMathRefreshIfPossible()
+            }
+        }
     }
 
     // MARK: - 表格可视化编辑
@@ -1852,6 +1915,11 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
         await task?.value
     }
 
+    func waitForMathPreparationForTesting() async {
+        let task = mathPreparationTask
+        await task?.value
+    }
+
     func applyParsedForTesting(
         package: RenderEngine.Package,
         revision: Int,
@@ -1964,6 +2032,7 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
         resumeParsingAfterMarkedTextIfPossible()
         applyPresentationModeIfPossible()
         applyImageRefreshIfPossible()
+        applyMathRefreshIfPossible()
     }
 
     private func resumeParsingAfterMarkedTextIfPossible() {
@@ -2000,6 +2069,12 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
         }
         isApplyingAttributes = false
         appliedPresentationMode = presentationMode
+        if presentationMode == .rendered {
+            needsMathRefresh = false
+            scheduleMathPreparation(package: package, revision: revision)
+        } else {
+            mathPreparationTask?.cancel()
+        }
     }
 
     private func applyImageRefreshIfPossible() {
@@ -2026,8 +2101,33 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
         isApplyingAttributes = false
         appliedPresentationMode = presentationMode
         needsImageRefresh = false
+        needsMathRefresh = false
         revealCache.removeAll(keepingCapacity: true)
         lastReconcileWriteCount = 0
+    }
+
+    private func applyMathRefreshIfPossible() {
+        guard needsMathRefresh,
+              presentationMode == .rendered,
+              textView?.hasMarkedText() != true,
+              !isApplyingAttributes,
+              pendingDirtyRange == nil,
+              let package = lastPackage,
+              let storage = textStorage
+        else { return }
+
+        isApplyingAttributes = true
+        suppressUndo {
+            _ = engine.refreshMathArtifacts(
+                package: package,
+                selection: textView?.selectedRange(),
+                revealsCurrentBlockSource: revealsCurrentBlockSource,
+                into: storage
+            )
+            textView?.needsDisplay = true
+        }
+        isApplyingAttributes = false
+        needsMathRefresh = false
     }
 
     /// 侧边栏点击 heading 时调用：把选区放到标题行首并滚动可见。
@@ -2206,7 +2306,19 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
                     firstWrite = false
                 }
                 let markerNS = package.index.nsRange(range)
-                if token.inlineImageRange != nil {
+                if token.mathExpression != nil {
+                    let isBlock: Bool
+                    if case .blockMath = token.kind { isBlock = true } else { isBlock = false }
+                    engine.applyMathVisibility(
+                        state: .hidden,
+                        span: markerNS,
+                        markerSubRange: package.index.nsRange(token.markerRange),
+                        closingSubRange: token.closingMarkerRange.map(package.index.nsRange),
+                        contentSubRange: token.contentRange.map(package.index.nsRange),
+                        isBlock: isBlock,
+                        into: storage
+                    )
+                } else if token.inlineImageRange != nil {
                     engine.applyInlineImageVisibility(
                         state: .hidden,
                         span: markerNS,

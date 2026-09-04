@@ -446,12 +446,6 @@ public nonisolated enum ImageResolver {
         cache.removeImage(at: url)
     }
 
-    /// 仅查询内存缓存；渲染和绘制热路径必须使用它，不能访问磁盘。
-    public static func cachedLocalImage(url: URL) -> NSImage? {
-        guard url.isFileURL else { return nil }
-        return cachedImage(url: url)
-    }
-
     /// 在后台 actor 上检查文件版本并准备图片；返回缓存是否发生变化。
     @discardableResult
     public static func prepareLocalImage(url: URL) async -> Bool {
@@ -543,13 +537,6 @@ public nonisolated enum ImageResolver {
             }
         }
         return .unavailable(cacheChanged: false)
-    }
-
-    public static func prepareImage(destination: String, baseURL: URL?) async -> PreparationResult {
-        guard let url = resolvedURL(destination: destination, baseURL: baseURL) else {
-            return .unavailable(cacheChanged: false)
-        }
-        return await prepareImage(url: url)
     }
 
     /// 网络层与正文渲染之间的确定性测试缝：生产下载也经过同一解码和缓存入口。

@@ -423,7 +423,7 @@ import Testing
             return
         }
 
-        weak var releasedCoordinator = coordinator
+        weak let releasedCoordinator = coordinator
         storage.delegate = nil
         coordinator = nil
 
@@ -499,8 +499,8 @@ import Testing
         let firstExpression = "a_{\(suffix)}+1"
         let slowExpression = "z_{\(suffix)}+2"
         let source = "$\(firstExpression)$ 与 $\(slowExpression)$"
-        let firstRequest = MathRenderer.shared.request(expression: firstExpression, display: false)
-        let slowRequest = MathRenderer.shared.request(expression: slowExpression, display: false)
+        let firstRequest = MathRenderer.shared.request(expression: firstExpression, display: .inline)
+        let slowRequest = MathRenderer.shared.request(expression: slowExpression, display: .inline)
         #expect(MathRenderer.shared.cachedArtifact(for: firstRequest) == nil)
         #expect(MathRenderer.shared.cachedArtifact(for: slowRequest) == nil)
 
@@ -536,15 +536,15 @@ import Testing
                 is MathRenderArtifact)
     }
 
-    /// WebKit continuation 不响应 Task 取消：连续编辑取消协调器任务后，已经生成的
-    /// SVG 仍必须先进入缓存，不能把整次 MathJax 往返白白丢掉。
-    @Test func cancelledMathPreparationStillCachesCompletedArtifact() async throws {
+    /// 公式仍被当前文档引用时，连续编辑只让 storage 应用等待最新 AST，不应取消
+    /// 已经付出 WebKit 往返成本的准备任务；完成的 SVG 留在缓存供最新 package 消费。
+    @Test func mathPreparationSurvivesRevisionChangesAndCachesArtifact() async throws {
         let uniqueSuffix = UUID().uuidString.replacingOccurrences(of: "-", with: "")
         let source = "$$\nx_{\(uniqueSuffix)}+1\n$$\n\ntail"
         let package = engine.prepare(source)
         let token = try #require(package.tokens.first { $0.mathExpression != nil })
         let expression = try #require(token.mathExpression)
-        let request = MathRenderer.shared.request(expression: expression, display: true)
+        let request = MathRenderer.shared.request(expression: expression, display: .block)
         #expect(MathRenderer.shared.cachedArtifact(for: request) == nil)
 
         let gate = MathArtifactCacheGate()
@@ -597,7 +597,7 @@ import Testing
         let package = engine.prepare(source)
         let token = try #require(package.tokens.first { $0.mathExpression != nil })
         let expression = try #require(token.mathExpression)
-        let request = MathRenderer.shared.request(expression: expression, display: true)
+        let request = MathRenderer.shared.request(expression: expression, display: .block)
         #expect(MathRenderer.shared.cachedArtifact(for: request) == nil)
 
         let gate = MathArtifactCacheGate()

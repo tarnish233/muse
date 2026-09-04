@@ -1,21 +1,22 @@
 {
-  "originHash" : "5e47a66821e1117582524035d576c128ce37f36ddb730d4c8b279b266f2d5bae",
+  "originHash" : "01df6bc682cf354670db40124bd08e1a6075f673030fb789583e063647047f70",
   "pins" : [
     {
       "identity" : "swift-cmark",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/swiftlang/swift-cmark.git",
+      "location" : "https://github.com/tarnish233/swift-cmark.git",
       "state" : {
-        "branch" : "gfm",
-        "revision" : "7898f1b3e4befeecee56cb4a3bc8eebd2cb63219"
+        "revision" : "7898f1b3e4befeecee56cb4a3bc8eebd2cb63219",
+        "version" : "0.8.0-muse.1"
       }
     },
     {
       "identity" : "swift-markdown",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/aleroot/swift-markdown.git",
+      "location" : "https://github.com/tarnish233/swift-markdown.git",
       "state" : {
-        "revision" : "f8788449125d87db951fd85d6fd2a47e7bb0e042"
+        "revision" : "cc2306ca16dca6c0e504b9788a8aeca36f0c8859",
+        "version" : "0.8.0-muse.2"
       }
     }
   ],

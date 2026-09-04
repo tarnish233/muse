@@ -118,16 +118,8 @@ public struct RenderEngine {
                 default:
                     break
                 }
-                if let expression = token.mathExpression {
-                    let display: Bool
-                    switch token.kind {
-                    case .blockMath:
-                        display = true
-                    case .inlineMath:
-                        display = false
-                    default:
-                        continue
-                    }
+                if let expression = token.mathExpression,
+                   let display = token.mathDisplay {
                     computedMathTokenIndices.append(tokenIndex)
                     computedMathRequests.insert(MathRenderRequest(
                         expression: expression,
@@ -140,7 +132,7 @@ public struct RenderEngine {
             quoteDepthByLine = quoteDepths
             mathTokenIndices = computedMathTokenIndices
             mathRequests = computedMathRequests.sorted {
-                if $0.display != $1.display { return $0.display && !$1.display }
+                if $0.display != $1.display { return $0.display == .block }
                 return $0.expression < $1.expression
             }
         }
@@ -645,7 +637,7 @@ public struct RenderEngine {
         public let mathMarkerSubRange: NSRange?
         public let mathClosingSubRange: NSRange?
         public let mathContentSubRange: NSRange?
-        public let mathIsBlock: Bool
+        public let mathDisplay: MathDisplay?
 
         init(
             line: Int,
@@ -660,7 +652,7 @@ public struct RenderEngine {
             mathMarkerSubRange: NSRange? = nil,
             mathClosingSubRange: NSRange? = nil,
             mathContentSubRange: NSRange? = nil,
-            mathIsBlock: Bool = false
+            mathDisplay: MathDisplay? = nil
         ) {
             self.line = line
             self.markerRelOffset = markerRelOffset
@@ -674,7 +666,7 @@ public struct RenderEngine {
             self.mathMarkerSubRange = mathMarkerSubRange
             self.mathClosingSubRange = mathClosingSubRange
             self.mathContentSubRange = mathContentSubRange
-            self.mathIsBlock = mathIsBlock
+            self.mathDisplay = mathDisplay
         }
     }
 
@@ -690,16 +682,7 @@ public struct RenderEngine {
             if let entry = imageVisibilityEntry(token, package: package, state: state) {
                 return [entry]
             }
-            let isBlockMath: Bool
-            switch token.kind {
-            case .inlineMath:
-                isBlockMath = false
-            case .blockMath:
-                isBlockMath = true
-            default:
-                isBlockMath = false
-            }
-            if token.mathExpression != nil {
+            if token.mathExpression != nil, let display = token.mathDisplay {
                 let span = package.index.nsRange(token.sourceRange)
                 let identity = markerIdentity(for: token.sourceRange, package: package)
                 return [VisibilityEntry(
@@ -712,7 +695,7 @@ public struct RenderEngine {
                     mathMarkerSubRange: package.index.nsRange(token.markerRange),
                     mathClosingSubRange: token.closingMarkerRange.map(package.index.nsRange),
                     mathContentSubRange: token.contentRange.map(package.index.nsRange),
-                    mathIsBlock: isBlockMath
+                    mathDisplay: display
                 )]
             }
             return token.markerVisibilityRanges.map { range in
@@ -769,7 +752,7 @@ public struct RenderEngine {
                     onCaret = touches(blockRange(token, package: package), selection: selection)
                 } else if case .codeFence = token.kind {
                     onCaret = tokenLineRange(token, package: package).contains(caretLine) // 光标在围栏块任意行
-                } else if case .blockMath = token.kind {
+                } else if token.mathDisplay == .block {
                     onCaret = tokenLineRange(token, package: package).contains(caretLine)
                 } else {
                     onCaret = token.line == caretLine
@@ -840,13 +823,10 @@ public struct RenderEngine {
         selection: NSRange?,
         revealsCurrentBlockSource: Bool
     ) -> VisibilityEntry {
-        let isBlock: Bool
-        switch token.kind {
-        case .blockMath:
-            isBlock = true
-        default:
-            isBlock = false
+        guard let display = token.mathDisplay else {
+            preconditionFailure("mathVisibilityEntry requires a math token")
         }
+        let isBlock = display.isBlock
         let state: MarkerState
         if let selection {
             if isBlock {
@@ -885,7 +865,7 @@ public struct RenderEngine {
             mathMarkerSubRange: package.index.nsRange(token.markerRange),
             mathClosingSubRange: token.closingMarkerRange.map(package.index.nsRange),
             mathContentSubRange: token.contentRange.map(package.index.nsRange),
-            mathIsBlock: isBlock
+            mathDisplay: display
         )
     }
 
@@ -1067,13 +1047,14 @@ public struct RenderEngine {
         markerSubRange: NSRange?,
         closingSubRange: NSRange?,
         contentSubRange: NSRange?,
-        isBlock: Bool,
+        display: MathDisplay,
         into storage: NSTextStorage
     ) {
         guard span.location >= 0, span.length > 0, span.upperBound <= storage.length else { return }
         let source = storage.string as NSString
         let artifact = storage.attribute(.museMathArtifact, at: span.location, effectiveRange: nil)
             as? MathRenderArtifact
+        let isBlock = display.isBlock
 
         func revealSource() {
             storage.removeAttribute(.kern, range: span)
@@ -1710,21 +1691,14 @@ public struct RenderEngine {
         context: StyleContext
     ) {
         guard let expression = token.mathExpression else { return }
-        let isBlock: Bool
-        switch token.kind {
-        case .blockMath:
-            isBlock = true
-        case .inlineMath:
-            isBlock = false
-        default:
-            return
-        }
+        guard let display = token.mathDisplay else { return }
+        let isBlock = display.isBlock
 
         let span = package.index.nsRange(token.sourceRange)
         guard span.location >= 0, span.length > 0, span.upperBound <= storage.length else { return }
-        storage.addAttribute(.museMathDisplay, value: NSNumber(value: isBlock), range: span)
+        storage.addAttribute(.museMathDisplay, value: NSNumber(value: display.rawValue), range: span)
 
-        let request = MathRenderRequest(expression: expression, display: isBlock)
+        let request = MathRenderRequest(expression: expression, display: display)
         guard let artifact = MathRenderer.shared.cachedArtifact(for: request) else {
             // 解析失败时不制造空白：保留可编辑源码，并把分隔符弱化。
             storage.addAttributes([
@@ -1987,13 +1961,17 @@ public struct RenderEngine {
         skipHiddenListParagraph: Bool = false
     ) {
         if let math = entry.mathRange {
+            guard let display = entry.mathDisplay else {
+                assertionFailure("A math visibility entry requires MathDisplay")
+                return
+            }
             applyMathVisibility(
                 state: entry.state,
                 span: math,
                 markerSubRange: entry.mathMarkerSubRange,
                 closingSubRange: entry.mathClosingSubRange,
                 contentSubRange: entry.mathContentSubRange,
-                isBlock: entry.mathIsBlock,
+                display: display,
                 into: storage
             )
             return

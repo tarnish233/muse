@@ -625,10 +625,10 @@
 /* Begin XCRemoteSwiftPackageReference section */
 		AA0000000000000000000001 /* XCRemoteSwiftPackageReference "swift-markdown" */ = {
 			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/aleroot/swift-markdown.git";
+			repositoryURL = "https://github.com/tarnish233/swift-markdown.git";
 			requirement = {
-				kind = revision;
-				revision = f8788449125d87db951fd85d6fd2a47e7bb0e042;
+				kind = exactVersion;
+				version = "0.8.0-muse.2";
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */

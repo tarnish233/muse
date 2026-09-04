@@ -893,39 +893,27 @@ public nonisolated final class MuseLayoutFragment: NSTextLayoutFragment {
     /// 只画行内公式、不画普通字形。生产路径由 `draw(at:in:)` 调用；测试用它确认
     /// 公式不是仅有占位宽度、而是真正由 TextKit 2 fragment 落墨。
     public func drawInlineMathVisuals(at point: CGPoint, in context: CGContext) {
-        guard hasInlineMath, let string = elementString, string.length > 0 else { return }
         let color = BlockVisualPalette.shared.snapshot().text
-        string.enumerateAttribute(
-            .museMathArtifact,
-            in: NSRange(location: 0, length: string.length),
-            options: []
-        ) { value, range, _ in
-            guard let artifact = value as? MathRenderArtifact,
-                  range.length > 0,
-                  let display = string.attribute(.museMathDisplay, at: range.location, effectiveRange: nil)
-                    as? NSNumber,
-                  !display.boolValue,
-                  let font = string.attribute(.font, at: range.location, effectiveRange: nil) as? NSFont,
-                  font.pointSize < 1,
-                  let line = lineFragment(containing: range.location)
-            else { return }
-            let x = point.x
-                + line.typographicBounds.minX
-                + line.locationForCharacter(at: range.location).x
-            let baseline = point.y + line.typographicBounds.minY + line.glyphOrigin.y
-            let box = CGRect(
-                x: x,
-                y: baseline - artifact.ascent,
-                width: artifact.size.width,
-                height: artifact.size.height
-            )
-            drawMathImage(artifact.image, in: box, color: color, context: context)
+        for visual in inlineMathVisuals(at: point) {
+            drawMathImage(visual.artifact.image, in: visual.frame, color: color, context: context)
         }
     }
 
     func inlineMathFrames(at point: CGPoint) -> [CGRect] {
+        inlineMathVisuals(at: point).map(\.frame)
+    }
+
+    private struct InlineMathVisual {
+        let artifact: MathRenderArtifact
+        let frame: CGRect
+    }
+
+    /// The single geometry path used by both `renderingSurfaceBounds` and drawing.
+    /// Keeping the artifact paired with its measured box makes it impossible for the
+    /// TextKit clipping surface and the painted SVG to drift apart by a pixel.
+    private func inlineMathVisuals(at point: CGPoint) -> [InlineMathVisual] {
         guard hasInlineMath, let string = elementString, string.length > 0 else { return [] }
-        var frames: [CGRect] = []
+        var visuals: [InlineMathVisual] = []
         string.enumerateAttribute(
             .museMathArtifact,
             in: NSRange(location: 0, length: string.length),
@@ -933,22 +921,25 @@ public nonisolated final class MuseLayoutFragment: NSTextLayoutFragment {
         ) { value, range, _ in
             guard let artifact = value as? MathRenderArtifact,
                   range.length > 0,
-                  let display = string.attribute(.museMathDisplay, at: range.location, effectiveRange: nil)
+                  let displayNumber = string.attribute(.museMathDisplay, at: range.location, effectiveRange: nil)
                     as? NSNumber,
-                  !display.boolValue,
+                  MathDisplay(rawValue: displayNumber.intValue) == .inline,
                   let font = string.attribute(.font, at: range.location, effectiveRange: nil) as? NSFont,
                   font.pointSize < 1,
                   let line = lineFragment(containing: range.location)
             else { return }
-            frames.append(CGRect(
-                x: point.x + line.typographicBounds.minX
-                    + line.locationForCharacter(at: range.location).x,
-                y: point.y + line.typographicBounds.minY + line.glyphOrigin.y - artifact.ascent,
-                width: artifact.size.width,
-                height: artifact.size.height
+            visuals.append(InlineMathVisual(
+                artifact: artifact,
+                frame: CGRect(
+                    x: point.x + line.typographicBounds.minX
+                        + line.locationForCharacter(at: range.location).x,
+                    y: point.y + line.typographicBounds.minY + line.glyphOrigin.y - artifact.ascent,
+                    width: artifact.size.width,
+                    height: artifact.size.height
+                )
             ))
         }
-        return frames
+        return visuals
     }
 
     /// TextKit 2 的 `locationForCharacter` 只对所属 line fragment 有定义。段落换行后，

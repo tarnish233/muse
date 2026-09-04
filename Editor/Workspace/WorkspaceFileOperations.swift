@@ -27,7 +27,7 @@ actor WorkspaceFileOperations {
             let isSymbolicLink = try sourceURL.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink == true
             if isSourceDirectory.boolValue,
                !isSymbolicLink,
-               contains(parentURL, in: sourceURL)
+               WorkspacePath.contains(parentURL, in: sourceURL)
             {
                 throw WorkspaceOperationError.cannotCopyFolderIntoItself
             }
@@ -74,12 +74,5 @@ actor WorkspaceFileOperations {
             }
             copyNumber += 1
         }
-    }
-
-    private func contains(_ candidateURL: URL, in directoryURL: URL) -> Bool {
-        let candidateComponents = candidateURL.resolvingSymlinksInPath().pathComponents
-        let directoryComponents = directoryURL.resolvingSymlinksInPath().pathComponents
-        guard candidateComponents.count >= directoryComponents.count else { return false }
-        return candidateComponents.prefix(directoryComponents.count).elementsEqual(directoryComponents)
     }
 }

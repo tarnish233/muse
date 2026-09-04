@@ -1,5 +1,16 @@
 import Foundation
 
+/// The one semantic answer to whether a formula is inline or display math.
+///
+/// Parser tokens, cache requests, visibility, styling, and drawing all consume this value;
+/// none of those layers re-derive a Boolean with their own fallback behavior.
+public nonisolated enum MathDisplay: Int, Hashable, Sendable {
+    case inline
+    case block
+
+    public var isBlock: Bool { self == .block }
+}
+
 /// 源码 token。所有范围均为 UTF-8 字节偏移（与 swift-markdown/cmark 同一坐标系），
 /// 输出端经 SourceIndex 转成 UTF-16 NSRange 后才交给 AppKit。
 /// nonisolated：token 在后台解析（v0.2 并发与性能）与主线程渲染之间传递。
@@ -106,10 +117,20 @@ public nonisolated struct Token: Equatable, Sendable {
     /// 直接改路径；点击仍然弹预览。
     public var markerVisibilityRanges: [Range<Int>] {
         if let inline = inlineImageRange { return [inline] }
-        if case .inlineMath = kind { return [sourceRange] }
-        if case .blockMath = kind { return [sourceRange] }
+        if mathDisplay != nil { return [sourceRange] }
         if case .image = kind { return [] }
         return allMarkerRanges
+    }
+
+    public var mathDisplay: MathDisplay? {
+        switch kind {
+        case .inlineMath:
+            return .inline
+        case .blockMath:
+            return .block
+        default:
+            return nil
+        }
     }
 
     /// 块图片的整段区间（`![标签](目的地)`）。非块图片为 nil。

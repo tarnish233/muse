@@ -46,19 +46,7 @@
     document.head.appendChild(mathJaxScript);
 
     window.museMathBridge = {
-      render(id, expression, display, fontSize) {
-        this.renderAsync(id, expression, display, fontSize).then(
-          result => window.webkit.messageHandlers.mathResult.postMessage({ id, result }),
-          error => window.webkit.messageHandlers.mathResult.postMessage({
-            id,
-            failure: String(error),
-            state: window.museMathState
-          })
-        );
-        return true;
-      },
-
-      async renderAsync(id, expression, display, fontSize) {
+      async render(expression, display, fontSize) {
         await Promise.race([
           window.museMathReady,
           new Promise((_, reject) => setTimeout(

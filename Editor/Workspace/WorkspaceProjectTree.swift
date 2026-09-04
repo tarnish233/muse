@@ -11,7 +11,6 @@ struct WorkspaceProjectTree: View {
     let redoFileOperationTitle: String
     let undoFileOperation: () -> Void
     let redoFileOperation: () -> Void
-    let revealInFinder: (URL) -> Void
     let refreshProject: () -> Void
     let removeProject: () -> Void
 
@@ -108,7 +107,7 @@ struct WorkspaceProjectTree: View {
             .disabled(!canRedoFileOperation)
         Divider()
         Button("在访达中显示", systemImage: "finder") {
-            revealInFinder(project.rootURL)
+            nodeActions.revealInFinder(project.rootURL)
         }
         Button("从侧边栏移除", systemImage: "minus.circle", action: removeProject)
     }

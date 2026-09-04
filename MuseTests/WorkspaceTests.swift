@@ -248,6 +248,11 @@ import Testing
         #expect(workspace.project(containing: realRoot) != nil)
         #expect(workspace.project(containing: document) != nil)
         #expect(workspace.project(containing: rootLink.appending(path: "document.md")) != nil)
+
+        let aliasProject = WorkspaceProject(rootURL: rootLink)
+        #expect(aliasProject.relativePath(to: rootLink) == ".")
+        #expect(aliasProject.relativePath(to: document) == "document.md")
+        #expect(aliasProject.relativePath(to: rootLink.appending(path: "document.md")) == "document.md")
     }
 
     @Test func projectContainmentTreatsProjectEntrySymlinksAsInsideProject() async throws {
@@ -482,6 +487,31 @@ import Testing
         #expect(FileManager.default.fileExists(atPath: folderURL.appending(path: "Folder").path) == false)
     }
 
+    @Test func pasteRejectsCopyingAFolderThroughSymlinkIntoItsDescendant() async throws {
+        let (workspace, root, _, _) = try makeWorkspace()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        try workspace.createProject(at: root)
+        let folderURL = try workspace.createItem(.folder, named: "Folder", in: root)
+        let childURL = try workspace.createItem(.folder, named: "Child", in: folderURL)
+        let childLink = root.appending(path: "Child Alias", directoryHint: .isDirectory)
+        try FileManager.default.createSymbolicLink(
+            atPath: childLink.path,
+            withDestinationPath: childURL.path
+        )
+
+        do {
+            try await workspace.pasteItems([folderURL], into: childLink)
+            Issue.record("不应允许通过符号链接把文件夹复制到其后代目录。")
+        } catch WorkspaceOperationError.cannotCopyFolderIntoItself {
+            // 预期错误。
+        } catch {
+            Issue.record("收到错误类型不正确：\(error)")
+        }
+
+        #expect(FileManager.default.fileExists(atPath: childURL.appending(path: "Folder").path) == false)
+    }
+
     @Test func removingProjectDoesNotDeleteItsDirectory() throws {
         let (workspace, root, _, _) = try makeWorkspace()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -701,13 +731,15 @@ import Testing
             create: { url in Data(url.path.utf8) },
             resolve: { _ in throw TestFailure.expected }
         )
+        let firstStore = StoreRecorder()
+        let secondStore = StoreRecorder()
         let firstWorkspace = ProjectWorkspace(
             bookmarking: bookmarking,
-            projectStore: StoreRecorder().store
+            projectStore: firstStore.store
         )
         let secondWorkspace = ProjectWorkspace(
             bookmarking: bookmarking,
-            projectStore: StoreRecorder().store
+            projectStore: secondStore.store
         )
 
         try firstWorkspace.openProject(at: firstRoot)

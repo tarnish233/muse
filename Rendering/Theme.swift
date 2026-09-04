@@ -408,15 +408,12 @@ public nonisolated struct Theme: @unchecked Sendable {
     /// 预留垂直空间的公开手段（`.attachment` 会被 NSTextStorage 的属性修复
     /// 从非 U+FFFC 字符上抹掉——实测见 RendererTests）。
     public func imageParagraph(height: CGFloat) -> NSMutableParagraphStyle {
-        let p = NSMutableParagraphStyle()
-        let reserved = max(height + Theme.imagePaddingVertical * 2, 1)
-        p.minimumLineHeight = reserved
-        p.maximumLineHeight = reserved
-        p.lineHeightMultiple = 1
-        p.paragraphSpacing = 6
-        p.paragraphSpacingBefore = 6
-        p.lineBreakMode = .byClipping
-        return p
+        resourceParagraph(
+            height: height,
+            verticalPadding: Theme.imagePaddingVertical,
+            minimumHeight: 1,
+            spacing: 6
+        )
     }
 
     /// 块公式的独占行盒。源码多行中的后续段落另用 `collapsedMathParagraph` 折叠，
@@ -425,18 +422,34 @@ public nonisolated struct Theme: @unchecked Sendable {
         height: CGFloat,
         preserving sourceParagraph: NSParagraphStyle? = nil
     ) -> NSMutableParagraphStyle {
+        let font = baseFont()
+        return resourceParagraph(
+            height: height,
+            verticalPadding: Theme.mathPaddingVertical,
+            minimumHeight: font.ascender - font.descender + font.leading,
+            spacing: 8,
+            preserving: sourceParagraph
+        )
+    }
+
+    /// Images and display math use the same TextKit 2 reservation mechanism. Keep
+    /// line-height, spacing, and clipping mutations here so resource paragraphs cannot
+    /// silently diverge when one renderer changes.
+    private func resourceParagraph(
+        height: CGFloat,
+        verticalPadding: CGFloat,
+        minimumHeight: CGFloat,
+        spacing: CGFloat,
+        preserving sourceParagraph: NSParagraphStyle? = nil
+    ) -> NSMutableParagraphStyle {
         let p = sourceParagraph?.mutableCopy() as? NSMutableParagraphStyle
             ?? NSMutableParagraphStyle()
-        let font = baseFont()
-        let reserved = max(
-            height + Theme.mathPaddingVertical * 2,
-            font.ascender - font.descender + font.leading
-        )
+        let reserved = max(height + verticalPadding * 2, minimumHeight)
         p.minimumLineHeight = reserved
         p.maximumLineHeight = reserved
         p.lineHeightMultiple = 1
-        p.paragraphSpacing = max(p.paragraphSpacing, 8)
-        p.paragraphSpacingBefore = max(p.paragraphSpacingBefore, 8)
+        p.paragraphSpacing = max(p.paragraphSpacing, spacing)
+        p.paragraphSpacingBefore = max(p.paragraphSpacingBefore, spacing)
         p.lineBreakMode = .byClipping
         return p
     }

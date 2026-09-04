@@ -485,9 +485,18 @@ import Testing
         #expect(package.mathTokenIndices.map { package.tokens[$0].mathExpression }
             == ["x", "x", "y"])
         #expect(package.mathRequests == [
-            MathRenderRequest(expression: "y", display: true),
-            MathRenderRequest(expression: "x", display: false),
+            MathRenderRequest(expression: "y", display: .block),
+            MathRenderRequest(expression: "x", display: .inline),
         ])
+    }
+
+    @Test func mathRequestDerivesFontSizeFromDisplayMode() {
+        let inline = MathRenderRequest(expression: "x", display: .inline)
+        let block = MathRenderRequest(expression: "x", display: .block)
+
+        #expect(inline.fontSize == Theme.inlineMathFontSize)
+        #expect(block.fontSize == Theme.blockMathFontSize)
+        #expect(inline.cacheKey != block.cacheKey)
     }
 
     @Test func blockMathUsesOneTextKit2FragmentAndDrawsCachedFormula() async throws {

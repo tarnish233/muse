@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目
 
-Muse —— macOS 原生即时渲染 Markdown 编辑器（对标 Typora）。macOS 14+ · Swift 6 · AppKit（TextKit 2）+ SwiftUI · [swift-markdown](https://github.com/swiftlang/swift-markdown) 0.8.0。
+Muse —— macOS 原生即时渲染 Markdown 编辑器（对标 Typora）。macOS 14+ · Swift 6 · AppKit（TextKit 2）+ SwiftUI · [swift-markdown `0.8.0-muse.2`](https://github.com/tarnish233/swift-markdown/releases/tag/0.8.0-muse.2)。该不可变 tag 基于上游数学语法提案，并依赖自有不可变 tag [swift-cmark `0.8.0-muse.1`](https://github.com/tarnish233/swift-cmark/releases/tag/0.8.0-muse.1)，保证依赖解析可复现。
 
 ## 命令
 

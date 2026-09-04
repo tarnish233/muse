@@ -284,15 +284,8 @@ final class ProjectWorkspace {
     }
 
     func project(containing url: URL) -> WorkspaceProject? {
-        guard let project else { return nil }
-        let rootPath = canonicalizedPath(for: project.rootURL, resolvingFinalComponent: true)
-        let exactPath = canonicalizedPath(for: url, resolvingFinalComponent: true)
-        if exactPath == rootPath {
-            return project
-        }
-
-        let path = canonicalizedPath(for: url, resolvingFinalComponent: false)
-        return path == rootPath || path.hasPrefix(rootPath + "/") ? project : nil
+        guard let project, WorkspacePath.contains(url, in: project.rootURL) else { return nil }
+        return project
     }
 
     func refreshProject(containing url: URL) {
@@ -320,30 +313,6 @@ final class ProjectWorkspace {
     private static func countNodes(in nodes: [WorkspaceNode]) -> Int {
         nodes.reduce(0) { partial, node in
             partial + 1 + Self.countNodes(in: node.children ?? [])
-        }
-    }
-
-    private func canonicalizedPath(for url: URL, resolvingFinalComponent: Bool) -> String {
-        let path = url.standardizedFileURL.path
-        guard path.hasPrefix("/") else { return path }
-
-        if resolvingFinalComponent, let resolvedPath = Self.resolvedFileSystemPath(path) {
-            return resolvedPath
-        }
-
-        let directoryURL = url.deletingLastPathComponent()
-        let directoryPath = directoryURL.path
-        let resolvedDirectory = directoryPath == "/"
-            ? ""
-            : Self.resolvedFileSystemPath(directoryPath) ?? directoryPath
-        return resolvedDirectory + "/" + url.lastPathComponent
-    }
-
-    private static func resolvedFileSystemPath(_ path: String) -> String? {
-        path.withCString { pointer in
-            guard let resolved = realpath(pointer, nil) else { return nil }
-            defer { free(resolved) }
-            return String(cString: resolved)
         }
     }
 

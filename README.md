@@ -33,6 +33,6 @@ open Muse.xcodeproj
 
 ## 技术
 
-Swift 6 + AppKit（TextKit 2）+ SwiftUI。Markdown 结构由 [swift-markdown](https://github.com/swiftlang/swift-markdown) AST 提供；公式节点暂时锁定到其[数学语法提案分支](https://github.com/swiftlang/swift-markdown/pull/258)，公式由应用内置的 [MathJax 3.2.2](https://github.com/mathjax/MathJax) `tex-svg-full` 组件异步排版为 SVG，再通过 TextKit 2 原生绘制（运行时不访问 CDN，也不动态加载字体模块）。
+Swift 6 + AppKit（TextKit 2）+ SwiftUI。Markdown 结构由 [swift-markdown](https://github.com/swiftlang/swift-markdown) AST 提供；公式节点使用基于[上游数学语法提案](https://github.com/swiftlang/swift-markdown/pull/258)维护的自有不可变 tag [`0.8.0-muse.2`](https://github.com/tarnish233/swift-markdown/releases/tag/0.8.0-muse.2)，其 `swift-cmark` 依赖同样固定到自有 tag [`0.8.0-muse.1`](https://github.com/tarnish233/swift-cmark/releases/tag/0.8.0-muse.1)，构建不依赖移动分支。公式由应用内置的 [MathJax 3.2.2](https://github.com/mathjax/MathJax) `tex-svg-full` 组件异步排版为 SVG，再通过 TextKit 2 原生绘制（运行时不访问 CDN，也不动态加载字体模块）。
 
 整个编辑器只维护一份 `NSTextStorage`：渲染是往源码上叠加属性，而不是生成第二份文本。设计取舍和各阶段报告在 [`docs/`](docs/)。

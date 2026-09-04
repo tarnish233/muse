@@ -30,7 +30,6 @@ struct WorkspaceSidebar: View {
                         redoFileOperationTitle: workspace.redoFileOperationTitle,
                         undoFileOperation: workspace.undoFileOperation,
                         redoFileOperation: workspace.redoFileOperation,
-                        revealInFinder: revealInFinder,
                         refreshProject: workspace.refreshProject,
                         removeProject: workspace.closeProject
                     )

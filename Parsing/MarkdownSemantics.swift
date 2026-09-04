@@ -279,9 +279,10 @@ public nonisolated struct MarkdownSemantics: Sendable {
         let lineStarts = sourceLines.map(\.start)
         let document = Document(parsing: source, options: [.disableSmartOpts])
 
-        var semanticWalker = SemanticWalker(bytes: bytes, lineStarts: lineStarts, lines: sourceLines)
+        let sourceMap = ASTSourceMap(lineStarts: lineStarts, lines: sourceLines)
+        var semanticWalker = SemanticWalker(bytes: bytes, sourceMap: sourceMap)
         semanticWalker.visit(document)
-        var mathWalker = MathSyntaxWalker(bytes: bytes, lineStarts: lineStarts, lines: sourceLines)
+        var mathWalker = MathSyntaxWalker(bytes: bytes, sourceMap: sourceMap)
         mathWalker.visit(document)
 
         var lineKinds: [LineKind] = []
@@ -333,6 +334,60 @@ public nonisolated struct MarkdownSemantics: Sendable {
         self.fenceLines = semanticWalker.fenceLines
     }
 
+    /// Shared conversion between swift-markdown source locations and Muse byte/line ranges.
+    /// Both semantic walkers use this value so math nodes cannot acquire a subtly different
+    /// UTF-8 or end-of-line policy from every other Markdown node.
+    private struct ASTSourceMap {
+        let lineStarts: [Int]
+        let lines: [TokenScanner.Line]
+
+        func byteRange(of markup: Markup) -> Range<Int>? {
+            guard let range = markup.range,
+                  let lower = MarkdownSemantics.byteOffset(
+                    range.lowerBound,
+                    lineStarts: lineStarts,
+                    lines: lines
+                  ),
+                  let upper = MarkdownSemantics.byteOffset(
+                    range.upperBound,
+                    lineStarts: lineStarts,
+                    lines: lines
+                  ),
+                  lower <= upper
+            else { return nil }
+            return lower..<upper
+        }
+
+        func sourceLine(of markup: Markup) -> Int? {
+            guard let range = markup.range else { return nil }
+            let line = range.lowerBound.line - 1
+            guard line >= 0, line < lines.count else { return nil }
+            return line
+        }
+
+        func lineIndex(ofByte offset: Int) -> Int? {
+            guard !lineStarts.isEmpty, !lines.isEmpty else { return nil }
+            var low = 0
+            var high = lineStarts.count - 1
+            while low < high {
+                let middle = (low + high + 1) / 2
+                if lineStarts[middle] <= offset {
+                    low = middle
+                } else {
+                    high = middle - 1
+                }
+            }
+            return min(low, lines.count - 1)
+        }
+
+        func lineSpan(of range: Range<Int>) -> ClosedRange<Int> {
+            let start = max(0, lineIndex(ofByte: range.lowerBound) ?? 0)
+            let endOffset = max(range.lowerBound, range.upperBound - 1)
+            let end = min(lines.count - 1, max(start, lineIndex(ofByte: endOffset) ?? start))
+            return start...end
+        }
+    }
+
     /// 公式扩展只重写可能包含公式的 AST 叶节点，而不是复制整棵文档树。
     ///
     /// 当前 swift-markdown 数学提案通过 `MarkupRewriter` 复制整棵 AST；在 200 KB / 1 MB
@@ -341,9 +396,10 @@ public nonisolated struct MarkdownSemantics: Sendable {
     /// 不可能命中的叶节点；分隔符能否成立、表达式内容和范围仍全部取自数学 AST。
     private struct MathSyntaxWalker: MarkupWalker {
         let bytes: [UInt8]
-        let lineStarts: [Int]
-        let lines: [TokenScanner.Line]
+        let sourceMap: ASTSourceMap
         var math = [MathSyntax]()
+
+        private var lines: [TokenScanner.Line] { sourceMap.lines }
 
         mutating func visitParagraph(_ paragraph: Paragraph) {
             if appendBlockMath(from: paragraph) { return }
@@ -575,35 +631,11 @@ public nonisolated struct MarkdownSemantics: Sendable {
         }
 
         private func byteRange(_ markup: Markup) -> Range<Int>? {
-            guard let range = markup.range,
-                  let lower = MarkdownSemantics.byteOffset(
-                    range.lowerBound,
-                    lineStarts: lineStarts,
-                    lines: lines
-                  ),
-                  let upper = MarkdownSemantics.byteOffset(
-                    range.upperBound,
-                    lineStarts: lineStarts,
-                    lines: lines
-                  ),
-                  lower <= upper
-            else { return nil }
-            return lower..<upper
+            sourceMap.byteRange(of: markup)
         }
 
         private func lineIndex(ofByte offset: Int) -> Int? {
-            guard !lineStarts.isEmpty else { return nil }
-            var low = 0
-            var high = lineStarts.count - 1
-            while low < high {
-                let middle = (low + high + 1) / 2
-                if lineStarts[middle] <= offset {
-                    low = middle
-                } else {
-                    high = middle - 1
-                }
-            }
-            return min(low, lines.count - 1)
+            sourceMap.lineIndex(ofByte: offset)
         }
 
         private struct InlineMathProbe: MarkupWalker {
@@ -621,8 +653,10 @@ public nonisolated struct MarkdownSemantics: Sendable {
     /// `SourceRange` 直接给出 marker 边界，块结构则由节点类型和 parent 链给出。
     private struct SemanticWalker: MarkupWalker {
         let bytes: [UInt8]
-        let lineStarts: [Int]
-        let lines: [TokenScanner.Line]
+        let sourceMap: ASTSourceMap
+
+        private var lineStarts: [Int] { sourceMap.lineStarts }
+        private var lines: [TokenScanner.Line] { sourceMap.lines }
 
         var inlineMarkers = [InlineMarker]()
         var blocks = [BlockStructure]()
@@ -634,10 +668,9 @@ public nonisolated struct MarkdownSemantics: Sendable {
         var quoteLines = Set<Int>()
         var fenceLines = Set<Int>()
 
-        init(bytes: [UInt8], lineStarts: [Int], lines: [TokenScanner.Line]) {
+        init(bytes: [UInt8], sourceMap: ASTSourceMap) {
             self.bytes = bytes
-            self.lineStarts = lineStarts
-            self.lines = lines
+            self.sourceMap = sourceMap
         }
 
         mutating func visitHeading(_ heading: Heading) {
@@ -1168,26 +1201,11 @@ public nonisolated struct MarkdownSemantics: Sendable {
         }
 
         private func byteRange(_ markup: Markup) -> Range<Int>? {
-            guard let range = markup.range,
-                  let lower = MarkdownSemantics.byteOffset(
-                    range.lowerBound,
-                    lineStarts: lineStarts,
-                    lines: lines
-                  ),
-                  let upper = MarkdownSemantics.byteOffset(
-                    range.upperBound,
-                    lineStarts: lineStarts,
-                    lines: lines
-                  ),
-                  lower <= upper else { return nil }
-            return lower..<upper
+            sourceMap.byteRange(of: markup)
         }
 
         private func sourceLine(of markup: Markup) -> Int? {
-            guard let range = markup.range else { return nil }
-            let line = range.lowerBound.line - 1
-            guard line >= 0, line < lines.count else { return nil }
-            return line
+            sourceMap.sourceLine(of: markup)
         }
 
         private func lineIndex(_ range: Range<Int>) -> Int? {
@@ -1196,14 +1214,7 @@ public nonisolated struct MarkdownSemantics: Sendable {
         }
 
         private func lineIndex(ofByte offset: Int) -> Int? {
-            guard !lineStarts.isEmpty else { return nil }
-            var low = 0
-            var high = lineStarts.count - 1
-            while low < high {
-                let mid = (low + high + 1) / 2
-                if lineStarts[mid] <= offset { low = mid } else { high = mid - 1 }
-            }
-            return min(low, lines.count - 1)
+            sourceMap.lineIndex(ofByte: offset)
         }
 
         private func firstChildStart(_ markup: Markup) -> Int? {
@@ -1241,10 +1252,7 @@ public nonisolated struct MarkdownSemantics: Sendable {
         /// 「最后一个字节」反查。逐行产出 token 与行集合（`quoteLines` 等）都从这里
         /// 取行号，两者因此不可能漂移。
         private func lineSpan(of range: Range<Int>) -> ClosedRange<Int> {
-            let start = max(0, lineIndex(ofByte: range.lowerBound) ?? 0)
-            let endOffset = max(range.lowerBound, range.upperBound - 1)
-            let end = min(lines.count - 1, max(start, lineIndex(ofByte: endOffset) ?? start))
-            return start...end
+            sourceMap.lineSpan(of: range)
         }
 
         private func markAllLines(_ range: Range<Int>, into target: inout Set<Int>) {

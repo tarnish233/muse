@@ -9,30 +9,30 @@ public nonisolated final class MathRenderArtifact: NSObject, @unchecked Sendable
     public let image: NSImage
     public let size: CGSize
     public let ascent: CGFloat
-    public let descent: CGFloat
 
-    init(image: NSImage, size: CGSize, ascent: CGFloat, descent: CGFloat) {
+    init(image: NSImage, size: CGSize, ascent: CGFloat) {
         self.image = image
         self.size = size
         self.ascent = ascent
-        self.descent = descent
     }
 }
 
 /// 一个可缓存的 MathJax 排版请求。表达式保持用户源码原样，不做命令别名改写。
 nonisolated struct MathRenderRequest: Hashable, Sendable {
     let expression: String
-    let display: Bool
-    let fontSize: CGFloat
+    let display: MathDisplay
 
-    init(expression: String, display: Bool) {
+    init(expression: String, display: MathDisplay) {
         self.expression = expression
         self.display = display
-        fontSize = display ? Theme.blockMathFontSize : Theme.inlineMathFontSize
+    }
+
+    var fontSize: CGFloat {
+        display.isBlock ? Theme.blockMathFontSize : Theme.inlineMathFontSize
     }
 
     var cacheKey: NSString {
-        NSString(format: "%d|%.2f|%@", display ? 1 : 0, fontSize, expression)
+        NSString(format: "%d|%.2f|%@", display.rawValue, fontSize, expression)
     }
 }
 
@@ -45,14 +45,8 @@ typealias BoundedInvalidExpressionCache = BoundedFIFOSet<String>
 /// 有界缓存；属性应用阶段只做同步缓存查询，因此输入、选区变化与 TextKit 绘制
 /// 永远不会等待 JavaScript。运行时只允许读取应用包内资源，不访问 CDN。
 @MainActor
-final class MathRenderer: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
+final class MathRenderer: NSObject, WKNavigationDelegate {
     static let shared = MathRenderer()
-
-    /// WebKit 脚本消息只在 MainActor 上创建、传递和解包。
-    /// `Any` 本身无法声明 Sendable，因此用受 MainActor 约束的盒子标明这条边界。
-    private struct BridgePayload: @unchecked Sendable {
-        let values: [String: Any]
-    }
 
     private enum RendererError: Error {
         case missingResources
@@ -60,7 +54,6 @@ final class MathRenderer: NSObject, WKNavigationDelegate, WKScriptMessageHandler
         case invalidExpression
         case invalidBridgeResponse
         case invalidSVG
-        case javascriptFailed(String)
     }
 
     private let cache = NSCache<NSString, MathRenderArtifact>()
@@ -78,8 +71,6 @@ final class MathRenderer: NSObject, WKNavigationDelegate, WKScriptMessageHandler
     private var isPageLoaded = false
     private var navigationContinuation: CheckedContinuation<Void, Error>?
     private var navigationTimeoutTask: Task<Void, Never>?
-    private var pendingRenders: [String: CheckedContinuation<BridgePayload, Error>] = [:]
-    private var renderTimeoutTasks: [String: Task<Void, Never>] = [:]
     private var isPreparing = false
     private var preparationWaiters: [CheckedContinuation<Void, Never>] = []
     private var nextPreparationWaiter = 0
@@ -89,7 +80,7 @@ final class MathRenderer: NSObject, WKNavigationDelegate, WKScriptMessageHandler
         super.init()
     }
 
-    func request(expression: String, display: Bool) -> MathRenderRequest {
+    func request(expression: String, display: MathDisplay) -> MathRenderRequest {
         MathRenderRequest(expression: expression, display: display)
     }
 
@@ -119,7 +110,7 @@ final class MathRenderer: NSObject, WKNavigationDelegate, WKScriptMessageHandler
                 await hook()
             }
 
-            // evaluateJavaScript 的 continuation 不响应 Task 取消。即使调用方在等待期间
+            // WebKit 的 JavaScript await 不响应 Task 取消。即使调用方在等待期间
             // 被连续输入取消，已经付出完整 WebKit 往返得到的产物也必须先进入缓存，
             // 再让取消只阻止陈旧 revision 刷新 storage。
             if cachedArtifact(for: request) == nil {
@@ -197,7 +188,6 @@ final class MathRenderer: NSObject, WKNavigationDelegate, WKScriptMessageHandler
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .nonPersistent()
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
-        configuration.userContentController.add(self, name: "mathResult")
         let view = WKWebView(
             frame: NSRect(x: 0, y: 0, width: 1024, height: 256),
             configuration: configuration
@@ -231,27 +221,19 @@ final class MathRenderer: NSObject, WKNavigationDelegate, WKScriptMessageHandler
 
     private func renderWithMathJax(_ request: MathRenderRequest) async throws -> MathRenderArtifact {
         guard let webView else { throw RendererError.navigationFailed }
-        let identifier = UUID().uuidString
-        let script = "window.museMathBridge.render(\(Self.javascriptLiteral(identifier)), \(Self.javascriptLiteral(request.expression)), \(request.display ? "true" : "false"), \(Double(request.fontSize)));"
-        let payload = try await withCheckedThrowingContinuation {
-            (continuation: CheckedContinuation<BridgePayload, Error>) in
-            pendingRenders[identifier] = continuation
-            webView.evaluateJavaScript(script) { [weak self] _, error in
-                guard let error else { return }
-                Task { @MainActor [weak self] in
-                    self?.failRender(identifier: identifier, error: error)
-                }
-            }
-            renderTimeoutTasks[identifier] = Task { @MainActor [weak self] in
-                try? await Task.sleep(for: .seconds(10))
-                guard !Task.isCancelled else { return }
-                self?.failRender(
-                    identifier: identifier,
-                    error: RendererError.javascriptFailed("request timed out")
-                )
-            }
+        let value = try await webView.callAsyncJavaScript(
+            "return await window.museMathBridge.render(expression, display, fontSize);",
+            arguments: [
+                "expression": request.expression,
+                "display": request.display.isBlock,
+                "fontSize": Double(request.fontSize),
+            ],
+            in: nil,
+            contentWorld: .page
+        )
+        guard let result = value as? [String: Any] else {
+            throw RendererError.invalidBridgeResponse
         }
-        let result = payload.values
         if let error = result["error"] as? String {
             if error == "invalid-tex" { throw RendererError.invalidExpression }
             throw RendererError.invalidBridgeResponse
@@ -269,7 +251,7 @@ final class MathRenderer: NSObject, WKNavigationDelegate, WKScriptMessageHandler
         guard let image = NSImage(data: Data(svg.utf8)) else {
             throw RendererError.invalidSVG
         }
-        let maximumWidth = request.display
+        let maximumWidth = request.display.isBlock
             ? Theme.blockMathMaximumWidth
             : Theme.inlineMathMaximumWidth
         let scale = min(1, maximumWidth / CGFloat(width))
@@ -284,34 +266,13 @@ final class MathRenderer: NSObject, WKNavigationDelegate, WKScriptMessageHandler
         return MathRenderArtifact(
             image: image,
             size: displaySize,
-            ascent: displaySize.height - descent,
-            descent: descent
+            ascent: displaySize.height - descent
         )
     }
 
     private static func number(_ value: Any?) -> Double? {
         if let number = value as? NSNumber { return number.doubleValue }
         return value as? Double
-    }
-
-    private static func javascriptLiteral(_ string: String) -> String {
-        guard let data = try? JSONSerialization.data(withJSONObject: [string]),
-              let array = String(data: data, encoding: .utf8),
-              array.count >= 2
-        else { return "\"\"" }
-        return String(array.dropFirst().dropLast())
-    }
-
-    private func finishRender(identifier: String, payload: BridgePayload) {
-        guard let continuation = pendingRenders.removeValue(forKey: identifier) else { return }
-        renderTimeoutTasks.removeValue(forKey: identifier)?.cancel()
-        continuation.resume(returning: payload)
-    }
-
-    private func failRender(identifier: String, error: any Error) {
-        guard let continuation = pendingRenders.removeValue(forKey: identifier) else { return }
-        renderTimeoutTasks.removeValue(forKey: identifier)?.cancel()
-        continuation.resume(throwing: error)
     }
 
     private func finishNavigation(_ result: Result<Void, Error>) {
@@ -328,13 +289,6 @@ final class MathRenderer: NSObject, WKNavigationDelegate, WKScriptMessageHandler
         navigationContinuation = nil
         navigationTimeoutTask?.cancel()
         navigationTimeoutTask = nil
-        for continuation in pendingRenders.values {
-            continuation.resume(throwing: RendererError.navigationFailed)
-        }
-        pendingRenders.removeAll(keepingCapacity: false)
-        for task in renderTimeoutTasks.values { task.cancel() }
-        renderTimeoutTasks.removeAll(keepingCapacity: false)
-        webView?.configuration.userContentController.removeScriptMessageHandler(forName: "mathResult")
         webView?.navigationDelegate = nil
         webView = nil
         hostWindow?.orderOut(nil)
@@ -364,28 +318,5 @@ final class MathRenderer: NSObject, WKNavigationDelegate, WKScriptMessageHandler
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         resetWebView()
-    }
-
-    func userContentController(
-        _ userContentController: WKUserContentController,
-        didReceive message: WKScriptMessage
-    ) {
-        guard message.name == "mathResult",
-              let body = message.body as? [String: Any],
-              let identifier = body["id"] as? String
-        else { return }
-        if let failure = body["failure"] as? String {
-            let state = body["state"] as? String ?? "unknown"
-            failRender(
-                identifier: identifier,
-                error: RendererError.javascriptFailed("\(failure) [\(state)]")
-            )
-            return
-        }
-        guard let result = body["result"] as? [String: Any] else {
-            failRender(identifier: identifier, error: RendererError.invalidBridgeResponse)
-            return
-        }
-        finishRender(identifier: identifier, payload: BridgePayload(values: result))
     }
 }

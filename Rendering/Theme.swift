@@ -108,9 +108,11 @@ extension NSAttributedString.Key {
     /// Obsidian 风格的持久单元格选区，值为 `[minRow,maxRow,minColumn,maxColumn]`。
     /// 只影响绘制和剪贴板命令，不写回 Markdown。
     public nonisolated static let museTableCellSelection = NSAttributedString.Key("museTableCellSelection")
-    /// 图片解析后的绝对 URL（本地与远程共用）；绘制层按它取内存缓存里的图，
-    /// 不再解析相对路径，也不在 TextKit 绘制回调中执行 I/O。
+    /// 图片解析后的绝对 URL（本地与远程共用），用于刷新定位与调试。
     public nonisolated static let museImageURL = NSAttributedString.Key("museImageURL")
+    /// 当前正文强持有的不可变图片绘制产物。`NSCache` 被系统驱逐后，TextKit 绘制
+    /// 仍从这里取得像素，不执行磁盘/网络 I/O，也不会留下陈旧的大行高占位框。
+    public nonisolated static let museImageArtifact = NSAttributedString.Key("museImageArtifact")
     /// 图片的呈现尺寸（[NSNumber] 宽、高），与撑出的行高一致。
     public nonisolated static let museImageSize = NSAttributedString.Key("museImageSize")
     /// AST-provided ordered-list number consumed by the custom layout fragment.

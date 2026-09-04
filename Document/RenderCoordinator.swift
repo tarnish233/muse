@@ -46,19 +46,26 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
         public let lineRange: NSRange
     }
 
-    private let imagePreparer: @Sendable (URL) async -> Bool
+    private let imagePreparer: @Sendable (URL) async -> ImageResolver.PreparationResult
 
     public override init() {
-        imagePreparer = { url in
-            let result = await ImageResolver.prepareImage(url: url)
-            return result.cacheChanged
-        }
+        imagePreparer = { await ImageResolver.prepareImage(url: $0) }
         super.init()
     }
 
-    init(imagePreparer: @escaping @Sendable (URL) async -> Bool) {
+    init(
+        imagePreparer: @escaping @Sendable (URL) async -> ImageResolver.PreparationResult
+    ) {
         self.imagePreparer = imagePreparer
         super.init()
+    }
+
+    deinit {
+        // 非结构化 Task 不会随 handle 释放自动取消；文档关闭时必须把仍在执行的
+        // URLSession/磁盘准备显式收口。等待队列只是值，随 coordinator 一起释放。
+        for entry in imagePreparationTasks.values {
+            entry.task.cancel()
+        }
     }
 
     private let engine = RenderEngine()
@@ -84,9 +91,30 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
     private var pendingDirtyRange: NSRange?
     private var revealCache: [RevealKey: RenderEngine.MarkerState] = [:]
     private var revealsCurrentBlockSource = true
-    private var needsImageRefresh = false
-    private var imagePreparationTask: Task<Void, Never>?
-    private var imagePreparationGeneration = 0
+    private struct ImagePreparationEntry {
+        let id: UUID
+        let task: Task<Void, Never>
+    }
+    private static let maximumConcurrentImagePreparations = 4
+    private var referencedImageURLs = Set<URL>()
+    /// 这里只保存真正执行 I/O 的任务，因此数量严格不超过并发上限。
+    private var imagePreparationTasks: [URL: ImagePreparationEntry] = [:]
+    /// 等待中的 URL 只是值，不为每个引用预先创建 Task。数组用游标消费，避免 removeFirst O(n²)。
+    private var queuedImagePreparationURLs: [URL] = []
+    private var queuedImagePreparationHead = 0
+    private var queuedImagePreparationURLSet = Set<URL>()
+    /// 当前仍被正文引用的远程 URL 是否已经尝试过；随引用移除而删除，不是跨文档负缓存。
+    /// 它防止有界失败缓存驱逐后，把未变化的 URL 当成新请求再次发送。
+    private var attemptedRemoteImageURLs = Set<URL>()
+    private var failedRemoteImageURLs = BoundedFIFOSet<URL>(capacity: 128)
+    private var preparedRemoteImageURLs = Set<URL>()
+    /// 曾经成功落地过的本地图片。即使 NSCache 已被驱逐，后续不可用也必须清掉正文强持有产物。
+    private var preparedLocalImageURLs = Set<URL>()
+    private var pendingImageRefreshURLs = Set<URL>()
+    private var invalidatedImageRefreshURLs = Set<URL>()
+    private var refreshesAllImages = false
+    /// 最近一次图片窄刷新实际触及的块图片 token 数（回归测试与性能插桩）。
+    private(set) var lastImageRefreshWriteCount = 0
     private var needsMathRefresh = false
     /// 最近一次已把 MathRenderer 当时全部可用产物同步进当前 storage 的缓存代次。
     /// 只比较纯数值，不在输入热路径读取 NSTextStorage 属性。
@@ -168,11 +196,11 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
     public var imageBaseURL: URL? {
         didSet {
             guard imageBaseURL != oldValue else { return }
-            imagePreparationTask?.cancel()
-            needsImageRefresh = true
+            resetImagePreparationState()
+            refreshesAllImages = true
             applyImageRefreshIfPossible()
             if let package = lastPackage {
-                scheduleBlockImagePreparation(package: package, revision: revision)
+                scheduleBlockImagePreparation(package: package)
             }
         }
     }
@@ -220,7 +248,6 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
 
     private func scheduleParse(storage: NSTextStorage) {
         revision += 1
-        imagePreparationTask?.cancel()
         mathPreparationTask?.cancel()
 
         // `pendingDirtyRange` 已经随每次编辑重基到当前坐标系；本轮快照与范围属于同一 revision。
@@ -329,50 +356,64 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
         let start = clock.now
         isApplyingAttributes = true
         var appliedLines: ClosedRange<Int>?
-        let requiresFullImageRefresh = needsImageRefresh
+        let refreshesImages = presentationMode == .rendered
+            && (refreshesAllImages || !pendingImageRefreshURLs.isEmpty)
+        let matchingImageURLs = refreshesAllImages ? nil : pendingImageRefreshURLs
+        let invalidatedImageURLs = invalidatedImageRefreshURLs
         let requiresMathRefresh = needsMathRefresh && presentationMode == .rendered
+        var appliedImageRefresh = false
         var appliedAllMathArtifacts = false
         suppressUndo {
-            if requiresFullImageRefresh {
-                _ = engine.render(
+            let previousPackage = lastPackage // 结构变更的陈旧样式判定需要旧 package
+            let dirtyLines = engine.applyDirty(
+                package: package,
+                previousPackage: previousPackage,
+                utf16Range: dirtyNS,
+                mode: presentationMode,
+                into: storage,
+                imageBaseURL: imageBaseURL,
+                invalidatedImageURLs: invalidatedImageURLs
+            )
+            appliedLines = dirtyLines
+            if presentationMode == .rendered {
+                reconcileVisibility(
                     package: package,
                     selection: textView?.selectedRange(),
-                    mode: presentationMode,
-                    revealsCurrentBlockSource: revealsCurrentBlockSource,
                     into: storage,
-                    imageBaseURL: imageBaseURL
+                    forceLines: dirtyLines
                 )
-                appliedLines = 0...max(0, package.lineStarts.count - 1)
-                revealCache.removeAll(keepingCapacity: true)
-                lastReconcileWriteCount = 0
-                appliedAllMathArtifacts = presentationMode == .rendered
-            } else {
-                let previousPackage = lastPackage // 结构变更的陈旧样式判定需要旧 package
-                let dirtyLines = engine.applyDirty(package: package, previousPackage: previousPackage,
-                                                   utf16Range: dirtyNS, mode: presentationMode, into: storage,
-                                                   imageBaseURL: imageBaseURL)
-                appliedLines = dirtyLines
-                if presentationMode == .rendered {
-                    reconcileVisibility(package: package, selection: textView?.selectedRange(),
-                                        into: storage, forceLines: dirtyLines)
-                } else {
-                    revealCache.removeAll(keepingCapacity: true)
-                    lastReconcileWriteCount = 0
-                }
-                if requiresMathRefresh {
-                    _ = engine.refreshMathArtifacts(
+                if refreshesImages {
+                    lastImageRefreshWriteCount = engine.refreshImageArtifacts(
                         package: package,
                         selection: textView?.selectedRange(),
                         revealsCurrentBlockSource: revealsCurrentBlockSource,
-                        into: storage
+                        into: storage,
+                        imageBaseURL: imageBaseURL,
+                        matching: matchingImageURLs,
+                        invalidatedImageURLs: invalidatedImageURLs
                     )
-                    appliedAllMathArtifacts = true
+                    appliedImageRefresh = true
                 }
+            } else {
+                revealCache.removeAll(keepingCapacity: true)
+                lastReconcileWriteCount = 0
+            }
+            if requiresMathRefresh {
+                _ = engine.refreshMathArtifacts(
+                    package: package,
+                    selection: textView?.selectedRange(),
+                    revealsCurrentBlockSource: revealsCurrentBlockSource,
+                    into: storage
+                )
+                appliedAllMathArtifacts = true
             }
             appliedPresentationMode = presentationMode
             textView?.needsDisplay = true
         }
         isApplyingAttributes = false
+        if appliedImageRefresh {
+            clearPendingImageRefresh()
+        }
         if appliedAllMathArtifacts {
             recordMathArtifactsApplied()
         }
@@ -381,7 +422,6 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
         // 只有与当前 revision 对应的 package 才能成为 storage 属性与光标流的权威来源。
         lastPackage = package
         pendingDirtyRange = nil
-        needsImageRefresh = false
         lastAppliedDirtyRange = dirtyNS
         lastAppliedDirtyLines = appliedLines
         appliedRevision = rev
@@ -402,81 +442,216 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
             pendingTableNavigations.removeAll(keepingCapacity: true)
         }
         drainPendingOutlineReveal()
-        scheduleBlockImagePreparation(package: package, revision: rev)
+        scheduleBlockImagePreparation(package: package)
         scheduleMathPreparation(package: package, revision: rev)
     }
 
-    private func scheduleBlockImagePreparation(
-        package: RenderEngine.Package,
-        revision requestedRevision: Int
-    ) {
+    private func scheduleBlockImagePreparation(package: RenderEngine.Package) {
         let urls = Set(package.blockImageDestinations.compactMap { destination -> URL? in
-            guard let url = ImageResolver.resolvedURL(destination: destination, baseURL: imageBaseURL) else {
-                return nil
-            }
-            return url.isFileURL ? url.standardizedFileURL : url.absoluteURL
+            guard let url = ImageResolver.resolvedURL(destination: destination, baseURL: imageBaseURL)
+            else { return nil }
+            return ImageResolver.normalizedURL(url)
         })
 
-        imagePreparationTask?.cancel()
-        imagePreparationGeneration += 1
-        let generation = imagePreparationGeneration
-        guard !urls.isEmpty else {
-            imagePreparationTask = nil
-            return
+        let previousURLs = referencedImageURLs
+        let removedURLs = previousURLs.subtracting(urls)
+        let addedURLs = urls.subtracting(previousURLs)
+        for url in removedURLs {
+            // 正在执行的任务保留在注册表里直到取消真正收口，避免旧 I/O 尚未结束时
+            // 就把并发名额交给新任务。等待队列则只删 O(1) 的集合标记，数组槽延迟回收。
+            imagePreparationTasks[url]?.task.cancel()
+            queuedImagePreparationURLSet.remove(url)
+            attemptedRemoteImageURLs.remove(url)
+            failedRemoteImageURLs.remove(url)
+            preparedRemoteImageURLs.remove(url)
+            preparedLocalImageURLs.remove(url)
+            pendingImageRefreshURLs.remove(url)
+            invalidatedImageRefreshURLs.remove(url)
         }
+        referencedImageURLs = urls
 
-        let imagePreparer = imagePreparer
-        imagePreparationTask = Task(priority: .utility) { [weak self] in
-            guard let self else { return }
-            await self.prepareImagesAndRefresh(
-                urls,
-                maximumConcurrentCount: 4,
-                using: imagePreparer,
-                generation: generation,
-                revision: requestedRevision
-            )
+        for url in urls
+        where imagePreparationTasks[url] == nil
+            && queuedImagePreparationURLSet.contains(url) == false
+        {
+            if url.isFileURL {
+                // 本地文件用指纹检测修改/删除；任务与排队集合仍会把连续解析合并为一次。
+                enqueueImagePreparation(for: url)
+                continue
+            }
+
+            if ImageResolver.cachedImage(url: url) != nil {
+                // 缓存可能恰好在本轮样式读取之后、调度之前由另一个调用方写入。
+                // 每个远程 URL 首次观察到 ready 时补一次窄刷新，关闭这个竞争窗口。
+                attemptedRemoteImageURLs.insert(url)
+                failedRemoteImageURLs.remove(url)
+                if preparedRemoteImageURLs.insert(url).inserted {
+                    enqueueImageRefresh(for: url, invalidated: false)
+                }
+                continue
+            }
+
+            // 新引用只尝试一次。最近失败由有界负缓存直接拦截；即使失败项随后
+            // 被驱逐，当前引用周期的 attempted 状态也不会让它退化成逐键重试。
+            guard failedRemoteImageURLs.contains(url) == false,
+                  addedURLs.contains(url)
+                    || attemptedRemoteImageURLs.contains(url) == false
+                    || preparedRemoteImageURLs.contains(url)
+            else { continue }
+            enqueueImagePreparation(for: url)
+        }
+        drainImagePreparationQueue()
+        applyImageRefreshIfPossible()
+    }
+
+    private func enqueueImagePreparation(for url: URL) {
+        guard referencedImageURLs.contains(url),
+              imagePreparationTasks[url] == nil,
+              queuedImagePreparationURLSet.insert(url).inserted
+        else { return }
+        if url.isFileURL == false {
+            attemptedRemoteImageURLs.insert(url)
+        }
+        queuedImagePreparationURLs.append(url)
+    }
+
+    private func drainImagePreparationQueue() {
+        while imagePreparationTasks.count < Self.maximumConcurrentImagePreparations,
+              let url = dequeueImagePreparationURL()
+        {
+            guard referencedImageURLs.contains(url) else { continue }
+            startImagePreparation(for: url)
         }
     }
 
-    /// 大文档可能引用很多远程图片；限制并发数，避免一次渲染把所有连接同时打满。
-    /// 每张图片准备完成就立即重排，不让一个慢请求阻塞同页其他图片的显示。
-    private func prepareImagesAndRefresh(
-        _ urls: Set<URL>,
-        maximumConcurrentCount: Int,
-        using imagePreparer: @escaping @Sendable (URL) async -> Bool,
-        generation: Int,
-        revision requestedRevision: Int
-    ) async {
-        await withTaskGroup(of: Bool.self) { group in
-            var iterator = urls.makeIterator()
-            let initialCount = min(max(1, maximumConcurrentCount), urls.count)
-            for _ in 0..<initialCount {
-                guard let url = iterator.next() else { break }
-                group.addTask { await imagePreparer(url) }
+    private func dequeueImagePreparationURL() -> URL? {
+        while queuedImagePreparationHead < queuedImagePreparationURLs.count {
+            let url = queuedImagePreparationURLs[queuedImagePreparationHead]
+            queuedImagePreparationHead += 1
+            guard queuedImagePreparationURLSet.remove(url) != nil else { continue }
+            compactImagePreparationQueueIfNeeded()
+            return url
+        }
+        queuedImagePreparationURLs.removeAll(keepingCapacity: true)
+        queuedImagePreparationHead = 0
+        return nil
+    }
+
+    private func compactImagePreparationQueueIfNeeded() {
+        guard queuedImagePreparationHead >= 256,
+              queuedImagePreparationHead * 2 >= queuedImagePreparationURLs.count
+        else { return }
+        queuedImagePreparationURLs.removeFirst(queuedImagePreparationHead)
+        queuedImagePreparationHead = 0
+    }
+
+    private func startImagePreparation(for url: URL) {
+        precondition(imagePreparationTasks.count < Self.maximumConcurrentImagePreparations)
+        let id = UUID()
+        let imagePreparer = imagePreparer
+        let task = Task(priority: .utility) { [weak self] in
+            let result = await imagePreparer(url)
+            let wasCancelled = Task.isCancelled
+            self?.finishImagePreparation(
+                for: url,
+                id: id,
+                result: result,
+                wasCancelled: wasCancelled
+            )
+        }
+        imagePreparationTasks[url] = ImagePreparationEntry(id: id, task: task)
+    }
+
+    private func finishImagePreparation(
+        for url: URL,
+        id: UUID,
+        result: ImageResolver.PreparationResult,
+        wasCancelled: Bool
+    ) {
+        guard imagePreparationTasks[url]?.id == id else { return }
+        imagePreparationTasks.removeValue(forKey: url)
+
+        if wasCancelled {
+            // URL 在取消完成前可能被重新加入（或 imageBaseURL 重置后仍指向同一绝对
+            // 地址）；此时按新生命周期重新排队，旧结果绝不能污染状态。
+            if referencedImageURLs.contains(url) {
+                enqueueImagePreparation(for: url)
+            }
+            drainImagePreparationQueue()
+            return
+        }
+        guard referencedImageURLs.contains(url) else {
+            drainImagePreparationQueue()
+            return
+        }
+
+        switch result {
+        case let .ready(_, cacheChanged):
+            if url.isFileURL {
+                preparedLocalImageURLs.insert(url)
+            } else {
+                attemptedRemoteImageURLs.insert(url)
+                failedRemoteImageURLs.remove(url)
+                preparedRemoteImageURLs.insert(url)
+            }
+            // 远程 single-flight 的后来调用可能看到“已在缓存”而返回 false，但当前
+            // storage 仍可能是旧 revision 留下的占位框；远程 ready 一律消费一次。
+            if cacheChanged || url.isFileURL == false {
+                enqueueImageRefresh(for: url, invalidated: false)
             }
 
-            while let changed = await group.next() {
-                guard !Task.isCancelled,
-                      imagePreparationGeneration == generation,
-                      revision == requestedRevision
-                else {
-                    group.cancelAll()
-                    return
+        case let .unavailable(cacheChanged):
+            if url.isFileURL {
+                // cacheChanged 只描述 NSCache；正文 artifact 的生命周期更长。曾成功
+                // 显示过的本地资源一旦不可用，即使缓存已先被驱逐也必须撤掉旧像素。
+                let retainedArtifactMayExist = preparedLocalImageURLs.remove(url) != nil
+                if cacheChanged || retainedArtifactMayExist {
+                    enqueueImageRefresh(for: url, invalidated: true)
                 }
-                if changed {
-                    needsImageRefresh = true
-                    applyImageRefreshIfPossible()
-                }
-                if let url = iterator.next(), Task.isCancelled == false {
-                    group.addTask { await imagePreparer(url) }
-                }
+            } else {
+                preparedRemoteImageURLs.remove(url)
+                failedRemoteImageURLs.insert(url)
+            }
+
+        case .exceedsSizeLimit:
+            if url.isFileURL == false {
+                preparedRemoteImageURLs.remove(url)
+                failedRemoteImageURLs.insert(url)
             }
         }
-        guard !Task.isCancelled,
-              imagePreparationGeneration == generation,
-              revision == requestedRevision
-        else { return }
-        imagePreparationTask = nil
+        applyImageRefreshIfPossible()
+        drainImagePreparationQueue()
+    }
+
+    private func enqueueImageRefresh(for url: URL, invalidated: Bool) {
+        let normalizedURL = ImageResolver.normalizedURL(url)
+        pendingImageRefreshURLs.insert(normalizedURL)
+        if invalidated {
+            invalidatedImageRefreshURLs.insert(normalizedURL)
+        }
+    }
+
+    private func clearPendingImageRefresh() {
+        pendingImageRefreshURLs.removeAll(keepingCapacity: true)
+        invalidatedImageRefreshURLs.removeAll(keepingCapacity: true)
+        refreshesAllImages = false
+    }
+
+    private func resetImagePreparationState() {
+        for entry in imagePreparationTasks.values {
+            entry.task.cancel()
+        }
+        // 活跃任务继续占用并发名额，直到其底层 I/O 响应取消并回调 finish；这里只
+        // 丢弃尚未启动的值队列和上一轮引用状态。
+        queuedImagePreparationURLs.removeAll(keepingCapacity: true)
+        queuedImagePreparationHead = 0
+        queuedImagePreparationURLSet.removeAll(keepingCapacity: true)
+        referencedImageURLs.removeAll(keepingCapacity: true)
+        attemptedRemoteImageURLs.removeAll(keepingCapacity: true)
+        failedRemoteImageURLs.removeAll(keepingCapacity: true)
+        preparedRemoteImageURLs.removeAll(keepingCapacity: true)
+        preparedLocalImageURLs.removeAll(keepingCapacity: true)
+        clearPendingImageRefresh()
     }
 
     private func scheduleMathPreparation(
@@ -1916,10 +2091,25 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
     var pendingDirtyRangeForTesting: NSRange? { pendingDirtyRange }
     var isParseDeferredForMarkedTextForTesting: Bool { isParseDeferredForMarkedText }
     var needsMathRefreshForTesting: Bool { needsMathRefresh }
+    var pendingImageRefreshForTesting: Bool {
+        refreshesAllImages || !pendingImageRefreshURLs.isEmpty
+    }
+    var inFlightImagePreparationCountForTesting: Int { imagePreparationTasks.count }
+    var queuedImagePreparationCountForTesting: Int { queuedImagePreparationURLSet.count }
+    var failedRemoteImageCountForTesting: Int { failedRemoteImageURLs.count }
 
     func waitForImagePreparationForTesting() async {
-        let task = imagePreparationTask
-        await task?.value
+        while !imagePreparationTasks.isEmpty || !queuedImagePreparationURLSet.isEmpty {
+            drainImagePreparationQueue()
+            let tasks = imagePreparationTasks.values.map(\.task)
+            if tasks.isEmpty {
+                await Task.yield()
+                continue
+            }
+            for task in tasks {
+                await task.value
+            }
+        }
     }
 
     func waitForMathPreparationForTesting() async {
@@ -2070,13 +2260,15 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
                 mode: presentationMode,
                 revealsCurrentBlockSource: revealsCurrentBlockSource,
                 into: storage,
-                imageBaseURL: imageBaseURL
+                imageBaseURL: imageBaseURL,
+                invalidatedImageURLs: invalidatedImageRefreshURLs
             )
             textView?.needsDisplay = true
         }
         isApplyingAttributes = false
         appliedPresentationMode = presentationMode
         if presentationMode == .rendered {
+            clearPendingImageRefresh()
             recordMathArtifactsApplied()
             scheduleMathPreparation(package: package, revision: revision)
         } else {
@@ -2085,7 +2277,8 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
     }
 
     private func applyImageRefreshIfPossible() {
-        guard needsImageRefresh,
+        guard presentationMode == .rendered,
+              refreshesAllImages || !pendingImageRefreshURLs.isEmpty,
               textView?.hasMarkedText() != true,
               !isApplyingAttributes,
               pendingDirtyRange == nil,
@@ -2093,26 +2286,23 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
               let storage = textStorage
         else { return }
 
+        let matchingImageURLs = refreshesAllImages ? nil : pendingImageRefreshURLs
+        let invalidatedImageURLs = invalidatedImageRefreshURLs
         isApplyingAttributes = true
         suppressUndo {
-            _ = engine.render(
+            lastImageRefreshWriteCount = engine.refreshImageArtifacts(
                 package: package,
                 selection: textView?.selectedRange(),
-                mode: presentationMode,
                 revealsCurrentBlockSource: revealsCurrentBlockSource,
                 into: storage,
-                imageBaseURL: imageBaseURL
+                imageBaseURL: imageBaseURL,
+                matching: matchingImageURLs,
+                invalidatedImageURLs: invalidatedImageURLs
             )
             textView?.needsDisplay = true
         }
         isApplyingAttributes = false
-        appliedPresentationMode = presentationMode
-        needsImageRefresh = false
-        if presentationMode == .rendered {
-            recordMathArtifactsApplied()
-        }
-        revealCache.removeAll(keepingCapacity: true)
-        lastReconcileWriteCount = 0
+        clearPendingImageRefresh()
     }
 
     private func applyMathRefreshIfPossible() {

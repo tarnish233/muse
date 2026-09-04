@@ -36,31 +36,8 @@ nonisolated struct MathRenderRequest: Hashable, Sendable {
     }
 }
 
-/// 有界的确定性失败缓存。容量很小，线性 FIFO 驱逐比维护另一套链表更简单；
-/// `Set` 仍让热路径查询保持 O(1)。
-struct BoundedInvalidExpressionCache {
-    let capacity: Int
-    private var keys = Set<String>()
-    private var insertionOrder: [String] = []
-
-    init(capacity: Int) {
-        self.capacity = max(0, capacity)
-    }
-
-    var count: Int { keys.count }
-
-    func contains(_ key: String) -> Bool {
-        keys.contains(key)
-    }
-
-    mutating func insert(_ key: String) {
-        guard capacity > 0, keys.insert(key).inserted else { return }
-        insertionOrder.append(key)
-        if insertionOrder.count > capacity {
-            keys.remove(insertionOrder.removeFirst())
-        }
-    }
-}
+/// 公式失败缓存保留语义化别名；底层有界集合也供远程图片失败缓存复用。
+typealias BoundedInvalidExpressionCache = BoundedFIFOSet<String>
 
 /// 本地 MathJax 的异步排版服务。
 ///

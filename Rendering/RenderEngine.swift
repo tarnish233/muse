@@ -25,6 +25,8 @@ public struct RenderEngine {
         /// 块图片目标文本在后台解析阶段提取，主线程应用属性后不再扫描整篇 token
         /// 和桥接整份 NSTextStorage 字符串。
         public let blockImageDestinations: [String]
+        /// 块图片 token 索引，供异步图片完成后只刷新对应行，不重新渲染整篇正文。
+        let blockImageTokenIndices: [Int]
         /// 公式 token 索引与去重后的 MathJax 请求都在后台 package 构建时准备好；
         /// 主线程的选区刷新和每键调度不得再整篇 filter / compactMap / sort。
         let mathTokenIndices: [Int]
@@ -54,6 +56,7 @@ public struct RenderEngine {
             self.lineStarts = lineStarts
             self.tables = tables
             self.blockImageDestinations = blockImageDestinations
+            blockImageTokenIndices = tokens.indices.filter { tokens[$0].isBlockImage }
             self.characterCount = characterCount ?? index.utf16Length
 
             func lineIndex(atUTF8 offset: Int) -> Int {
@@ -253,7 +256,8 @@ public struct RenderEngine {
         mode: PresentationMode = .rendered,
         revealsCurrentBlockSource: Bool = true,
         into storage: NSTextStorage,
-        imageBaseURL: URL? = nil
+        imageBaseURL: URL? = nil,
+        invalidatedImageURLs: Set<URL> = []
     ) -> Stats {
         let full = NSRange(location: 0, length: storage.length)
 
@@ -261,7 +265,9 @@ public struct RenderEngine {
             storage: storage,
             package: package,
             imageBaseURL: imageBaseURL,
-            theme: theme
+            theme: theme,
+            preservingImageArtifactsIn: [full],
+            invalidatedImageURLs: invalidatedImageURLs
         )
         storage.beginEditing()
         storage.setAttributes(mode == .source ? sourceAttributes() : baseAttributes(), range: full)
@@ -323,6 +329,72 @@ public struct RenderEngine {
         return package.mathTokenIndices.count
     }
 
+    /// 把异步完成（或被删除）的图片只落到对应块图片行。
+    ///
+    /// 与整篇 `render` 不同，这条路径不重置无关段落、表格与公式属性；20～30 张图片
+    /// 逐步完成时，成本随图片行数增长，而不是重复扫描和重写整篇正文。
+    @discardableResult
+    public func refreshImageArtifacts(
+        package: Package,
+        selection: NSRange?,
+        revealsCurrentBlockSource: Bool = true,
+        into storage: NSTextStorage,
+        imageBaseURL: URL?,
+        matching imageURLs: Set<URL>? = nil,
+        invalidatedImageURLs: Set<URL> = []
+    ) -> Int {
+        guard !package.blockImageTokenIndices.isEmpty else { return 0 }
+        let source = storage.string as NSString
+        let normalizedMatches = imageURLs.map { Set($0.map(ImageResolver.normalizedURL)) }
+        var targets: [(token: Token, lineRange: NSRange)] = []
+        targets.reserveCapacity(package.blockImageTokenIndices.count)
+
+        for tokenIndex in package.blockImageTokenIndices {
+            let token = package.tokens[tokenIndex]
+            guard let destinationRange = token.linkDestination else { continue }
+            let destinationNS = package.index.nsRange(destinationRange)
+            guard destinationNS.location >= 0, destinationNS.upperBound <= source.length else { continue }
+            let destination = source.substring(with: destinationNS)
+            guard let url = ImageResolver.resolvedURL(destination: destination, baseURL: imageBaseURL)
+            else { continue }
+            let normalizedURL = ImageResolver.normalizedURL(url)
+            if let normalizedMatches, normalizedMatches.contains(normalizedURL) == false { continue }
+
+            let lineRange = package.index.nsRange(
+                package.lineStarts[token.line]..<lineEndUTF8(token.line, package: package)
+            )
+            guard lineRange.length > 0, lineRange.upperBound <= storage.length else { continue }
+            targets.append((token, lineRange))
+        }
+        guard !targets.isEmpty else { return 0 }
+
+        let context = StyleContext(
+            storage: storage,
+            package: package,
+            imageBaseURL: imageBaseURL,
+            theme: theme,
+            preservingImageArtifactsIn: targets.map(\.lineRange),
+            invalidatedImageURLs: invalidatedImageURLs
+        )
+        storage.beginEditing()
+        for target in targets {
+            storage.removeAttribute(.museImageURL, range: target.lineRange)
+            storage.removeAttribute(.museImageArtifact, range: target.lineRange)
+            storage.removeAttribute(.museImageSize, range: target.lineRange)
+            applyImageStyle(target.token, package: package, into: storage, context: context)
+            if let entry = imageVisibilityEntry(
+                target.token,
+                package: package,
+                selection: selection,
+                revealsCurrentBlockSource: revealsCurrentBlockSource
+            ) {
+                apply(entry, imageBaseURL: imageBaseURL, into: storage)
+            }
+        }
+        storage.endEditing()
+        return targets.count
+    }
+
     // MARK: - 脏行增量应用（输入热路径）
 
     /// 只重置与重排 dirty 行（跨越的行）的属性；marker 显隐由调用方另行 reconcile。
@@ -338,7 +410,8 @@ public struct RenderEngine {
         utf16Range: NSRange,
         mode: PresentationMode = .rendered,
         into storage: NSTextStorage,
-        imageBaseURL: URL? = nil
+        imageBaseURL: URL? = nil,
+        invalidatedImageURLs: Set<URL> = []
     ) -> ClosedRange<Int> {
         let editedLines = lineSpan(containing: utf16Range, package: package)
         var dirtyLines = editedLines
@@ -363,7 +436,9 @@ public struct RenderEngine {
             storage: storage,
             package: package,
             imageBaseURL: imageBaseURL,
-            theme: theme
+            theme: theme,
+            preservingImageArtifactsIn: [span],
+            invalidatedImageURLs: invalidatedImageURLs
         )
         storage.beginEditing()
         storage.setAttributes(mode == .source ? sourceAttributes() : baseAttributes(), range: span)
@@ -612,19 +687,8 @@ public struct RenderEngine {
     ) -> [VisibilityEntry] {
         func makeEntries(_ token: Token, state: MarkerState) -> [VisibilityEntry] {
             // 行内图片：整段一个条目，携带子区间供附件显隐与源码回显。
-            if let inline = token.inlineImageRange {
-                let spanNS = package.index.nsRange(inline)
-                let identity = markerIdentity(for: inline, package: package)
-                return [VisibilityEntry(
-                    line: identity.line,
-                    markerRelOffset: identity.relOffset,
-                    markerNS: spanNS,
-                    state: state,
-                    listDepth: nil,
-                    inlineImageRange: spanNS,
-                    imageMarkerSubRange: package.index.nsRange(token.markerRange),
-                    imageClosingSubRange: token.closingMarkerRange.map(package.index.nsRange)
-                )]
+            if let entry = imageVisibilityEntry(token, package: package, state: state) {
+                return [entry]
             }
             let isBlockMath: Bool
             switch token.kind {
@@ -722,6 +786,49 @@ public struct RenderEngine {
             }
             return makeEntries(token, state: state)
         }
+    }
+
+    private func imageVisibilityEntry(
+        _ token: Token,
+        package: Package,
+        state: MarkerState
+    ) -> VisibilityEntry? {
+        guard let inline = token.inlineImageRange else { return nil }
+        let span = package.index.nsRange(inline)
+        let identity = markerIdentity(for: inline, package: package)
+        return VisibilityEntry(
+            line: identity.line,
+            markerRelOffset: identity.relOffset,
+            markerNS: span,
+            state: state,
+            listDepth: nil,
+            inlineImageRange: span,
+            imageMarkerSubRange: package.index.nsRange(token.markerRange),
+            imageClosingSubRange: token.closingMarkerRange.map(package.index.nsRange)
+        )
+    }
+
+    private func imageVisibilityEntry(
+        _ token: Token,
+        package: Package,
+        selection: NSRange?,
+        revealsCurrentBlockSource: Bool
+    ) -> VisibilityEntry? {
+        let state: MarkerState
+        if token.isBlockImage, !revealsCurrentBlockSource {
+            state = .hidden
+        } else if let selection {
+            let marker = package.index.nsRange(token.markerRange)
+            let content = token.contentRange.map(package.index.nsRange) ?? marker
+            let closing = token.closingMarkerRange.map(package.index.nsRange)
+            let revealed = touches(marker, selection: selection)
+                || (closing.map { touches($0, selection: selection) } ?? false)
+                || touches(content, selection: selection)
+            state = revealed ? .revealed : .hidden
+        } else {
+            state = .hidden
+        }
+        return imageVisibilityEntry(token, package: package, state: state)
     }
 
     /// 公式异步产物刷新只需要重算公式自身的显隐，不能为了少量 math token
@@ -1205,13 +1312,15 @@ public struct RenderEngine {
     private final class StyleContext {
         struct ResolvedImage {
             let url: URL
-            let image: NSImage
+            let artifact: ImageRenderArtifact
         }
 
         let imageBaseURL: URL?
         private let storage: NSTextStorage
         private let package: Package
         private let theme: Theme
+        private let retainedImageArtifacts: [URL: ImageRenderArtifact]
+        private let invalidatedImageURLs: Set<URL>
         lazy var baseFont: NSFont = theme.baseFont()
         lazy var boldFont: NSFont = theme.boldFont()
         lazy var codeFont: NSFont = theme.codeFont()
@@ -1251,12 +1360,24 @@ public struct RenderEngine {
             storage: NSTextStorage,
             package: Package,
             imageBaseURL: URL?,
-            theme: Theme
+            theme: Theme,
+            preservingImageArtifactsIn ranges: [NSRange] = [],
+            invalidatedImageURLs: Set<URL> = []
         ) {
             self.storage = storage
             self.package = package
             self.imageBaseURL = imageBaseURL
             self.theme = theme
+            self.invalidatedImageURLs = Set(invalidatedImageURLs.map(ImageResolver.normalizedURL))
+
+            var retained: [URL: ImageRenderArtifact] = [:]
+            for range in ranges where range.length > 0 && range.upperBound <= storage.length {
+                storage.enumerateAttribute(.museImageArtifact, in: range) { value, _, _ in
+                    guard let artifact = value as? ImageRenderArtifact else { return }
+                    retained[ImageResolver.normalizedURL(artifact.url)] = artifact
+                }
+            }
+            retainedImageArtifacts = retained
         }
 
         var source: NSString {
@@ -1296,8 +1417,25 @@ public struct RenderEngine {
             if let cached = resolvedImages[destination] { return cached }
             let resolved = ImageResolver.resolvedURL(destination: destination, baseURL: imageBaseURL)
                 .flatMap { url -> ResolvedImage? in
-                    guard let image = ImageResolver.cachedImage(url: url) else { return nil }
-                    return ResolvedImage(url: url, image: image)
+                    let normalizedURL = ImageResolver.normalizedURL(url)
+                    if let image = ImageResolver.cachedImage(url: normalizedURL) {
+                        let size = ImageResolver.displaySize(for: image.size)
+                        return ResolvedImage(
+                            url: normalizedURL,
+                            artifact: ImageRenderArtifact(
+                                image: image,
+                                url: normalizedURL,
+                                displaySize: size
+                            )
+                        )
+                    }
+                    guard invalidatedImageURLs.contains(normalizedURL) == false,
+                          let artifact = retainedImageArtifacts[normalizedURL]
+                    else { return nil }
+                    return ResolvedImage(
+                        url: normalizedURL,
+                        artifact: artifact
+                    )
                 }
             resolvedImages[destination] = resolved
             return resolved
@@ -1666,8 +1804,9 @@ public struct RenderEngine {
         var attributes: [NSAttributedString.Key: Any] = [.museImageDestination: destination]
         let displaySize: NSSize
         if let resolved = context.image(destination: destination) {
-            displaySize = ImageResolver.displaySize(for: resolved.image.size)
+            displaySize = resolved.artifact.displaySize
             attributes[.museImageURL] = resolved.url.absoluteURL.absoluteString
+            attributes[.museImageArtifact] = resolved.artifact
         } else {
             // 尚未加载或加载失败：仍然按块呈现，绘制层画一个带
             // 目的地文字的占位框——比把源码摊在正文里更能说明「这里是一张图」。

@@ -1,18 +1,51 @@
 import AppKit
 import ImageIO
 
+/// 已经完成解码和缩放、可由 TextKit 属性强持有的图片绘制产物。
+///
+/// `NSCache` 只负责跨渲染复用；正文当前正在显示的像素必须跟随属性生命周期，不能因
+/// 系统内存压力驱逐缓存后突然退回占位框。对象不可变，绘制回调只读取。
+public nonisolated final class ImageRenderArtifact: NSObject, @unchecked Sendable {
+    public let image: NSImage
+    public let url: URL
+    public let displaySize: CGSize
+
+    init(image: NSImage, url: URL, displaySize: CGSize) {
+        self.image = image
+        self.url = url
+        self.displaySize = displaySize
+    }
+}
+
 /// 图片目的地 → URL / NSImage 的解析（M5 行内图片与点击预览共用）。
 public nonisolated enum ImageResolver {
-    typealias RemoteDownloader = @Sendable (URL) async throws -> (URL, URLResponse)
+    struct RemoteDownload: Sendable {
+        let fileURL: URL
+        let response: URLResponse
+    }
+
+    enum RemoteDownloadError: Error, Equatable {
+        case exceedsSizeLimit
+        case missingResponse
+    }
+
+    typealias RemoteDownloader = @Sendable (URL) async throws -> RemoteDownload
     typealias RetrySleeper = @Sendable (Duration) async throws -> Void
 
     public enum PreparationResult: Sendable {
         case ready(NSImage, cacheChanged: Bool)
         case exceedsSizeLimit
-        case failure
+        /// 资源当前不可用；`cacheChanged` 为 true 表示旧的本地缓存刚被淘汰，正文
+        /// 必须刷新为占位尺寸，不能继续保留陈旧图片与行高。
+        case unavailable(cacheChanged: Bool)
 
         public var cacheChanged: Bool {
-            if case let .ready(_, cacheChanged) = self { cacheChanged } else { false }
+            switch self {
+            case let .ready(_, cacheChanged), let .unavailable(cacheChanged):
+                cacheChanged
+            case .exceedsSizeLimit:
+                false
+            }
         }
     }
 
@@ -48,6 +81,10 @@ public nonisolated enum ImageResolver {
 
         func cachedImage(at url: URL) -> NSImage? {
             storage.object(forKey: Self.key(for: url))?.image
+        }
+
+        func removeImage(at url: URL) {
+            storage.removeObject(forKey: Self.key(for: url))
         }
 
         /// 刷新磁盘版本，返回内存缓存是否发生变化。调用方负责把它放在后台执行；
@@ -102,11 +139,7 @@ public nonisolated enum ImageResolver {
         }
 
         private static func key(for url: URL) -> NSString {
-            if url.isFileURL {
-                url.standardizedFileURL.absoluteString as NSString
-            } else {
-                url.absoluteURL.absoluteString as NSString
-            }
+            ImageResolver.normalizedURL(url).absoluteString as NSString
         }
 
         private static func fingerprint(at url: URL) -> FileFingerprint? {
@@ -129,6 +162,218 @@ public nonisolated enum ImageResolver {
         }
     }
 
+    /// URLSession data task 的落盘接收器。每个数据块在写入前检查剩余额度，因此未知
+    /// Content-Length / chunked 响应也不可能先把任意体积写满磁盘再被拒绝。
+    final class RemoteDataAccumulator {
+        let fileURL: URL
+        let maxBytes: Int64
+        private(set) var bytesWritten: Int64 = 0
+        private var fileHandle: FileHandle?
+        private var ownsFile = true
+
+        init(
+            maxBytes: Int,
+            temporaryDirectory: URL = FileManager.default.temporaryDirectory
+        ) throws {
+            self.maxBytes = Int64(max(0, maxBytes))
+            fileURL = temporaryDirectory.appending(
+                path: "MuseRemoteImage-\(UUID().uuidString).tmp"
+            )
+            guard FileManager.default.createFile(atPath: fileURL.path, contents: nil) else {
+                throw CocoaError(.fileWriteUnknown)
+            }
+            do {
+                fileHandle = try FileHandle(forWritingTo: fileURL)
+            } catch {
+                try? FileManager.default.removeItem(at: fileURL)
+                throw error
+            }
+        }
+
+        func append(_ data: Data) throws {
+            let chunkBytes = Int64(data.count)
+            guard chunkBytes <= maxBytes - bytesWritten else {
+                throw RemoteDownloadError.exceedsSizeLimit
+            }
+            guard let fileHandle else { throw CocoaError(.fileWriteUnknown) }
+            try fileHandle.write(contentsOf: data)
+            bytesWritten += chunkBytes
+        }
+
+        /// 关闭文件并把删除责任转交给调用方。
+        func finish() throws -> URL {
+            if let fileHandle {
+                try fileHandle.close()
+                self.fileHandle = nil
+            }
+            ownsFile = false
+            return fileURL
+        }
+
+        func discard() {
+            if let fileHandle {
+                try? fileHandle.close()
+                self.fileHandle = nil
+            }
+            guard ownsFile else { return }
+            ownsFile = false
+            try? FileManager.default.removeItem(at: fileURL)
+        }
+
+        deinit {
+            discard()
+        }
+    }
+
+    private final class RemoteDownloadCancellationBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var operation: RemoteDownloadOperation?
+        private var cancellationRequested = false
+
+        func store(_ operation: RemoteDownloadOperation) {
+            let shouldCancel = lock.withLock {
+                self.operation = operation
+                return cancellationRequested
+            }
+            if shouldCancel { operation.cancel() }
+        }
+
+        func cancel() {
+            let operation = lock.withLock {
+                cancellationRequested = true
+                return self.operation
+            }
+            operation?.cancel()
+        }
+    }
+
+    /// 每个请求使用独立串行 delegate queue，把 URLSession 的分块回调直接写入有界
+    /// 临时文件。异步调用者取消时同步取消 data task，最终完成回调统一清理或移交文件。
+    private final class RemoteDownloadOperation: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+        private let maxBytes: Int64
+        private let accumulator: RemoteDataAccumulator
+        private let continuation: CheckedContinuation<RemoteDownload, Error>
+        private let cancellationLock = NSLock()
+        private var cancellationRequested = false
+        private var response: URLResponse?
+        private var terminalError: Error?
+        private var completed = false
+        private var task: URLSessionDataTask?
+        private var session: URLSession?
+
+        init(
+            maxBytes: Int,
+            continuation: CheckedContinuation<RemoteDownload, Error>
+        ) throws {
+            self.maxBytes = Int64(max(0, maxBytes))
+            accumulator = try RemoteDataAccumulator(maxBytes: maxBytes)
+            self.continuation = continuation
+        }
+
+        func start(url: URL) {
+            let delegateQueue = OperationQueue()
+            delegateQueue.maxConcurrentOperationCount = 1
+            delegateQueue.qualityOfService = .utility
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.requestCachePolicy = .useProtocolCachePolicy
+            let session = URLSession(
+                configuration: configuration,
+                delegate: self,
+                delegateQueue: delegateQueue
+            )
+            self.session = session
+            let task = session.dataTask(with: url)
+            let shouldCancel = cancellationLock.withLock {
+                self.task = task
+                return cancellationRequested
+            }
+            // 先 resume 再 cancel，保证即使调用者在 operation 建立前已经取消，
+            // URLSession 也会进入 didCompleteWithError，checked continuation 必定收口。
+            task.resume()
+            if shouldCancel { task.cancel() }
+        }
+
+        func cancel() {
+            let task = cancellationLock.withLock {
+                cancellationRequested = true
+                return self.task
+            }
+            task?.cancel()
+        }
+
+        func urlSession(
+            _ session: URLSession,
+            dataTask: URLSessionDataTask,
+            didReceive response: URLResponse,
+            completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+        ) {
+            self.response = response
+            if response.expectedContentLength > maxBytes {
+                terminalError = RemoteDownloadError.exceedsSizeLimit
+                completionHandler(.cancel)
+            } else {
+                completionHandler(.allow)
+            }
+        }
+
+        func urlSession(
+            _ session: URLSession,
+            dataTask: URLSessionDataTask,
+            didReceive data: Data
+        ) {
+            guard terminalError == nil else { return }
+            do {
+                try accumulator.append(data)
+            } catch {
+                terminalError = error
+                dataTask.cancel()
+            }
+        }
+
+        func urlSession(
+            _ session: URLSession,
+            task: URLSessionTask,
+            didCompleteWithError error: Error?
+        ) {
+            guard completed == false else { return }
+            completed = true
+            defer {
+                cancellationLock.withLock { self.task = nil }
+                self.session = nil
+                session.finishTasksAndInvalidate()
+            }
+
+            if let terminalError {
+                accumulator.discard()
+                continuation.resume(throwing: terminalError)
+                return
+            }
+            if cancellationLock.withLock({ cancellationRequested }) {
+                accumulator.discard()
+                continuation.resume(throwing: CancellationError())
+                return
+            }
+            if let error {
+                accumulator.discard()
+                continuation.resume(throwing: error)
+                return
+            }
+            guard let response else {
+                accumulator.discard()
+                continuation.resume(throwing: RemoteDownloadError.missingResponse)
+                return
+            }
+
+            do {
+                let fileURL = try accumulator.finish()
+                continuation.resume(returning: RemoteDownload(fileURL: fileURL, response: response))
+            } catch {
+                accumulator.discard()
+                continuation.resume(throwing: error)
+            }
+        }
+    }
+
     private actor ImageLoadWorker {
         private let cache: ImageCache
 
@@ -143,6 +388,31 @@ public nonisolated enum ImageResolver {
 
     private static let cache = ImageCache()
     private static let loadWorker = ImageLoadWorker(cache: cache)
+
+    static func normalizedURL(_ url: URL) -> URL {
+        url.isFileURL ? url.standardizedFileURL : url.absoluteURL
+    }
+
+    @concurrent
+    private static func downloadRemoteImage(from url: URL) async throws -> RemoteDownload {
+        let cancellationBox = RemoteDownloadCancellationBox()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                do {
+                    let operation = try RemoteDownloadOperation(
+                        maxBytes: maxRemoteBytes,
+                        continuation: continuation
+                    )
+                    cancellationBox.store(operation)
+                    operation.start(url: url)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        } onCancel: {
+            cancellationBox.cancel()
+        }
+    }
 
     /// 解析目的地：http(s) 远程图、`~` 展开、相对文档目录、绝对路径。
     /// 本地路径只做一次 percent decode；无效 escape 保守按字面路径处理。
@@ -172,6 +442,10 @@ public nonisolated enum ImageResolver {
         cache.cachedImage(at: url)
     }
 
+    static func removeCachedImageForTesting(url: URL) {
+        cache.removeImage(at: url)
+    }
+
     /// 仅查询内存缓存；渲染和绘制热路径必须使用它，不能访问磁盘。
     public static func cachedLocalImage(url: URL) -> NSImage? {
         guard url.isFileURL else { return nil }
@@ -192,7 +466,7 @@ public nonisolated enum ImageResolver {
     public static func prepareImage(url: URL) async -> PreparationResult {
         await prepareImage(
             url: url,
-            remoteDownloader: { try await URLSession.shared.download(from: $0) },
+            remoteDownloader: { try await downloadRemoteImage(from: $0) },
             retrySleeper: { try await Task.sleep(for: $0) }
         )
     }
@@ -206,12 +480,14 @@ public nonisolated enum ImageResolver {
     ) async -> PreparationResult {
         if url.isFileURL {
             let changed = await prepareLocalImage(url: url)
-            guard let image = cachedImage(url: url) else { return .failure }
+            guard let image = cachedImage(url: url) else {
+                return .unavailable(cacheChanged: changed)
+            }
             return .ready(image, cacheChanged: changed)
         }
 
         guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else {
-            return .failure
+            return .unavailable(cacheChanged: false)
         }
         if let image = cachedImage(url: url) {
             return .ready(image, cacheChanged: false)
@@ -220,8 +496,11 @@ public nonisolated enum ImageResolver {
         for attempt in 0...remoteRetryDelays.count {
             do {
                 try Task.checkCancellation()
-                let (downloadURL, response) = try await remoteDownloader(url)
-                guard let http = response as? HTTPURLResponse else { return .failure }
+                let download = try await remoteDownloader(url)
+                defer { try? FileManager.default.removeItem(at: download.fileURL) }
+                guard let http = download.response as? HTTPURLResponse else {
+                    return .unavailable(cacheChanged: false)
+                }
                 guard (200..<300).contains(http.statusCode) else {
                     guard attempt < remoteRetryDelays.count,
                           shouldRetry(statusCode: http.statusCode),
@@ -229,27 +508,29 @@ public nonisolated enum ImageResolver {
                             remoteRetryDelays[attempt],
                             using: retrySleeper
                           )
-                    else { return .failure }
+                    else { return .unavailable(cacheChanged: false) }
                     continue
                 }
                 guard http.mimeType?.lowercased().hasPrefix("image/") == true else {
-                    return .failure
+                    return .unavailable(cacheChanged: false)
                 }
                 try Task.checkCancellation()
-                guard let downloadedSize = downloadedFileSize(at: downloadURL) else {
-                    return .failure
+                guard let downloadedSize = downloadedFileSize(at: download.fileURL) else {
+                    return .unavailable(cacheChanged: false)
                 }
                 guard remotePayloadExceedsLimit(
                     expectedContentLength: http.expectedContentLength,
                     downloadedFileSize: downloadedSize
                 ) == false else { return .exceedsSizeLimit }
-                guard let image = downsampledRemoteImage(fileURL: downloadURL) else {
-                    return .failure
+                guard let image = downsampledRemoteImage(fileURL: download.fileURL) else {
+                    return .unavailable(cacheChanged: false)
                 }
                 let changed = cache.storeRemoteImage(image, at: url)
                 return .ready(image, cacheChanged: changed)
+            } catch RemoteDownloadError.exceedsSizeLimit {
+                return .exceedsSizeLimit
             } catch is CancellationError {
-                return .failure
+                return .unavailable(cacheChanged: false)
             } catch {
                 guard Task.isCancelled == false,
                       attempt < remoteRetryDelays.count,
@@ -258,15 +539,15 @@ public nonisolated enum ImageResolver {
                         remoteRetryDelays[attempt],
                         using: retrySleeper
                       )
-                else { return .failure }
+                else { return .unavailable(cacheChanged: false) }
             }
         }
-        return .failure
+        return .unavailable(cacheChanged: false)
     }
 
     public static func prepareImage(destination: String, baseURL: URL?) async -> PreparationResult {
         guard let url = resolvedURL(destination: destination, baseURL: baseURL) else {
-            return .failure
+            return .unavailable(cacheChanged: false)
         }
         return await prepareImage(url: url)
     }

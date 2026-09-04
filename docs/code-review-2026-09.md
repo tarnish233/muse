@@ -4,16 +4,7 @@
 
 按主题分批修，每批独立提交。**行号会随修改漂移，定位以符号名为准。**
 
-修复顺序：公式 → 图片/远程资源 → 侧边栏 → 依赖与重复实现。
-
-## 批次二：图片与远程资源
-
-- [ ] `Rendering/ImageResolver.swift` 远程下载 —— 20MB 上限从**逐字节流式硬限**退化成**下载完成后**的文件尺寸检查。`Transfer-Encoding: chunked`（`expectedContentLength == -1`）时服务端可以先把任意体积写满磁盘才被拒；`scheduleBlockImagePreparation` 在解析时自动入队，打开文档即触发，无需用户手势，且并发 4 路。被删掉的 `RemoteDataAccumulator` 注释原文就写了「不能改成下载完再检查」。
-- [ ] `Rendering/ImageResolver.swift` 远程下载 —— 临时文件在所有路径上都没有 `removeItem(at:)`：成功、MIME 拒绝、超限拒绝、解码失败、重试。async 版 `download(from:)` 把文件所有权交给调用方（与 completion-handler 版不同），因此每次远程下载都泄漏一个 `CFNetworkDownload_*.tmp` 直到进程退出。
-- [ ] `Document/RenderCoordinator.swift` `scheduleBlockImagePreparation` —— 去掉 `url.isFileURL` 过滤后，HTTP 拉取进了**每次击键**的解析路径：每个字符都 cancel 在途 `URLSession.download` 并重开连接，且没有 in-flight 去重、没有负缓存。连续输入时远程图片永远下不完（~8 字符/秒 ⇒ 一句话约 80 个 GET 全部半途中止）。失败同样无界：404 / 非 `image/*` 不记录任何状态，整个文档生命周期每次解析都重发；5xx 更糟，`shouldRetry` 为真，每次解析花 3 个请求 + 1.25s `Task.sleep`。修：新旧 URL 集合比对，未变则不 cancel/重启；加 in-flight `[URL: Task]` 注册表与负缓存（参考 `MathRenderer.invalidExpressions`，但要有界）。
-- [ ] `Document/RenderCoordinator.swift` `prepareImagesAndRefresh` —— `applyImageRefreshIfPossible()` 被移进 task group 的排空循环，从「每批一次」变成「每张图片一次」，而该函数是整篇 `engine.render` + `revealCache.removeAll()` + `lastReconcileWriteCount = 0`。200KB 文档 20~30 张图会变成 20~30 次串行整篇主线程重渲染（单次约 245ms），对着 P95 < 16ms 的预算掉帧数秒。CLAUDE.md：「`render` 整篇重写，只用于属性全体失效」。修：移回循环外，或改成窄范围刷新（参考同提交为公式加的 `refreshMathArtifacts`）。
-- [ ] `Rendering/ImageResolver.swift` `PreparationResult.cacheChanged` —— 两种情况下为 false 但协调器仍需重渲染：① URL 已在缓存中（远程场景下「下载完成但用户已输入」的窗口有数秒宽，`group.next()` 的 guard 直接 `cancelAll(); return` 而不置 `needsImageRefresh`，此后每次解析都走早退，虚线「图片无法加载」框永久留在屏幕上，而解码后的图就在缓存里）；② 文件被删除导致的淘汰（`cache.refresh(at:)` 返回 true 但在 `.failure` 分支被丢弃，陈旧的 560×400 行高保留，占位框画在旧的超大框里）。
-- [ ] 块图片像素只活在 `NSCache` 里，而撑起的行高活在 `.museImageSize` 属性里。一次淘汰（超过 129 张图，或系统内存压力）会把图片静默换成虚线错误框、留在超大空行中，且没有重解析钩子。
+修复顺序：侧边栏 → 依赖与重复实现。
 
 ## 批次三：侧边栏与 Workspace
 

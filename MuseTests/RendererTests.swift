@@ -958,6 +958,74 @@ import Testing
         let size = try #require(RenderEngine.imageSize(in: storage, at: 0))
         #expect(size == ImageResolver.displaySize(for: asset.pixelSize))
         #expect(size != Theme.imagePlaceholderSize)
+        #expect(storage.attribute(.museImageArtifact, at: 0, effectiveRange: nil)
+                is ImageRenderArtifact)
+    }
+
+    @Test(.tags(.networking))
+    func renderedImageArtifactSurvivesNSCacheEvictionAndDirtyReapply() throws {
+        let asset = try ImageFixture()
+        let data = try Data(contentsOf: asset.url)
+        let remoteURL = try #require(URL(string: "https://images.example/\(UUID().uuidString).png"))
+        #expect(ImageResolver.cacheRemoteImageData(data, at: remoteURL))
+
+        let source = "![retained](\(remoteURL.absoluteString))"
+        let package = engine.prepare(source)
+        let storage = NSTextStorage(string: source)
+        _ = engine.render(package: package, selection: nil, into: storage)
+        let firstArtifact = try #require(
+            storage.attribute(.museImageArtifact, at: 0, effectiveRange: nil)
+                as? ImageRenderArtifact
+        )
+
+        ImageResolver.removeCachedImageForTesting(url: remoteURL)
+        #expect(ImageResolver.cachedImage(url: remoteURL) == nil)
+        _ = engine.applyDirty(
+            package: package,
+            previousPackage: package,
+            utf16Range: NSRange(location: 0, length: 1),
+            into: storage
+        )
+
+        let retainedArtifact = try #require(
+            storage.attribute(.museImageArtifact, at: 0, effectiveRange: nil)
+                as? ImageRenderArtifact
+        )
+        #expect(retainedArtifact === firstArtifact)
+        #expect(RenderEngine.imageSize(in: storage, at: 0)
+                == ImageResolver.displaySize(for: asset.pixelSize))
+    }
+
+    @Test(.tags(.networking))
+    func imageRefreshTouchesOnlyMatchingImageLines() throws {
+        let asset = try ImageFixture()
+        let data = try Data(contentsOf: asset.url)
+        let remoteURL = try #require(URL(string: "https://images.example/\(UUID().uuidString).png"))
+        let source = "![remote](\(remoteURL.absoluteString))\n\nuntouched paragraph"
+        let package = engine.prepare(source)
+        let storage = NSTextStorage(string: source)
+        _ = engine.render(package: package, selection: nil, into: storage)
+        #expect(RenderEngine.imageSize(in: storage, at: 0) == Theme.imagePlaceholderSize)
+
+        let sentinel = NSAttributedString.Key("imageRefreshSentinel")
+        let untouchedRange = (source as NSString).range(of: "untouched paragraph")
+        storage.addAttribute(sentinel, value: true, range: untouchedRange)
+        #expect(ImageResolver.cacheRemoteImageData(data, at: remoteURL))
+
+        let writes = engine.refreshImageArtifacts(
+            package: package,
+            selection: nil,
+            into: storage,
+            imageBaseURL: nil,
+            matching: [remoteURL]
+        )
+
+        #expect(writes == 1)
+        #expect(storage.attribute(sentinel, at: untouchedRange.location, effectiveRange: nil) != nil)
+        #expect(RenderEngine.imageSize(in: storage, at: 0)
+                == ImageResolver.displaySize(for: asset.pixelSize))
+        #expect(storage.attribute(.museImageArtifact, at: 0, effectiveRange: nil)
+                is ImageRenderArtifact)
     }
 
     /// 夹在正文里的图片保持完整源码呈现（弱化成 marker 色），并且**不**变成块——

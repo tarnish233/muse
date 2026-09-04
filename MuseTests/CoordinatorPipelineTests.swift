@@ -35,6 +35,48 @@ import Testing
         }
     }
 
+    private actor ImagePreparationGate {
+        private var attempts = 0
+        private var entered = false
+        private var released = false
+        private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+        func enterAndWait() async {
+            attempts += 1
+            entered = true
+            guard released == false else { return }
+            await withCheckedContinuation { continuation in
+                if released {
+                    continuation.resume()
+                } else {
+                    releaseWaiters.append(continuation)
+                }
+            }
+        }
+
+        func recordAttempt() { attempts += 1 }
+        func hasEntered() -> Bool { entered }
+        func attemptCount() -> Int { attempts }
+
+        func open() {
+            guard released == false else { return }
+            released = true
+            let waiters = releaseWaiters
+            releaseWaiters.removeAll(keepingCapacity: false)
+            for waiter in waiters { waiter.resume() }
+        }
+    }
+
+    private actor ImageCancellationProbe {
+        private var enteredCount = 0
+        private var cancellationCount = 0
+
+        func recordEntry() { enteredCount += 1 }
+        func recordCancellation() { cancellationCount += 1 }
+        func entries() -> Int { enteredCount }
+        func cancellations() -> Int { cancellationCount }
+    }
+
     private func weight(_ font: NSFont?) -> Double {
         let traits = font?.fontDescriptor.object(forKey: .traits) as? [NSFontDescriptor.TraitKey: Any]
         return (traits?[.weight] as? NSNumber)?.doubleValue ?? 0
@@ -83,6 +125,55 @@ import Testing
         }
     }
 
+    private func waitForImageGate(
+        _ gate: ImagePreparationGate,
+        timeoutMs: Int = 10_000
+    ) async -> Bool {
+        let deadline = ContinuousClock.now + .milliseconds(timeoutMs)
+        while true {
+            if await gate.hasEntered() { return true }
+            if ContinuousClock.now > deadline { return false }
+            await Task.yield()
+        }
+    }
+
+    private func waitForImageAttempts(
+        _ gate: ImagePreparationGate,
+        atLeast expectedCount: Int,
+        timeoutMs: Int = 10_000
+    ) async -> Bool {
+        let deadline = ContinuousClock.now + .milliseconds(timeoutMs)
+        while await gate.attemptCount() < expectedCount {
+            if ContinuousClock.now > deadline { return false }
+            await Task.yield()
+        }
+        return true
+    }
+
+    private func waitForImageProbe(
+        _ probe: ImageCancellationProbe,
+        entries expectedEntries: Int? = nil,
+        cancellations expectedCancellations: Int? = nil,
+        timeoutMs: Int = 10_000
+    ) async -> Bool {
+        let deadline = ContinuousClock.now + .milliseconds(timeoutMs)
+        while true {
+            let entriesMatch = if let expectedEntries {
+                await probe.entries() >= expectedEntries
+            } else {
+                true
+            }
+            let cancellationsMatch = if let expectedCancellations {
+                await probe.cancellations() >= expectedCancellations
+            } else {
+                true
+            }
+            if entriesMatch && cancellationsMatch { return true }
+            if ContinuousClock.now > deadline { return false }
+            await Task.yield()
+        }
+    }
+
     @Test func statusReportsCharactersAndRenderDuration() async {
         let source = "A😀中"
         let storage = NSTextStorage(string: source)
@@ -106,8 +197,14 @@ import Testing
         ))
         let remoteURL = try #require(URL(string: "https://images.example/\(UUID().uuidString).png"))
         let coordinator = RenderCoordinator { requestedURL in
-            guard requestedURL == remoteURL else { return false }
-            return ImageResolver.cacheRemoteImageData(png, at: requestedURL)
+            guard requestedURL == remoteURL else {
+                return .unavailable(cacheChanged: false)
+            }
+            let changed = ImageResolver.cacheRemoteImageData(png, at: requestedURL)
+            guard let image = ImageResolver.cachedImage(url: requestedURL) else {
+                return .unavailable(cacheChanged: false)
+            }
+            return .ready(image, cacheChanged: changed)
         }
         let source = "![图床图片](\(remoteURL.absoluteString))"
         let storage = NSTextStorage(string: source)
@@ -121,6 +218,256 @@ import Testing
         #expect(storage.attribute(.museImageURL, at: 0, effectiveRange: nil) as? String
                 == remoteURL.absoluteString)
         #expect(RenderEngine.imageSize(in: storage, at: 0) == NSSize(width: 1, height: 1))
+    }
+
+    @Test(.tags(.networking))
+    func readyRemoteResultRefreshesPlaceholderEvenWhenCacheChangedIsFalse() async throws {
+        let png = try #require(Data(base64Encoded:
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        ))
+        let remoteURL = try #require(URL(string: "https://images.example/\(UUID().uuidString).png"))
+        let coordinator = RenderCoordinator { requestedURL in
+            _ = ImageResolver.cacheRemoteImageData(png, at: requestedURL)
+            guard let image = ImageResolver.cachedImage(url: requestedURL) else {
+                return .unavailable(cacheChanged: false)
+            }
+            return .ready(image, cacheChanged: false)
+        }
+        let source = "![ready cache](\(remoteURL.absoluteString))"
+        let storage = NSTextStorage(string: source)
+        coordinator.attach(storage: storage)
+        coordinator.onTextEdited = {}
+
+        storage.replaceCharacters(in: NSRange(location: 0, length: storage.length), with: source)
+        #expect(await waitForApplied(coordinator, atLeast: 1))
+        await coordinator.waitForImagePreparationForTesting()
+
+        #expect(RenderEngine.imageSize(in: storage, at: 0) == NSSize(width: 1, height: 1))
+        #expect(storage.attribute(.museImageArtifact, at: 0, effectiveRange: nil) != nil)
+    }
+
+    @Test(.tags(.networking))
+    func unchangedRemoteURLKeepsSingleInFlightDownloadAcrossTyping() async throws {
+        let png = try #require(Data(base64Encoded:
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        ))
+        let remoteURL = try #require(URL(string: "https://images.example/\(UUID().uuidString).png"))
+        let gate = ImagePreparationGate()
+        let coordinator = RenderCoordinator { requestedURL in
+            await gate.enterAndWait()
+            let changed = ImageResolver.cacheRemoteImageData(png, at: requestedURL)
+            guard let image = ImageResolver.cachedImage(url: requestedURL) else {
+                return .unavailable(cacheChanged: false)
+            }
+            return .ready(image, cacheChanged: changed)
+        }
+        let source = "![slow](\(remoteURL.absoluteString))\n\nbody"
+        let storage = NSTextStorage(string: source)
+        coordinator.attach(storage: storage)
+        coordinator.onTextEdited = {}
+
+        storage.replaceCharacters(in: NSRange(location: 0, length: storage.length), with: source)
+        #expect(await waitForApplied(coordinator, atLeast: 1))
+        guard await waitForImageGate(gate) else {
+            await gate.open()
+            Issue.record("远程图片准备没有进入测试闸门")
+            return
+        }
+
+        for character in "typing" {
+            storage.replaceCharacters(
+                in: NSRange(location: storage.length, length: 0),
+                with: String(character)
+            )
+        }
+        let editedRevision = coordinator.revisionForTesting
+        #expect(await waitForApplied(coordinator, atLeast: editedRevision))
+        #expect(await gate.attemptCount() == 1)
+        #expect(coordinator.inFlightImagePreparationCountForTesting == 1)
+
+        await gate.open()
+        await coordinator.waitForImagePreparationForTesting()
+        #expect(await gate.attemptCount() == 1)
+        #expect(RenderEngine.imageSize(in: storage, at: 0) == NSSize(width: 1, height: 1))
+    }
+
+    @Test(.tags(.networking))
+    func failedRemoteURLIsNegativeCachedAcrossLaterParses() async throws {
+        let remoteURL = try #require(URL(string: "https://images.example/\(UUID().uuidString).missing"))
+        let gate = ImagePreparationGate()
+        let coordinator = RenderCoordinator { _ in
+            await gate.recordAttempt()
+            return .unavailable(cacheChanged: false)
+        }
+        let source = "![missing](\(remoteURL.absoluteString))\n\nbody"
+        let storage = NSTextStorage(string: source)
+        coordinator.attach(storage: storage)
+        coordinator.onTextEdited = {}
+
+        storage.replaceCharacters(in: NSRange(location: 0, length: storage.length), with: source)
+        #expect(await waitForApplied(coordinator, atLeast: 1))
+        await coordinator.waitForImagePreparationForTesting()
+        #expect(await gate.attemptCount() == 1)
+        #expect(coordinator.failedRemoteImageCountForTesting == 1)
+
+        for character in "again" {
+            storage.replaceCharacters(
+                in: NSRange(location: storage.length, length: 0),
+                with: String(character)
+            )
+        }
+        let editedRevision = coordinator.revisionForTesting
+        #expect(await waitForApplied(coordinator, atLeast: editedRevision))
+        await coordinator.waitForImagePreparationForTesting()
+
+        #expect(await gate.attemptCount() == 1)
+        #expect(coordinator.inFlightImagePreparationCountForTesting == 0)
+    }
+
+    @Test(.tags(.networking))
+    func negativeCacheEvictionDoesNotRetryUnchangedRemoteURLs() async throws {
+        let gate = ImagePreparationGate()
+        let remoteURLs = try (0..<129).map { index in
+            try #require(URL(string: "https://images.example/\(UUID().uuidString)-\(index).missing"))
+        }
+        let source = remoteURLs.enumerated().map { index, url in
+            "![missing-\(index)](\(url.absoluteString))"
+        }.joined(separator: "\n\n") + "\n\nbody"
+        let storage = NSTextStorage(string: source)
+        let coordinator = RenderCoordinator { _ in
+            await gate.recordAttempt()
+            return .unavailable(cacheChanged: false)
+        }
+        coordinator.attach(storage: storage)
+        coordinator.onTextEdited = {}
+
+        storage.replaceCharacters(in: NSRange(location: 0, length: storage.length), with: source)
+        #expect(await waitForApplied(coordinator, atLeast: 1))
+        await coordinator.waitForImagePreparationForTesting()
+        #expect(await gate.attemptCount() == remoteURLs.count)
+        #expect(coordinator.failedRemoteImageCountForTesting == 128)
+
+        storage.replaceCharacters(
+            in: NSRange(location: storage.length, length: 0),
+            with: "!"
+        )
+        let editedRevision = coordinator.revisionForTesting
+        #expect(await waitForApplied(coordinator, atLeast: editedRevision))
+        await coordinator.waitForImagePreparationForTesting()
+
+        #expect(await gate.attemptCount() == remoteURLs.count)
+        #expect(coordinator.inFlightImagePreparationCountForTesting == 0)
+        #expect(coordinator.queuedImagePreparationCountForTesting == 0)
+    }
+
+    @Test(.tags(.networking))
+    func imagePreparationCreatesOnlyFourTasksAndQueuesRemainingURLsAsValues() async throws {
+        let gate = ImagePreparationGate()
+        let remoteURLs = try (0..<20).map { index in
+            try #require(URL(string: "https://images.example/\(UUID().uuidString)-\(index).png"))
+        }
+        let source = remoteURLs.enumerated().map { index, url in
+            "![slow-\(index)](\(url.absoluteString))"
+        }.joined(separator: "\n\n")
+        let storage = NSTextStorage(string: source)
+        let coordinator = RenderCoordinator { _ in
+            await gate.enterAndWait()
+            return .unavailable(cacheChanged: false)
+        }
+        coordinator.attach(storage: storage)
+        coordinator.onTextEdited = {}
+
+        storage.replaceCharacters(in: NSRange(location: 0, length: storage.length), with: source)
+        #expect(await waitForApplied(coordinator, atLeast: 1))
+        guard await waitForImageAttempts(gate, atLeast: 4) else {
+            await gate.open()
+            Issue.record("四路图片 worker 没有全部启动")
+            return
+        }
+
+        #expect(await gate.attemptCount() == 4)
+        #expect(coordinator.inFlightImagePreparationCountForTesting == 4)
+        #expect(coordinator.queuedImagePreparationCountForTesting == remoteURLs.count - 4)
+
+        await gate.open()
+        await coordinator.waitForImagePreparationForTesting()
+        #expect(await gate.attemptCount() == remoteURLs.count)
+        #expect(coordinator.inFlightImagePreparationCountForTesting == 0)
+        #expect(coordinator.queuedImagePreparationCountForTesting == 0)
+    }
+
+    @Test(.tags(.networking))
+    func releasingCoordinatorCancelsActiveImagePreparation() async throws {
+        let probe = ImageCancellationProbe()
+        let remoteURL = try #require(URL(string: "https://images.example/\(UUID().uuidString).png"))
+        let source = "![closing](\(remoteURL.absoluteString))"
+        let storage = NSTextStorage(string: source)
+        var coordinator: RenderCoordinator? = RenderCoordinator { _ in
+            await probe.recordEntry()
+            do {
+                try await Task.sleep(for: .seconds(60))
+            } catch is CancellationError {
+                await probe.recordCancellation()
+            } catch {
+                Issue.record("图片准备收到意外错误：\(error)")
+            }
+            return .unavailable(cacheChanged: false)
+        }
+        coordinator?.attach(storage: storage)
+        coordinator?.onTextEdited = {}
+
+        storage.replaceCharacters(in: NSRange(location: 0, length: storage.length), with: source)
+        #expect(await waitForApplied(try #require(coordinator), atLeast: 1))
+        guard await waitForImageProbe(probe, entries: 1) else {
+            Issue.record("图片准备任务没有启动")
+            return
+        }
+
+        weak var releasedCoordinator = coordinator
+        storage.delegate = nil
+        coordinator = nil
+
+        let releaseDeadline = ContinuousClock.now + .seconds(2)
+        while releasedCoordinator != nil, ContinuousClock.now < releaseDeadline {
+            await Task.yield()
+        }
+        #expect(releasedCoordinator == nil)
+        #expect(await waitForImageProbe(probe, cancellations: 1))
+    }
+
+    @Test func deletedLocalImageEvictsArtifactAndRestoresPlaceholderSize() async throws {
+        let png = try #require(Data(base64Encoded:
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        ))
+        let fileURL = FileManager.default.temporaryDirectory
+            .appending(path: "muse-local-image-\(UUID().uuidString).png")
+        try png.write(to: fileURL)
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+
+        let source = "![local](\(fileURL.path))\n\nbody"
+        let storage = NSTextStorage(string: source)
+        let coordinator = RenderCoordinator()
+        coordinator.attach(storage: storage)
+        coordinator.onTextEdited = {}
+        storage.replaceCharacters(in: NSRange(location: 0, length: storage.length), with: source)
+        #expect(await waitForApplied(coordinator, atLeast: 1))
+        await coordinator.waitForImagePreparationForTesting()
+        #expect(RenderEngine.imageSize(in: storage, at: 0) == NSSize(width: 1, height: 1))
+        #expect(storage.attribute(.museImageArtifact, at: 0, effectiveRange: nil) != nil)
+
+        ImageResolver.removeCachedImageForTesting(url: fileURL)
+        try FileManager.default.removeItem(at: fileURL)
+        storage.replaceCharacters(
+            in: NSRange(location: storage.length, length: 0),
+            with: "!"
+        )
+        let editedRevision = coordinator.revisionForTesting
+        #expect(await waitForApplied(coordinator, atLeast: editedRevision))
+        await coordinator.waitForImagePreparationForTesting()
+
+        #expect(RenderEngine.imageSize(in: storage, at: 0) == Theme.imagePlaceholderSize)
+        #expect(storage.attribute(.museImageArtifact, at: 0, effectiveRange: nil) == nil)
+        #expect(coordinator.lastImageRefreshWriteCount == 1)
     }
 
     /// 公式首次解析不阻塞属性应用；本地 MathJax 完成后，协调器只刷新公式属性并

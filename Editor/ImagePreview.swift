@@ -93,7 +93,7 @@ final class ImagePreviewController: NSViewController {
             return .image(image, image.size)
         case .exceedsSizeLimit:
             return .failure("图片超过 20 MB，无法预览")
-        case .failure:
+        case .unavailable:
             return .failure("无法加载图片")
         }
     }

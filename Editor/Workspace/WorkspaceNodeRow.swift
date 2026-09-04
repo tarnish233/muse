@@ -5,6 +5,7 @@ struct WorkspaceNodeRow: View {
     let selectedFileURL: URL?
     let actions: WorkspaceNodeActions
     @Binding var expansion: WorkspaceTreeExpansion
+    @State private var isConfirmingDeletion = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -50,6 +51,18 @@ struct WorkspaceNodeRow: View {
             }
         }
         .contextMenu(menuItems: nodeMenu)
+        .confirmationDialog(
+            "将“\(node.name)”移到废纸篓？",
+            isPresented: $isConfirmingDeletion,
+            titleVisibility: .visible
+        ) {
+            Button("移到废纸篓", role: .destructive) {
+                actions.delete(node)
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text(node.isFolder ? "文件夹及其中的内容都会被移到废纸篓。" : "该文件会被移到废纸篓。")
+        }
     }
 
     private var isSelected: Bool {
@@ -61,7 +74,6 @@ struct WorkspaceNodeRow: View {
     }
 
     private func activate() {
-        actions.focus(node)
         if node.isFolder {
             expansion.toggleFolder(node.url)
         } else {
@@ -103,7 +115,7 @@ struct WorkspaceNodeRow: View {
             actions.rename(node)
         }
         Button("删除", systemImage: "trash", role: .destructive) {
-            actions.delete(node)
+            isConfirmingDeletion = true
         }
         Divider()
         Button("在访达中显示", systemImage: "finder") {

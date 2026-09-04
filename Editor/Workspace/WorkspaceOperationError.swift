@@ -9,6 +9,7 @@ enum WorkspaceOperationError: LocalizedError {
     case itemOutsideProject
     case invalidPasteDestination
     case cannotCopyFolderIntoItself
+    case trashLocationUnavailable
 
     var errorDescription: String? {
         switch self {
@@ -28,6 +29,8 @@ enum WorkspaceOperationError: LocalizedError {
             "粘贴目标不是当前项目中的文件夹。"
         case .cannotCopyFolderIntoItself:
             "无法将文件夹复制到自身或它的子文件夹中。"
+        case .trashLocationUnavailable:
+            "项目项已移到废纸篓，但系统没有返回可用于撤销的位置。"
         }
     }
 }

@@ -10,5 +10,4 @@ struct WorkspaceNodeActions {
     let copyRelativePath: (WorkspaceNode) -> Void
     let rename: (WorkspaceNode) -> Void
     let delete: (WorkspaceNode) -> Void
-    let focus: (WorkspaceNode) -> Void
 }

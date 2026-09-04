@@ -75,7 +75,9 @@ struct EditorShellView: View {
             WorkspaceSidebar(
                 workspace: workspace,
                 selectedFileURL: location.fileURL,
-                openFile: navigation.open
+                isPresented: chromeState.isProjectSidebarPresented,
+                openFile: navigation.open,
+                restoreEditorFocus: restoreEditorFocus
             )
         }
         // Keep sidebar contents at their expanded geometry while the outer frame
@@ -164,6 +166,11 @@ struct EditorShellView: View {
 
     private var sidebarAnimation: Animation {
         reduceMotion ? .linear(duration: 0.01) : .spring(response: 0.28, dampingFraction: 1)
+    }
+
+    private func restoreEditorFocus() {
+        guard let textView = renderer.textView else { return }
+        textView.window?.makeFirstResponder(textView)
     }
 
 }

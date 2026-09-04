@@ -4,14 +4,7 @@
 
 按主题分批修，每批独立提交。**行号会随修改漂移，定位以符号名为准。**
 
-修复顺序：侧边栏 → 依赖与重复实现。
-
-## 批次三：侧边栏与 Workspace
-
-- [ ] `Editor/Workspace/WorkspaceNodeRow.swift` `activate()` —— 无条件调用 `actions.focus(node)`，把 0×0 的 `WorkspaceCommandResponder` 设成窗口 first responder。`openFile` 走的是同窗口原地导航（`display: false`），没有新窗口夺回 key 状态，`Task { await Task.yield(); makeFirstResponder(responder) }` 落在 `EditorTextView` 之后。结果：点侧边栏文件打开后没有光标、按键发出蜂鸣，**⌘V 把剪贴板文件粘贴进项目根目录**而不是往文档里粘文本，⌘N 走 `newWorkspaceFile` 而不是 `newDocument`。`validateUserInterfaceItem` 除 `copy(_:)` 外一律返回 true，没有任何门禁。因为是竞态所以时好时坏；展开文件夹也会触发；侧边栏收起时该 responder 仍在链上（`EditorShellView` 只设了 `.frame(width: 0)` + `.allowsHitTesting(false)`）。
-- [ ] `Editor/Workspace/ProjectWorkspace.swift` `rename` —— 从 `validatedName(rawName, kind:)` 换成了无扩展名的 `validatedName(rawName)`，丢掉 `.md` 默认，但下游 `canOpen` 的扩展名门禁没同步放宽。用户重命名时只输名字（不输扩展名）会在磁盘上留下无扩展名文件；`WorkspaceTreeLoader` 按 `isRegularFile` 仍然列出该行，但点击会被 `Constants.readableExtensions` 拒绝，提示「Muse 目前只能打开 Markdown 或纯文本文件。」，且应用内除了再改名带上 `.md` 没有别的出路。重命名正是在这个提交里第一次接入 UI。
-- [ ] 侧边栏文件操作没有 undo，删除没有确认。`moveToTrash` 现在返回废纸篓 URL，但所有调用方都把返回值丢掉了 —— 撤销删除的钩子已经具备却没接。
-- [ ] `focusedNode` 是 `selectedFileURL` 之外的第二份选中态，⌘C 可能复制到与高亮行不同的节点。
+剩余修复顺序：依赖与重复实现。
 
 ## 批次四：依赖、重复实现与清理
 

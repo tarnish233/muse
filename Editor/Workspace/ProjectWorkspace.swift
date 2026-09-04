@@ -18,8 +18,29 @@ final class ProjectWorkspace {
         var errorDescription: String? { message }
     }
 
+    private struct TrashedItem {
+        let originalURL: URL
+        let trashedURL: URL
+    }
+
+    private enum FileOperation {
+        case move(from: URL, to: URL, actionName: String)
+        case trash(urls: [URL], actionName: String)
+        case restore(records: [TrashedItem], actionName: String)
+
+        var actionName: String {
+            switch self {
+            case let .move(_, _, actionName),
+                 let .trash(_, actionName),
+                 let .restore(_, actionName):
+                actionName
+            }
+        }
+    }
+
     private(set) var project: WorkspaceProject?
     private(set) var tree: [WorkspaceNode] = []
+    private var nodesByURL: [URL: WorkspaceNode] = [:]
     var presentedError: String?
 
     private let fileManager: FileManager
@@ -32,6 +53,8 @@ final class ProjectWorkspace {
     private var refreshTask: Task<Void, Never>?
     private var refreshGeneration = 0
     private var unresolvedProjectStoreError: Error?
+    private var undoFileOperations: [FileOperation] = []
+    private var redoFileOperations: [FileOperation] = []
 
     init(
         defaults: UserDefaults = .standard,
@@ -109,6 +132,7 @@ final class ProjectWorkspace {
             switch outcome {
             case let .success(nodes, warnings):
                 self.tree = nodes
+                self.rebuildNodeIndex()
                 self.report(warnings)
             case let .failure(message):
                 // 短暂的根目录错误不能破坏上一次成功树快照。
@@ -144,13 +168,20 @@ final class ProjectWorkspace {
             try Data().write(to: destination, options: .atomic)
         }
 
+        registerUndo(
+            .trash(
+                urls: [destination],
+                actionName: kind == .file ? "新建文件" : "新建文件夹"
+            )
+        )
         refreshProject(containing: destination)
         return destination
     }
 
     @discardableResult
     func rename(_ node: WorkspaceNode, to rawName: String) throws -> URL {
-        let name = try validatedName(rawName)
+        let kind: WorkspaceCreationRequest.Kind = node.isFolder ? .folder : .file
+        let name = try validatedName(rawName, kind: kind)
         let destination = node.url.deletingLastPathComponent().appending(
             path: name,
             directoryHint: node.isFolder ? .isDirectory : .notDirectory
@@ -158,20 +189,25 @@ final class ProjectWorkspace {
         guard destination.standardizedFileURL != node.url.standardizedFileURL else {
             return node.url
         }
-        try fileManager.moveItem(at: node.url, to: destination)
-        refreshProject(containing: destination)
+        let undoOperation = try performFileOperation(
+            .move(
+                from: node.url,
+                to: destination,
+                actionName: "重命名"
+            )
+        )
+        registerUndo(undoOperation)
         return destination
     }
 
     @discardableResult
     func moveToTrash(_ node: WorkspaceNode) throws -> URL? {
-        let belongsToCurrentProject = project(containing: node.url) != nil
-        var resultingURL: NSURL?
-        try fileManager.trashItem(at: node.url, resultingItemURL: &resultingURL)
-        if belongsToCurrentProject {
-            refreshProject()
-        }
-        return resultingURL as URL?
+        let undoOperation = try performFileOperation(
+            .trash(urls: [node.url], actionName: "删除")
+        )
+        registerUndo(undoOperation)
+        guard case let .restore(records, _) = undoOperation else { return nil }
+        return records.first?.trashedURL
     }
 
     @discardableResult
@@ -184,28 +220,214 @@ final class ProjectWorkspace {
         }
 
         let targetRootURL = targetProject.rootURL.standardizedFileURL
-        defer {
+        let copiedURLs: [URL]
+        do {
+            copiedURLs = try await fileOperations.copyItems(sourceURLs, into: parentURL)
+        } catch {
             if project?.rootURL == targetRootURL {
                 refreshProject()
             }
+            throw error
         }
-        return try await fileOperations.copyItems(sourceURLs, into: parentURL)
+        if project?.rootURL == targetRootURL {
+            registerUndo(.trash(urls: copiedURLs, actionName: "粘贴"))
+            refreshProject()
+        }
+        return copiedURLs
     }
 
     func canOpen(_ url: URL) -> Bool {
         Constants.readableExtensions.contains(url.pathExtension.lowercased())
     }
 
+    var canUndoFileOperation: Bool {
+        !undoFileOperations.isEmpty
+    }
+
+    var canRedoFileOperation: Bool {
+        !redoFileOperations.isEmpty
+    }
+
+    var undoFileOperationTitle: String {
+        undoFileOperations.last.map { "撤销\($0.actionName)" } ?? "撤销文件操作"
+    }
+
+    var redoFileOperationTitle: String {
+        redoFileOperations.last.map { "重做\($0.actionName)" } ?? "重做文件操作"
+    }
+
+    func undoFileOperation() {
+        guard let operation = undoFileOperations.last else { return }
+        do {
+            let inverse = try performFileOperation(operation)
+            undoFileOperations.removeLast()
+            redoFileOperations.append(inverse)
+        } catch {
+            report([error.localizedDescription])
+        }
+    }
+
+    func redoFileOperation() {
+        guard let operation = redoFileOperations.last else { return }
+        do {
+            let inverse = try performFileOperation(operation)
+            redoFileOperations.removeLast()
+            undoFileOperations.append(inverse)
+        } catch {
+            report([error.localizedDescription])
+        }
+    }
+
+    func node(at url: URL?) -> WorkspaceNode? {
+        guard let targetURL = url?.standardizedFileURL else { return nil }
+        return nodesByURL[targetURL]
+    }
+
     func project(containing url: URL) -> WorkspaceProject? {
         guard let project else { return nil }
-        let path = url.standardizedFileURL.path
-        let rootPath = project.rootURL.path
+        let rootPath = canonicalizedPath(for: project.rootURL, resolvingFinalComponent: true)
+        let exactPath = canonicalizedPath(for: url, resolvingFinalComponent: true)
+        if exactPath == rootPath {
+            return project
+        }
+
+        let path = canonicalizedPath(for: url, resolvingFinalComponent: false)
         return path == rootPath || path.hasPrefix(rootPath + "/") ? project : nil
     }
 
     func refreshProject(containing url: URL) {
         guard project(containing: url) != nil else { return }
         refreshProject()
+    }
+
+    private func rebuildNodeIndex() {
+        var index: [URL: WorkspaceNode] = [:]
+        index.reserveCapacity(Self.countNodes(in: tree))
+
+        func insert(_ nodes: [WorkspaceNode]) {
+            for node in nodes {
+                index[node.url.standardizedFileURL] = node
+                if let children = node.children {
+                    insert(children)
+                }
+            }
+        }
+
+        insert(tree)
+        nodesByURL = index
+    }
+
+    private static func countNodes(in nodes: [WorkspaceNode]) -> Int {
+        nodes.reduce(0) { partial, node in
+            partial + 1 + Self.countNodes(in: node.children ?? [])
+        }
+    }
+
+    private func canonicalizedPath(for url: URL, resolvingFinalComponent: Bool) -> String {
+        let path = url.standardizedFileURL.path
+        guard path.hasPrefix("/") else { return path }
+
+        if resolvingFinalComponent, let resolvedPath = Self.resolvedFileSystemPath(path) {
+            return resolvedPath
+        }
+
+        let directoryURL = url.deletingLastPathComponent()
+        let directoryPath = directoryURL.path
+        let resolvedDirectory = directoryPath == "/"
+            ? ""
+            : Self.resolvedFileSystemPath(directoryPath) ?? directoryPath
+        return resolvedDirectory + "/" + url.lastPathComponent
+    }
+
+    private static func resolvedFileSystemPath(_ path: String) -> String? {
+        path.withCString { pointer in
+            guard let resolved = realpath(pointer, nil) else { return nil }
+            defer { free(resolved) }
+            return String(cString: resolved)
+        }
+    }
+
+    private func registerUndo(_ operation: FileOperation) {
+        undoFileOperations.append(operation)
+        redoFileOperations.removeAll()
+    }
+
+    private func performFileOperation(_ operation: FileOperation) throws -> FileOperation {
+        switch operation {
+        case let .move(sourceURL, destinationURL, actionName):
+            let refreshesCurrentProject = affectsCurrentProject([sourceURL, destinationURL])
+            defer {
+                if refreshesCurrentProject {
+                    refreshProject()
+                }
+            }
+            try fileManager.moveItem(at: sourceURL, to: destinationURL)
+            return .move(from: destinationURL, to: sourceURL, actionName: actionName)
+
+        case let .trash(urls, actionName):
+            let refreshesCurrentProject = affectsCurrentProject(urls)
+            defer {
+                if refreshesCurrentProject {
+                    refreshProject()
+                }
+            }
+            let records = try trashItems(at: urls)
+            return .restore(records: records, actionName: actionName)
+
+        case let .restore(records, actionName):
+            let originalURLs = records.map(\.originalURL)
+            let refreshesCurrentProject = affectsCurrentProject(originalURLs)
+            defer {
+                if refreshesCurrentProject {
+                    refreshProject()
+                }
+            }
+            try restoreTrashedItems(records)
+            return .trash(urls: originalURLs, actionName: actionName)
+        }
+    }
+
+    private func trashItems(at urls: [URL]) throws -> [TrashedItem] {
+        var records: [TrashedItem] = []
+        records.reserveCapacity(urls.count)
+
+        do {
+            for originalURL in urls {
+                var resultingURL: NSURL?
+                try fileManager.trashItem(at: originalURL, resultingItemURL: &resultingURL)
+                guard let trashedURL = resultingURL as URL? else {
+                    throw WorkspaceOperationError.trashLocationUnavailable
+                }
+                records.append(TrashedItem(originalURL: originalURL, trashedURL: trashedURL))
+            }
+            return records
+        } catch {
+            for record in records.reversed() {
+                try? fileManager.moveItem(at: record.trashedURL, to: record.originalURL)
+            }
+            throw error
+        }
+    }
+
+    private func restoreTrashedItems(_ records: [TrashedItem]) throws {
+        var restoredRecords: [TrashedItem] = []
+        restoredRecords.reserveCapacity(records.count)
+
+        do {
+            for record in records {
+                try fileManager.moveItem(at: record.trashedURL, to: record.originalURL)
+                restoredRecords.append(record)
+            }
+        } catch {
+            for record in restoredRecords.reversed() {
+                try? fileManager.moveItem(at: record.originalURL, to: record.trashedURL)
+            }
+            throw error
+        }
+    }
+
+    private func affectsCurrentProject(_ urls: [URL]) -> Bool {
+        urls.contains(where: { project(containing: $0) != nil })
     }
 
     private func validatedName(_ rawName: String, kind: WorkspaceCreationRequest.Kind) throws -> String {
@@ -302,6 +524,9 @@ final class ProjectWorkspace {
         refreshTask?.cancel()
         refreshTask = nil
         tree = []
+        nodesByURL.removeAll()
+        undoFileOperations.removeAll()
+        redoFileOperations.removeAll()
         if let securityScopedURL {
             securityScopedURL.stopAccessingSecurityScopedResource()
             self.securityScopedURL = nil

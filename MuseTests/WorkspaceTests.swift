@@ -45,7 +45,7 @@ import Testing
         #expect(names == ["Archive", "2.md", "10.md"])
     }
 
-    @Test func renameUsesTheExactRequestedNameAndRefreshesTheTree() async throws {
+    @Test func renameAddsMarkdownExtensionAndSupportsUndoRedo() async throws {
         let (workspace, root, _, _) = try makeWorkspace()
         defer { try? FileManager.default.removeItem(at: root) }
 
@@ -57,10 +57,56 @@ import Testing
         let renamedURL = try workspace.rename(node, to: "README")
         await workspace.waitForRefresh()
 
-        #expect(renamedURL.lastPathComponent == "README")
+        #expect(renamedURL.lastPathComponent == "README.md")
+        #expect(workspace.canOpen(renamedURL))
         #expect(FileManager.default.fileExists(atPath: node.url.path) == false)
         #expect(FileManager.default.fileExists(atPath: renamedURL.path))
-        #expect(workspace.tree.map(\.name) == ["README"])
+        #expect(workspace.tree.map(\.name) == ["README.md"])
+
+        #expect(workspace.canUndoFileOperation)
+        workspace.undoFileOperation()
+        await workspace.waitForRefresh()
+        #expect(FileManager.default.fileExists(atPath: node.url.path))
+        #expect(FileManager.default.fileExists(atPath: renamedURL.path) == false)
+        #expect(workspace.tree.map(\.name) == ["Draft.md"])
+
+        #expect(workspace.canRedoFileOperation)
+        workspace.redoFileOperation()
+        await workspace.waitForRefresh()
+        #expect(FileManager.default.fileExists(atPath: node.url.path) == false)
+        #expect(FileManager.default.fileExists(atPath: renamedURL.path))
+        #expect(workspace.tree.map(\.name) == ["README.md"])
+    }
+
+    @Test func failedFileOperationUndoRemainsRetryable() async throws {
+        let (workspace, root, _, _) = try makeWorkspace()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        try workspace.createProject(at: root)
+        _ = try workspace.createItem(.file, named: "Draft", in: root)
+        await workspace.waitForRefresh()
+        let node = try #require(workspace.tree.first)
+        let renamedURL = try workspace.rename(node, to: "Renamed")
+        await workspace.waitForRefresh()
+
+        try Data("external conflict".utf8).write(to: node.url)
+        workspace.undoFileOperation()
+        await workspace.waitForRefresh()
+
+        #expect(workspace.canUndoFileOperation)
+        #expect(workspace.canRedoFileOperation == false)
+        #expect(workspace.undoFileOperationTitle == "撤销重命名")
+        #expect(FileManager.default.fileExists(atPath: node.url.path))
+        #expect(FileManager.default.fileExists(atPath: renamedURL.path))
+
+        try FileManager.default.removeItem(at: node.url)
+        workspace.undoFileOperation()
+        await workspace.waitForRefresh()
+
+        #expect(FileManager.default.fileExists(atPath: node.url.path))
+        #expect(FileManager.default.fileExists(atPath: renamedURL.path) == false)
+        #expect(workspace.canRedoFileOperation)
+        #expect(workspace.redoFileOperationTitle == "重做重命名")
     }
 
     @Test func moveToTrashRemovesTheItemAndRefreshesTheTree() async throws {
@@ -83,6 +129,86 @@ import Testing
 
         #expect(FileManager.default.fileExists(atPath: node.url.path) == false)
         #expect(workspace.tree.isEmpty)
+
+        #expect(workspace.canUndoFileOperation)
+        workspace.undoFileOperation()
+        await workspace.waitForRefresh()
+        #expect(workspace.presentedError == nil)
+        #expect(FileManager.default.fileExists(atPath: node.url.path))
+        #expect(workspace.tree.map(\.name) == ["Trash Me.md"])
+
+        #expect(workspace.canRedoFileOperation)
+        workspace.redoFileOperation()
+        await workspace.waitForRefresh()
+        #expect(FileManager.default.fileExists(atPath: node.url.path) == false)
+        #expect(workspace.tree.isEmpty)
+
+        workspace.undoFileOperation()
+        await workspace.waitForRefresh()
+        #expect(FileManager.default.fileExists(atPath: node.url.path))
+    }
+
+    @Test func creatingWorkspaceItemSupportsUndoRedo() async throws {
+        let (workspace, root, _, _) = try makeWorkspace()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        try workspace.createProject(at: root)
+        let document = try workspace.createItem(.file, named: "Undoable", in: root)
+        await workspace.waitForRefresh()
+        #expect(FileManager.default.fileExists(atPath: document.path))
+        #expect(workspace.undoFileOperationTitle == "撤销新建文件")
+
+        workspace.undoFileOperation()
+        await workspace.waitForRefresh()
+        #expect(FileManager.default.fileExists(atPath: document.path) == false)
+        #expect(workspace.tree.isEmpty)
+        #expect(workspace.redoFileOperationTitle == "重做新建文件")
+
+        workspace.redoFileOperation()
+        await workspace.waitForRefresh()
+        #expect(FileManager.default.fileExists(atPath: document.path))
+        #expect(workspace.tree.map(\.name) == ["Undoable.md"])
+    }
+
+    @Test func staleOrCancelledPasteCompletionDoesNotReplaceCurrentRequest() {
+        let completedRequestID = UUID()
+        let newerRequestID = UUID()
+
+        #expect(
+            WorkspaceSidebar.shouldApplyPasteCompletion(
+                completedRequestID: completedRequestID,
+                currentRequestID: completedRequestID,
+                isCancelled: false
+            )
+        )
+        #expect(
+            WorkspaceSidebar.shouldApplyPasteCompletion(
+                completedRequestID: completedRequestID,
+                currentRequestID: newerRequestID,
+                isCancelled: false
+            ) == false
+        )
+        #expect(
+            WorkspaceSidebar.shouldApplyPasteCompletion(
+                completedRequestID: completedRequestID,
+                currentRequestID: completedRequestID,
+                isCancelled: true
+            ) == false
+        )
+    }
+
+    @Test func selectedNodeLookupFollowsTheHighlightedDocumentURL() async throws {
+        let (workspace, root, _, _) = try makeWorkspace()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        try workspace.createProject(at: root)
+        let folder = try workspace.createItem(.folder, named: "Notes", in: root)
+        let document = try workspace.createItem(.file, named: "Selected", in: folder)
+        await workspace.waitForRefresh()
+
+        #expect(workspace.node(at: document)?.url.standardizedFileURL == document.standardizedFileURL)
+        #expect(workspace.node(at: root.appending(path: "Other.md")) == nil)
+        #expect(workspace.node(at: nil) == nil)
     }
 
     @Test func relativePathUsesTheProjectRootAndRejectsSiblings() {
@@ -92,6 +218,58 @@ import Testing
         #expect(project.relativePath(to: root) == ".")
         #expect(project.relativePath(to: root.appending(path: "章节/第一篇.md")) == "章节/第一篇.md")
         #expect(project.relativePath(to: URL(fileURLWithPath: "/tmp/笔记备份/第一篇.md")) == nil)
+    }
+
+    @Test func projectContainmentResolvesSymlinkedProjectRoots() async throws {
+        let (workspace, _, _, _) = try makeWorkspace()
+        let base = try makeDirectory(named: "SymlinkRoot")
+        let realRoot = base.appending(path: "real", directoryHint: .isDirectory)
+        let middleLink = base.appending(path: "middle")
+        let rootLink = base.appending(path: "alias")
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        try FileManager.default.createDirectory(at: realRoot, withIntermediateDirectories: false)
+        let document = realRoot.appending(path: "document.md")
+        try Data().write(to: document)
+        try FileManager.default.createSymbolicLink(
+            atPath: middleLink.path,
+            withDestinationPath: realRoot.path
+        )
+        try FileManager.default.createSymbolicLink(
+            atPath: rootLink.path,
+            withDestinationPath: middleLink.path
+        )
+
+        try workspace.openProject(at: realRoot)
+        await workspace.waitForRefresh()
+
+        #expect(workspace.project != nil)
+        #expect(workspace.project(containing: rootLink) != nil)
+        #expect(workspace.project(containing: realRoot) != nil)
+        #expect(workspace.project(containing: document) != nil)
+        #expect(workspace.project(containing: rootLink.appending(path: "document.md")) != nil)
+    }
+
+    @Test func projectContainmentTreatsProjectEntrySymlinksAsInsideProject() async throws {
+        let (workspace, root, _, _) = try makeWorkspace()
+        let base = try makeDirectory(named: "EntrySymlink")
+        let outsideURL = base.appending(path: "outside.md")
+        let entryLink = root.appending(path: "link.md")
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            try? FileManager.default.removeItem(at: base)
+        }
+
+        try workspace.createProject(at: root)
+        try Data().write(to: outsideURL)
+        try FileManager.default.createSymbolicLink(
+            atPath: entryLink.path,
+            withDestinationPath: outsideURL.path
+        )
+        await workspace.waitForRefresh()
+
+        #expect(workspace.project(containing: entryLink) != nil)
+        #expect(workspace.project(containing: outsideURL) == nil)
     }
 
     @Test func workspaceClipboardCopiesFileURLsAndText() throws {
@@ -115,33 +293,132 @@ import Testing
         #expect(clipboard.fileURLs().isEmpty)
     }
 
-    @Test func workspaceCommandResponderRoutesSystemShortcutSelectors() {
+    @Test func workspaceCommandResponderRoutesOnlyValidatedSystemShortcuts() {
         let responder = WorkspaceCommandResponder()
         var receivedActions: [String] = []
-        responder.configure(
-            canCopyItem: false,
-            copyItem: { receivedActions.append("copy") },
-            pasteItems: { receivedActions.append("paste") },
-            createFile: { receivedActions.append("new-file") },
-            createFolder: { receivedActions.append("new-folder") }
+        var canPaste = false
+        var canUndo = false
+        var canRedo = false
+
+        func configure(isActive: Bool, canCopyItem: Bool, canCreateItem: Bool) {
+            responder.configure(
+                isActive: isActive,
+                canCopyItem: canCopyItem,
+                canPasteItems: { canPaste },
+                canCreateItem: canCreateItem,
+                canUndo: { canUndo },
+                canRedo: { canRedo },
+                copyItem: { receivedActions.append("copy") },
+                pasteItems: { receivedActions.append("paste") },
+                createFile: { receivedActions.append("new-file") },
+                createFolder: { receivedActions.append("new-folder") },
+                undo: { receivedActions.append("undo") },
+                redo: { receivedActions.append("redo") },
+                restoreEditorFocus: {}
+            )
+        }
+
+        let copyItem = NSMenuItem(
+            title: "Copy",
+            action: #selector(WorkspaceCommandResponder.copy(_:)),
+            keyEquivalent: ""
+        )
+        let pasteItem = NSMenuItem(
+            title: "Paste",
+            action: #selector(WorkspaceCommandResponder.paste(_:)),
+            keyEquivalent: ""
+        )
+        let newFileItem = NSMenuItem(
+            title: "New",
+            action: #selector(WorkspaceCommandResponder.newWorkspaceFile(_:)),
+            keyEquivalent: ""
+        )
+        let undoItem = NSMenuItem(
+            title: "Undo",
+            action: #selector(WorkspaceCommandResponder.undo(_:)),
+            keyEquivalent: ""
+        )
+        let redoItem = NSMenuItem(
+            title: "Redo",
+            action: #selector(WorkspaceCommandResponder.redo(_:)),
+            keyEquivalent: ""
         )
 
+        configure(isActive: false, canCopyItem: true, canCreateItem: true)
+        #expect(responder.validateUserInterfaceItem(copyItem) == false)
+        #expect(responder.validateUserInterfaceItem(pasteItem) == false)
+        #expect(responder.validateUserInterfaceItem(newFileItem) == false)
+
+        configure(isActive: true, canCopyItem: false, canCreateItem: true)
+        #expect(responder.validateUserInterfaceItem(copyItem) == false)
+        #expect(responder.validateUserInterfaceItem(pasteItem) == false)
+        #expect(responder.validateUserInterfaceItem(newFileItem))
+        #expect(responder.validateUserInterfaceItem(undoItem) == false)
+        #expect(responder.validateUserInterfaceItem(redoItem) == false)
         responder.copy(nil)
+        responder.paste(nil)
+        responder.undo(nil)
+        responder.redo(nil)
         #expect(receivedActions.isEmpty)
 
-        responder.configure(
-            canCopyItem: true,
-            copyItem: { receivedActions.append("copy") },
-            pasteItems: { receivedActions.append("paste") },
-            createFile: { receivedActions.append("new-file") },
-            createFolder: { receivedActions.append("new-folder") }
-        )
+        canPaste = true
+        canUndo = true
+        canRedo = true
+        configure(isActive: true, canCopyItem: true, canCreateItem: true)
 
         #expect(responder.tryToPerform(#selector(WorkspaceCommandResponder.copy(_:)), with: nil))
         #expect(responder.tryToPerform(#selector(WorkspaceCommandResponder.paste(_:)), with: nil))
         #expect(responder.tryToPerform(#selector(WorkspaceCommandResponder.newWorkspaceFile(_:)), with: nil))
         #expect(responder.tryToPerform(#selector(WorkspaceCommandResponder.newWorkspaceFolder(_:)), with: nil))
-        #expect(receivedActions == ["copy", "paste", "new-file", "new-folder"])
+        #expect(responder.tryToPerform(#selector(WorkspaceCommandResponder.undo(_:)), with: nil))
+        #expect(responder.tryToPerform(#selector(WorkspaceCommandResponder.redo(_:)), with: nil))
+        #expect(receivedActions == ["copy", "paste", "new-file", "new-folder", "undo", "redo"])
+        #expect(responder.validateUserInterfaceItem(copyItem))
+        #expect(responder.validateUserInterfaceItem(pasteItem))
+        #expect(responder.validateUserInterfaceItem(undoItem))
+        #expect(responder.validateUserInterfaceItem(redoItem))
+    }
+
+    @Test func inactiveWorkspaceResponderReturnsFocusToTheEditor() {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 320, height: 180),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        let rootView = NSView(frame: window.contentView?.bounds ?? .zero)
+        let editor = NSTextView(frame: NSRect(x: 0, y: 0, width: 300, height: 160))
+        let responder = WorkspaceCommandResponder(frame: .zero)
+        rootView.addSubview(editor)
+        rootView.addSubview(responder)
+        window.contentView = rootView
+
+        func configure(isActive: Bool) {
+            responder.configure(
+                isActive: isActive,
+                canCopyItem: true,
+                canPasteItems: { true },
+                canCreateItem: true,
+                canUndo: { true },
+                canRedo: { true },
+                copyItem: {},
+                pasteItems: {},
+                createFile: {},
+                createFolder: {},
+                undo: {},
+                redo: {},
+                restoreEditorFocus: { window.makeFirstResponder(editor) }
+            )
+        }
+
+        configure(isActive: true)
+        window.makeFirstResponder(editor)
+        responder.synchronizeFocus(generation: 1)
+        #expect(window.firstResponder === responder)
+
+        configure(isActive: false)
+        responder.synchronizeFocus(generation: 1)
+        #expect(window.firstResponder === editor)
     }
 
     @Test func pasteCopiesFilesAndFoldersWithUniqueNamesThenRefreshesTheTree() async throws {
@@ -172,6 +449,18 @@ import Testing
             try String(contentsOf: secondPastedFolder.appending(path: "item.txt"), encoding: .utf8) == "nested"
         )
         #expect(Set(workspace.tree.map(\.name)) == Set(["Note.md", "Note 副本.md", "Assets", "Assets 副本"]))
+
+        workspace.undoFileOperation()
+        await workspace.waitForRefresh()
+        #expect(Set(workspace.tree.map(\.name)) == Set(["Note.md", "Assets"]))
+        #expect(FileManager.default.fileExists(atPath: secondPaste[0].path) == false)
+        #expect(FileManager.default.fileExists(atPath: secondPaste[1].path) == false)
+
+        workspace.redoFileOperation()
+        await workspace.waitForRefresh()
+        #expect(Set(workspace.tree.map(\.name)) == Set(["Note.md", "Note 副本.md", "Assets", "Assets 副本"]))
+        #expect(FileManager.default.fileExists(atPath: secondPaste[0].path))
+        #expect(FileManager.default.fileExists(atPath: secondPaste[1].path))
     }
 
     @Test func pasteRejectsCopyingAFolderIntoItself() async throws {
@@ -390,9 +679,13 @@ import Testing
         )
 
         try workspace.openProject(at: firstRoot)
+        _ = try workspace.createItem(.file, named: "First", in: firstRoot)
+        #expect(workspace.canUndoFileOperation)
         try workspace.openProject(at: secondRoot)
 
         #expect(workspace.project?.rootURL == secondRoot.standardizedFileURL)
+        #expect(workspace.canUndoFileOperation == false)
+        #expect(workspace.canRedoFileOperation == false)
         #expect(store.saved.count == 2)
         #expect(try decodedBookmark(store.saved[1]) == secondBookmark)
     }

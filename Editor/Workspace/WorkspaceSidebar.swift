@@ -4,13 +4,14 @@ import SwiftUI
 struct WorkspaceSidebar: View {
     @Bindable var workspace: ProjectWorkspace
     let selectedFileURL: URL?
+    let isPresented: Bool
     let openFile: (URL) -> Void
+    let restoreEditorFocus: () -> Void
 
     @State private var creationRequest: WorkspaceCreationRequest?
     @State private var renamingNode: WorkspaceNode?
     @State private var pasteRequest: PasteRequest?
     @State private var alert: WorkspaceAlert?
-    @State private var focusedNode: WorkspaceNode?
     @State private var shortcutFocusGeneration = 0
     private let clipboard = WorkspaceClipboard()
 
@@ -23,6 +24,12 @@ struct WorkspaceSidebar: View {
                         nodes: workspace.tree,
                         selectedFileURL: selectedFileURL,
                         nodeActions: nodeActions,
+                        canUndoFileOperation: workspace.canUndoFileOperation,
+                        canRedoFileOperation: workspace.canRedoFileOperation,
+                        undoFileOperationTitle: workspace.undoFileOperationTitle,
+                        redoFileOperationTitle: workspace.redoFileOperationTitle,
+                        undoFileOperation: workspace.undoFileOperation,
+                        redoFileOperation: workspace.redoFileOperation,
                         revealInFinder: revealInFinder,
                         refreshProject: workspace.refreshProject,
                         removeProject: workspace.closeProject
@@ -40,23 +47,30 @@ struct WorkspaceSidebar: View {
                         refresh: workspace.refreshProject
                     )
                 }
-                .onTapGesture(perform: requestShortcutFocus)
-                .background {
-                    WorkspaceShortcutResponder(
-                        focusGeneration: shortcutFocusGeneration,
-                        canCopyItem: focusedNode != nil,
-                        copyItem: copyFocusedNode,
-                        pasteItems: pasteIntoProjectRoot,
-                        createFile: createFileInProjectRoot,
-                        createFolder: createFolderInProjectRoot
-                    )
-                    .frame(width: 0, height: 0)
-                    .accessibilityHidden(true)
-                }
                 .museSoftScrollEdges()
             } else {
                 emptyState
             }
+        }
+        .background {
+            WorkspaceShortcutResponder(
+                isActive: isPresented && workspace.project != nil,
+                focusGeneration: shortcutFocusGeneration,
+                canCopyItem: selectedNode != nil,
+                canPasteItems: canPasteItems,
+                canCreateItem: workspace.project != nil,
+                canUndo: { workspace.canUndoFileOperation },
+                canRedo: { workspace.canRedoFileOperation },
+                copyItem: copySelectedNode,
+                pasteItems: pasteIntoProjectRoot,
+                createFile: createFileInProjectRoot,
+                createFolder: createFolderInProjectRoot,
+                undo: workspace.undoFileOperation,
+                redo: workspace.redoFileOperation,
+                restoreEditorFocus: restoreEditorFocus
+            )
+            .frame(width: 0, height: 0)
+            .accessibilityHidden(true)
         }
         .sheet(item: $creationRequest) { request in
             WorkspaceNameSheet(
@@ -121,9 +135,12 @@ struct WorkspaceSidebar: View {
             copyPath: copyPath,
             copyRelativePath: copyRelativePath,
             rename: requestRename,
-            delete: deleteNode,
-            focus: focusNode
+            delete: deleteNode
         )
+    }
+
+    private var selectedNode: WorkspaceNode? {
+        workspace.node(at: selectedFileURL)
     }
 
     private func compactAction(_ title: String, action: @escaping () -> Void) -> some View {
@@ -174,6 +191,8 @@ struct WorkspaceSidebar: View {
             creationRequest = nil
             if request.kind == .file {
                 selectFile(url)
+            } else {
+                requestShortcutFocus()
             }
         } catch {
             alert = WorkspaceAlert(message: error.localizedDescription)
@@ -192,17 +211,20 @@ struct WorkspaceSidebar: View {
         do {
             try workspace.rename(node, to: name)
             renamingNode = nil
+            requestShortcutFocus()
         } catch {
             alert = WorkspaceAlert(message: error.localizedDescription)
         }
     }
 
     private func deleteNode(_ node: WorkspaceNode) {
-        perform { try workspace.moveToTrash(node) }
+        perform {
+            try workspace.moveToTrash(node)
+            requestShortcutFocus()
+        }
     }
 
     private func copyItem(_ node: WorkspaceNode) {
-        focusNode(node)
         perform { try clipboard.copyItem(at: node.url) }
     }
 
@@ -220,7 +242,6 @@ struct WorkspaceSidebar: View {
     }
 
     private func requestPaste(into parentURL: URL) {
-        requestShortcutFocus()
         let sourceURLs = clipboard.fileURLs()
         guard !sourceURLs.isEmpty else {
             alert = WorkspaceAlert(message: WorkspaceOperationError.clipboardContainsNoFiles.localizedDescription)
@@ -229,18 +250,17 @@ struct WorkspaceSidebar: View {
         pasteRequest = PasteRequest(sourceURLs: sourceURLs, parentURL: parentURL)
     }
 
-    private func focusNode(_ node: WorkspaceNode) {
-        focusedNode = node
-        requestShortcutFocus()
-    }
-
     private func requestShortcutFocus() {
         shortcutFocusGeneration &+= 1
     }
 
-    private func copyFocusedNode() {
-        guard let focusedNode else { return }
-        copyItem(focusedNode)
+    private func copySelectedNode() {
+        guard let selectedNode else { return }
+        copyItem(selectedNode)
+    }
+
+    private func canPasteItems() -> Bool {
+        !clipboard.fileURLs().isEmpty
     }
 
     private func pasteIntoProjectRoot() {
@@ -262,6 +282,15 @@ struct WorkspaceSidebar: View {
         guard let request = pasteRequest else { return }
         do {
             try await workspace.pasteItems(request.sourceURLs, into: request.parentURL)
+            guard Self.shouldApplyPasteCompletion(
+                completedRequestID: request.id,
+                currentRequestID: pasteRequest?.id,
+                isCancelled: Task.isCancelled
+            ) else { return }
+            pasteRequest = nil
+            if workspace.project(containing: request.parentURL) != nil {
+                requestShortcutFocus()
+            }
         } catch is CancellationError {
             // SwiftUI 会在侧边栏消失或下一次粘贴开始时取消当前任务。
         } catch {
@@ -275,6 +304,10 @@ struct WorkspaceSidebar: View {
             return
         }
 
+        // A previous rename/delete/paste may have deliberately focused the workspace
+        // responder so ⌘Z targets its file-operation undo stack. File activation returns
+        // command routing to the editor before same-window document navigation begins.
+        restoreEditorFocus()
         openFile(url)
     }
 
@@ -294,5 +327,13 @@ struct WorkspaceSidebar: View {
         let id = UUID()
         let sourceURLs: [URL]
         let parentURL: URL
+    }
+
+    static func shouldApplyPasteCompletion(
+        completedRequestID: UUID,
+        currentRequestID: UUID?,
+        isCancelled: Bool
+    ) -> Bool {
+        !isCancelled && completedRequestID == currentRequestID
     }
 }

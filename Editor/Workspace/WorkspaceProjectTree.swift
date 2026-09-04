@@ -5,6 +5,12 @@ struct WorkspaceProjectTree: View {
     let nodes: [WorkspaceNode]
     let selectedFileURL: URL?
     let nodeActions: WorkspaceNodeActions
+    let canUndoFileOperation: Bool
+    let canRedoFileOperation: Bool
+    let undoFileOperationTitle: String
+    let redoFileOperationTitle: String
+    let undoFileOperation: () -> Void
+    let redoFileOperation: () -> Void
     let revealInFinder: (URL) -> Void
     let refreshProject: () -> Void
     let removeProject: () -> Void
@@ -69,6 +75,14 @@ struct WorkspaceProjectTree: View {
                 systemImage: "folder.badge.plus",
                 action: createFolderInProject
             )
+            WorkspaceProjectHistoryMenu(
+                canUndo: canUndoFileOperation,
+                canRedo: canRedoFileOperation,
+                undoTitle: undoFileOperationTitle,
+                redoTitle: redoFileOperationTitle,
+                undo: undoFileOperation,
+                redo: redoFileOperation
+            )
             WorkspaceProjectActionButton(
                 title: "刷新项目",
                 systemImage: "arrow.clockwise",
@@ -88,6 +102,11 @@ struct WorkspaceProjectTree: View {
 
     @ViewBuilder
     private func projectMenu() -> some View {
+        Button(undoFileOperationTitle, systemImage: "arrow.uturn.backward", action: undoFileOperation)
+            .disabled(!canUndoFileOperation)
+        Button(redoFileOperationTitle, systemImage: "arrow.uturn.forward", action: redoFileOperation)
+            .disabled(!canRedoFileOperation)
+        Divider()
         Button("在访达中显示", systemImage: "finder") {
             revealInFinder(project.rootURL)
         }

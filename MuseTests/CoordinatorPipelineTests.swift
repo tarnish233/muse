@@ -147,6 +147,48 @@ import Testing
         #expect(storage.string == source)
     }
 
+    @Test func mathArtifactsRefreshIndividuallyBeforeSlowestFormulaFinishes() async throws {
+        let suffix = UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        let firstExpression = "a_{\(suffix)}+1"
+        let slowExpression = "z_{\(suffix)}+2"
+        let source = "$\(firstExpression)$ 与 $\(slowExpression)$"
+        let firstRequest = MathRenderer.shared.request(expression: firstExpression, display: false)
+        let slowRequest = MathRenderer.shared.request(expression: slowExpression, display: false)
+        #expect(MathRenderer.shared.cachedArtifact(for: firstRequest) == nil)
+        #expect(MathRenderer.shared.cachedArtifact(for: slowRequest) == nil)
+
+        let gate = MathArtifactCacheGate()
+        MathRenderer.shared.setBeforeCachingArtifactHookForTesting(for: slowRequest) {
+            await gate.enterAndWait()
+        }
+        defer {
+            MathRenderer.shared.setBeforeCachingArtifactHookForTesting(for: slowRequest, hook: nil)
+        }
+
+        let storage = NSTextStorage(string: source)
+        let coordinator = RenderCoordinator()
+        coordinator.attach(storage: storage)
+        coordinator.onTextEdited = {}
+        storage.replaceCharacters(in: NSRange(location: 0, length: storage.length), with: source)
+        #expect(await waitForApplied(coordinator, atLeast: 1))
+        guard await waitForMathCacheGate(gate) else {
+            await gate.open()
+            Issue.record("The slower second formula never reached its cache gate.")
+            return
+        }
+
+        let firstRange = (source as NSString).range(of: "$\(firstExpression)$")
+        let slowRange = (source as NSString).range(of: "$\(slowExpression)$")
+        #expect(storage.attribute(.museMathArtifact, at: firstRange.location, effectiveRange: nil)
+                is MathRenderArtifact)
+        #expect(storage.attribute(.museMathArtifact, at: slowRange.location, effectiveRange: nil) == nil)
+
+        await gate.open()
+        await coordinator.waitForMathPreparationForTesting()
+        #expect(storage.attribute(.museMathArtifact, at: slowRange.location, effectiveRange: nil)
+                is MathRenderArtifact)
+    }
+
     /// WebKit continuation 不响应 Task 取消：连续编辑取消协调器任务后，已经生成的
     /// SVG 仍必须先进入缓存，不能把整次 MathJax 往返白白丢掉。
     @Test func cancelledMathPreparationStillCachesCompletedArtifact() async throws {

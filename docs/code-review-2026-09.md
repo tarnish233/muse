@@ -6,18 +6,6 @@
 
 修复顺序：公式 → 图片/远程资源 → 侧边栏 → 依赖与重复实现。
 
-## 批次一：公式（math）
-
-- [ ] `Parsing/MarkdownSemantics.swift` `MathSyntaxWalker.visitText` —— 探测文档解析的是 `text.string`（cmark **解码后**的字面量），却把探测结果的局部列号直接加到原始源码的字节偏移 `originalRange.lowerBound` 上。同一行公式前面出现任何 `\$` 或 HTML 实体都会让区间整体偏移（`&copy; $x$` 会把 `py;` 当成公式），CJK 场景下偏移还可能落在标量中间、被 `SourceIndex.nsRange` 折成零长区间而静默丢弃。修：照同文件 `appendBlockMath` 已有的做法探测原始 UTF-8 切片（它的注释已经写明这个坑）；注意 `appendBlockMath` 用 `blockMathProbeSource` 把非 `$`/空白字符全替换成 `x` 以避免切片开头被当成块级语法，行内探测需要等价处理。现有 `MarkdownSemanticsTests` 只覆盖了 CJK 与未转义货币符号。
-- [ ] `Rendering/RenderEngine.swift` `applyMathVisibility` 块分支 —— 隐藏块公式把 `.museBlock` 与 `.paragraphStyle` 覆盖到整个首段落（含容器前缀）。token 按 `markerRange.lowerBound` 排序，引用 marker 在字节 0、公式 marker 在字节 2，所以公式覆盖掉引用的 `museBlock`，引用竖线、通宽底色与缩进全部消失；`revealSource()` 又是 `removeAttribute(.museBlock)`，回显态也修不回来。
-- [ ] `Rendering/RenderEngine.swift` `applyMathStyle` —— `.museMathSourceParagraph` 在按 token 顺序的样式循环里快照 `.paragraphStyle`，但表格 token 的 marker 是**分隔行**，排在表头行之后。表头里的公式因此快照到表格样式生效**前**的 base 段落，之后 `revealSource()` → `restoreInlineMathParagraph` 把这份过期样式写回整段，光标一进入公式表格行就压塌。且 `??` 链优先取存储快照，不会自愈。参考 `applyInlineImageVisibility` 从 `.museBlock` + `.museImageSize` 重建而非快照的做法。
-- [ ] `Rendering/BlockLayoutFragment.swift` `drawInlineMathVisuals` / `inlineMathFrames(at:)` —— 基线只用 `line.glyphOrigin.y`，漏加该行的 `line.typographicBounds.minY`；两者都是行片段相对坐标，缺一项则段落软换行后的公式被画在**首个视觉行**的基线上，而第二行预留的 kern 空隙留白。`inlineMathFrames` 同样漏，导致 `renderingSurfaceBounds` 并错矩形、正确区域反而被裁。x 方向同理漏 `typographicBounds.minX`（缩进段落）。同文件 `drawTableRow`、`tableSelectionRects` 都正确加了。现有测试只比同一行内的 x 差值，CI 看不到。
-- [ ] `Rendering/MathRenderer.swift` `invalidExpressions` —— 无界、永不裁剪、跨文档的进程级 `Set<String>`，键是公式全文；在公式里每敲一个键就留下一个永久字符串。且 `invalidBridgeResponse` / `invalidSVG` 也涵盖非确定性故障（bridge 应答残缺、`getBoundingClientRect` 返回 0、SVG 解码抖动），一次瞬时故障就把有效公式永久拉黑，连 `resetWebView` 都不清。
-- [ ] `Rendering/RenderEngine.swift` `applyMathVisibility` 行内分支 —— 用大 `.kern` 摊在近零宽源码字符上预留宽度，而 CLAUDE.md 已记录「系统选区几何会重复计入 `.kern`」。表格靠 `museTableSelection` + fragment 自绘选区 + 系统选区背景设 clear 解决，公式没有对应补偿（`setUsesCustomTableSelection` 只为表格开启），拖选会高亮出约一个公式宽度的多余蓝条。另：含空格的公式（`$a + b$`）保留内部断行机会，可能被 TextKit 跨行拆开。
-- [ ] `Rendering/BlockLayoutFragment.swift` `drawBlockMath` —— `MathRenderRequest` 只按 (display, fontSize, expression) 做键，不含文本容器宽度；容器变窄时 `drawBlockMath` 夹住宽度却保留全高，`image.draw(in:)` 把公式非等比压扁（640pt 产物在 400pt 容器里压到 62% 宽、100% 高），且没有 resize 重渲染钩子，不会自愈。修：绘制时按 `availableWidth` 推等比缩放，或把容器宽度纳入缓存键。
-- [ ] 公式渲染是「全有或全无」：`scheduleMathPreparation` 串行 await 每个公式，只在最后一个完成后才置 `needsMathRefresh`。20 个公式的文档会一直显示裸源码直到最慢那个完成，任一个撞上 10s `renderTimeoutTasks` 超时就整页卡住。同一提交里图片路径已明确修好这点（「每张图片准备完成就立即重排」），公式没跟上。
-- [ ] 公式路径破了四处已记录的性能规则：① `RenderEngine.refreshMathArtifacts` 为挑出 math 条目做整篇 `tokens.filter` **且**整篇 `computedVisibility`，而它从 `textViewDidChangeSelection` 可达；② `applyMathStyle` / `applyMathVisibility` / `restoreInlineMathParagraph` 每次显隐翻转做 3 + 2N 次 `storage.attribute` 读（~56µs/次）；③ `scheduleMathPreparation` 每次击键在主 actor 上跑整篇 `compactMap` → `Set` → `sorted`，且在 `statusText` 计时窗口之外，读数看不见；④ `renderingSurfaceBounds` 先 `enumerateAttribute` 整个 fragment 再 `guard blockKind != nil` 早退，无公式文档每个滚动帧都要付。
-
 ## 批次二：图片与远程资源
 
 - [ ] `Rendering/ImageResolver.swift` 远程下载 —— 20MB 上限从**逐字节流式硬限**退化成**下载完成后**的文件尺寸检查。`Transfer-Encoding: chunked`（`expectedContentLength == -1`）时服务端可以先把任意体积写满磁盘才被拒；`scheduleBlockImagePreparation` 在解析时自动入队，打开文档即触发，无需用户手势，且并发 4 路。被删掉的 `RemoteDataAccumulator` 注释原文就写了「不能改成下载完再检查」。

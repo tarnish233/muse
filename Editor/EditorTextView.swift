@@ -319,10 +319,10 @@ final class EditorTextView: NSTextView, NSMenuDelegate {
     private var hasPublishedViewportLocation = false
     private var lastPublishedViewportLocation: Int?
     private var pendingTypewriterPositionTask: Task<Void, Never>?
-    /// 非表格选区的系统默认属性。表格选区由 MuseLayoutFragment 按真实字形位置画，
-    /// 这里只把 TextKit 那个会受 kern 干扰的背景关掉。
+    /// 系统默认选区属性。表格与含隐藏行内公式的段落由 MuseLayoutFragment 按
+    /// 真实字形位置画背景；这里只把 TextKit 那个会重复计算 kern 的背景关掉。
     private var standardSelectedTextAttributes: [NSAttributedString.Key: Any]?
-    private var usesCustomTableSelection = false
+    private var usesCustomSelection = false
     private struct ActiveTableDrag {
         let tableID: Int
         let axis: TableDragHandleGeometry.Axis
@@ -442,9 +442,9 @@ final class EditorTextView: NSTextView, NSMenuDelegate {
         return textView
     }
 
-    func setUsesCustomTableSelection(_ enabled: Bool) {
-        guard enabled != usesCustomTableSelection else { return }
-        usesCustomTableSelection = enabled
+    func setUsesCustomSelection(_ enabled: Bool) {
+        guard enabled != usesCustomSelection else { return }
+        usesCustomSelection = enabled
         if enabled {
             if standardSelectedTextAttributes == nil {
                 standardSelectedTextAttributes = selectedTextAttributes

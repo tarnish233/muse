@@ -20,13 +20,45 @@ public nonisolated final class MathRenderArtifact: NSObject, @unchecked Sendable
 }
 
 /// 一个可缓存的 MathJax 排版请求。表达式保持用户源码原样，不做命令别名改写。
-struct MathRenderRequest: Hashable, Sendable {
+nonisolated struct MathRenderRequest: Hashable, Sendable {
     let expression: String
     let display: Bool
     let fontSize: CGFloat
 
+    init(expression: String, display: Bool) {
+        self.expression = expression
+        self.display = display
+        fontSize = display ? Theme.blockMathFontSize : Theme.inlineMathFontSize
+    }
+
     var cacheKey: NSString {
         NSString(format: "%d|%.2f|%@", display ? 1 : 0, fontSize, expression)
+    }
+}
+
+/// 有界的确定性失败缓存。容量很小，线性 FIFO 驱逐比维护另一套链表更简单；
+/// `Set` 仍让热路径查询保持 O(1)。
+struct BoundedInvalidExpressionCache {
+    let capacity: Int
+    private var keys = Set<String>()
+    private var insertionOrder: [String] = []
+
+    init(capacity: Int) {
+        self.capacity = max(0, capacity)
+    }
+
+    var count: Int { keys.count }
+
+    func contains(_ key: String) -> Bool {
+        keys.contains(key)
+    }
+
+    mutating func insert(_ key: String) {
+        guard capacity > 0, keys.insert(key).inserted else { return }
+        insertionOrder.append(key)
+        if insertionOrder.count > capacity {
+            keys.remove(insertionOrder.removeFirst())
+        }
     }
 }
 
@@ -48,6 +80,7 @@ final class MathRenderer: NSObject, WKNavigationDelegate, WKScriptMessageHandler
     private enum RendererError: Error {
         case missingResources
         case navigationFailed
+        case invalidExpression
         case invalidBridgeResponse
         case invalidSVG
         case javascriptFailed(String)
@@ -56,7 +89,10 @@ final class MathRenderer: NSObject, WKNavigationDelegate, WKScriptMessageHandler
     private let cache = NSCache<NSString, MathRenderArtifact>()
     /// 每次真正写入新缓存产物时递增。协调器用它区分“缓存可用”与“当前 storage 已消费”。
     private(set) var artifactGeneration: UInt64 = 0
-    private var invalidExpressions = Set<String>()
+    /// 只缓存 MathJax 明确返回的确定性 TeX 错误。桥接残缺、零尺寸和 SVG 解码失败
+    /// 都可能来自 WebContent 瞬时故障，不能负缓存。FIFO 上限也避免编辑过程中每个
+    /// 未完成表达式永久占一份进程级字符串。
+    private var invalidExpressions = BoundedInvalidExpressionCache(capacity: 128)
     private var beforeCachingArtifactHooksForTesting: [
         MathRenderRequest: @Sendable () async -> Void
     ] = [:]
@@ -77,11 +113,7 @@ final class MathRenderer: NSObject, WKNavigationDelegate, WKScriptMessageHandler
     }
 
     func request(expression: String, display: Bool) -> MathRenderRequest {
-        MathRenderRequest(
-            expression: expression,
-            display: display,
-            fontSize: display ? Theme.blockMathFontSize : Theme.inlineMathFontSize
-        )
+        MathRenderRequest(expression: expression, display: display)
     }
 
     func cachedArtifact(for request: MathRenderRequest) -> MathRenderArtifact? {
@@ -121,10 +153,7 @@ final class MathRenderer: NSObject, WKNavigationDelegate, WKScriptMessageHandler
             return cachedArtifact(for: request) != nil
         } catch is CancellationError {
             return cachedArtifact(for: request) != nil
-        } catch RendererError.invalidBridgeResponse {
-            invalidExpressions.insert(invalidKey)
-            return false
-        } catch RendererError.invalidSVG {
+        } catch RendererError.invalidExpression {
             invalidExpressions.insert(invalidKey)
             return false
         } catch {
@@ -246,8 +275,11 @@ final class MathRenderer: NSObject, WKNavigationDelegate, WKScriptMessageHandler
             }
         }
         let result = payload.values
-        guard result["error"] == nil,
-              let svg = result["svg"] as? String,
+        if let error = result["error"] as? String {
+            if error == "invalid-tex" { throw RendererError.invalidExpression }
+            throw RendererError.invalidBridgeResponse
+        }
+        guard let svg = result["svg"] as? String,
               let width = Self.number(result["width"]),
               let height = Self.number(result["height"]),
               let verticalAlign = Self.number(result["verticalAlign"]),

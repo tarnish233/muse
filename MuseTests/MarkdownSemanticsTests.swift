@@ -112,6 +112,29 @@ import Testing
         #expect(token.markerVisibilityRanges == [token.sourceRange])
     }
 
+    @Test func inlineMathKeepsOriginalUTF8RangeAfterEntityAndEscape() throws {
+        let source = #"甲 &copy; 价格 \$5，公式 $x+1$ 乙"#
+        let bytes = Array(source.utf8)
+        let formulas = engine.prepare(source).tokens.filter { $0.kind == .inlineMath }
+        let token = try #require(formulas.first)
+        let expected = try #require(source.range(of: "$x+1$"))
+        let expectedLowerIndex = try #require(expected.lowerBound.samePosition(in: source.utf8))
+        let expectedUpperIndex = try #require(expected.upperBound.samePosition(in: source.utf8))
+        let expectedLower = source.utf8.distance(
+            from: source.utf8.startIndex,
+            to: expectedLowerIndex
+        )
+        let expectedUpper = source.utf8.distance(
+            from: source.utf8.startIndex,
+            to: expectedUpperIndex
+        )
+
+        #expect(formulas.count == 1)
+        #expect(token.sourceRange == expectedLower..<expectedUpper)
+        #expect(String(decoding: bytes[token.sourceRange], as: UTF8.self) == "$x+1$")
+        #expect(token.mathExpression == "x+1")
+    }
+
     @Test func multilineBlockMathCarriesASTExpressionAndLineSpan() throws {
         let source = "$$\n\\frac{a}{b}\n$$"
         let token = try #require(engine.prepare(source).tokens.first {

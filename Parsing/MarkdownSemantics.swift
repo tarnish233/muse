@@ -351,14 +351,21 @@ public nonisolated struct MarkdownSemantics: Sendable {
         }
 
         mutating func visitText(_ text: Text) {
-            guard text.string.utf8.contains(0x24),
-                  let originalRange = byteRange(text),
+            guard let originalRange = byteRange(text),
+                  originalRange.lowerBound >= 0,
+                  originalRange.upperBound <= bytes.count,
+                  bytes[originalRange].contains(0x24),
                   let sourceRange = text.range,
                   sourceRange.lowerBound.line == sourceRange.upperBound.line
             else { return }
 
+            // `Text.string` 已经被 cmark 解码：实体会缩短，反斜杠转义也会被消费。
+            // 数学 AST 的列号若从那份字符串取得，就不能再直接加到原始 UTF-8 偏移。
+            // 改为探测原始切片，并逐字节把普通正文替换成 ASCII `x`：既屏蔽切片
+            // 开头的 Markdown 块/行内语法，又严格保留 CJK、实体与转义前后的字节列。
+            let probeSource = inlineMathProbeSource(originalRange)
             let probe = Document(
-                parsing: text.string,
+                parsing: probeSource,
                 options: [.disableSmartOpts, .parseMath]
             )
             var collector = InlineMathProbe()
@@ -379,13 +386,38 @@ public nonisolated struct MarkdownSemantics: Sendable {
                 else { continue }
                 math.append(MathSyntax(
                     kind: .inline,
-                    expression: node.code,
+                    expression: String(decoding: bytes[(lower + 1)..<(upper - 1)], as: UTF8.self),
                     openMarker: lower..<(lower + 1),
                     closeMarker: (upper - 1)..<upper,
                     content: (lower + 1)..<(upper - 1),
                     line: line
                 ))
             }
+        }
+
+        /// 行内公式探测必须保留原始 UTF-8 列。按 Unicode 字符替换会把一个 CJK
+        /// 标量从 3 字节压成 1 字节，仍然会重现错位；因此直接逐字节替换。Text 的
+        /// AST range 可能从已消费转义后的 `$` 才开始，故还要回看全局原始字节，
+        /// 把奇数个反斜杠转义的 dollar 一并屏蔽。
+        private func inlineMathProbeSource(_ range: Range<Int>) -> String {
+            var probe = Array(bytes[range])
+            for localIndex in probe.indices {
+                let byte = probe[localIndex]
+                if byte == 0x24 {
+                    let globalIndex = range.lowerBound + localIndex
+                    var slashCount = 0
+                    var cursor = globalIndex
+                    while cursor > 0, bytes[cursor - 1] == 0x5C {
+                        slashCount += 1
+                        cursor -= 1
+                    }
+                    if slashCount.isMultiple(of: 2) { continue }
+                } else if byte == 0x20 || byte == 0x09 || byte == 0x0A || byte == 0x0D {
+                    continue
+                }
+                probe[localIndex] = 0x78
+            }
+            return String(decoding: probe, as: UTF8.self)
         }
 
         /// 返回 true 表示 Paragraph 已由数学 AST 确认为块公式，不再扫描其中的行内节点。

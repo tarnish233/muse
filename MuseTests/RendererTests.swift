@@ -16,19 +16,13 @@ import Testing
     }
 
     private func prepareMath(in package: RenderEngine.Package) async {
-        for token in package.tokens {
-            guard let expression = token.mathExpression else { continue }
-            let display: Bool
-            switch token.kind {
-            case .blockMath:
-                display = true
-            case .inlineMath:
-                display = false
-            default:
-                continue
+        for request in package.mathRequests {
+            // 完整套件会并行施压同一个 WKWebView；WebContent 瞬时重启属于生产代码
+            // 明确定义的可恢复故障，不能让几何回归测试把一次可重试失败当成公式无效。
+            for _ in 0..<3 {
+                if await MathRenderer.shared.prepare(request) { break }
+                await Task.yield()
             }
-            let request = MathRenderer.shared.request(expression: expression, display: display)
-            _ = await MathRenderer.shared.prepare(request)
         }
     }
 
@@ -301,6 +295,155 @@ import Testing
         #expect(storage.string == source)
     }
 
+    @Test func blockMathInsideQuotePreservesQuoteDecorationAndParagraph() async throws {
+        let source = "> $$\n> x^2 + y^2\n> $$\n\n正文"
+        let storage = NSTextStorage(string: source)
+        let textView = EditorTextView.make(textStorage: storage)
+        textView.frame = NSRect(x: 0, y: 0, width: 560, height: 260)
+        textView.textContainer?.containerSize = NSSize(
+            width: 560,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        let package = engine.prepare(source)
+        await prepareMath(in: package)
+        _ = engine.render(package: package, selection: nil, into: storage)
+
+        let marker = (source as NSString).range(of: "$$")
+        #expect(storage.attribute(.museBlock, at: 0, effectiveRange: nil) as? String
+                == BlockVisual.quote.rawValue)
+        #expect(storage.attribute(.museBlock, at: marker.location, effectiveRange: nil) as? String
+                == BlockVisual.math.rawValue)
+        let hiddenParagraph = try #require(
+            storage.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle
+        )
+        #expect(hiddenParagraph.firstLineHeadIndent == theme.quoteParagraph().firstLineHeadIndent)
+        let fragment = try #require(customFragments(in: textView).first {
+            $0.blockKind == BlockVisual.quote.rawValue && $0.mathArtifact != nil
+        })
+        #expect(fragment.mathArtifact != nil)
+
+        _ = engine.render(
+            package: package,
+            selection: NSRange(location: marker.upperBound + 2, length: 0),
+            into: storage
+        )
+        let revealedParagraph = try #require(
+            storage.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle
+        )
+        #expect(storage.attribute(.museBlock, at: 0, effectiveRange: nil) as? String
+                == BlockVisual.quote.rawValue)
+        #expect(storage.attribute(.museBlock, at: marker.location, effectiveRange: nil) == nil)
+        #expect(revealedParagraph.firstLineHeadIndent == theme.quoteParagraph().firstLineHeadIndent)
+    }
+
+    @Test func inlineMathInTableHeaderRestoresCurrentTableParagraph() async throws {
+        let source = "| $x+1$ | value |\n|---|---|\n| 1 | 2 |"
+        let storage = NSTextStorage(string: source)
+        let package = engine.prepare(source)
+        await prepareMath(in: package)
+        let formula = (source as NSString).range(of: "$x+1$")
+
+        _ = engine.render(package: package, selection: nil, into: storage)
+        _ = engine.render(
+            package: package,
+            selection: NSRange(location: formula.location + 2, length: 0),
+            into: storage
+        )
+
+        let restored = try #require(
+            storage.attribute(.paragraphStyle, at: formula.location, effectiveRange: nil)
+                as? NSParagraphStyle
+        )
+        let expected = theme.tableParagraph(isLast: false)
+        #expect(restored.lineBreakMode == .byClipping)
+        #expect(abs(restored.minimumLineHeight - expected.minimumLineHeight) < 0.01)
+        #expect(abs(restored.paragraphSpacing - expected.paragraphSpacing) < 0.01)
+    }
+
+    @Test func wrappedIndentedInlineMathUsesItsActualVisualLineOriginAndDoesNotSplit() async throws {
+        let source = "> 这是一个足够长的引用前缀，用来把后面的公式推到下一条视觉行 $a + b + c + d$ 结尾"
+        let storage = NSTextStorage(string: source)
+        let textView = EditorTextView.make(textStorage: storage)
+        textView.frame = NSRect(x: 0, y: 0, width: 220, height: 260)
+        textView.textContainer?.containerSize = NSSize(
+            width: 160,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        let package = engine.prepare(source)
+        await prepareMath(in: package)
+        _ = engine.render(package: package, selection: nil, into: storage)
+
+        let fragment = try #require(customFragments(in: textView).first {
+            !$0.inlineMathFrames(at: .zero).isEmpty
+        })
+        let paragraph = try #require(fragment.textElement as? NSTextParagraph)
+        let attributed = paragraph.attributedString
+        let localMarker = (attributed.string as NSString).range(of: "$a + b")
+        var formulaRange = NSRange(location: NSNotFound, length: 0)
+        let artifact = try #require(attributed.attribute(
+            .museMathArtifact,
+            at: localMarker.location,
+            effectiveRange: &formulaRange
+        ) as? MathRenderArtifact)
+        let formulaLine = try #require(fragment.textLineFragments.first { line in
+            formulaRange.location >= line.characterRange.location
+                && formulaRange.upperBound <= line.characterRange.upperBound
+        })
+        let firstLine = try #require(fragment.textLineFragments.first)
+        let frame = try #require(fragment.inlineMathFrames(at: .zero).first)
+        let expectedX = formulaLine.typographicBounds.minX
+            + formulaLine.locationForCharacter(at: formulaRange.location).x
+        let expectedY = formulaLine.typographicBounds.minY
+            + formulaLine.glyphOrigin.y - artifact.ascent
+
+        #expect(formulaLine !== firstLine)
+        #expect(formulaLine.typographicBounds.minY > firstLine.typographicBounds.minY)
+        #expect(abs(frame.minX - expectedX) < 0.01)
+        #expect(abs(frame.minY - expectedY) < 0.01)
+        #expect(formulaRange.upperBound <= formulaLine.characterRange.upperBound)
+    }
+
+    @Test func blockMathFittingPreservesAspectRatioInNarrowContainer() {
+        let original = CGSize(width: 640, height: 120)
+        let fitted = MuseLayoutFragment.fittedMathSize(original, maximumWidth: 400)
+
+        #expect(abs(fitted.width - 400) < 0.01)
+        #expect(abs(fitted.height - 75) < 0.01)
+        #expect(abs(fitted.width / fitted.height - original.width / original.height) < 0.0001)
+    }
+
+    @Test func inlineMathSelectionUsesRealLineLocationsInsteadOfSystemKernGeometry() async throws {
+        let source = "前文 $x^2$ 需要选中的后文"
+        let storage = NSTextStorage(string: source)
+        let textView = EditorTextView.make(textStorage: storage)
+        textView.frame = NSRect(x: 0, y: 0, width: 560, height: 160)
+        textView.textContainer?.containerSize = NSSize(
+            width: 560,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        let package = engine.prepare(source)
+        await prepareMath(in: package)
+        _ = engine.render(package: package, selection: nil, into: storage)
+        let selection = (source as NSString).range(of: "需要选中的后文")
+        storage.addAttribute(.museTextSelection, value: true, range: selection)
+
+        let fragment = try #require(customFragments(in: textView).first {
+            !$0.textSelectionRects(at: .zero).isEmpty
+        })
+        let paragraph = try #require(fragment.textElement as? NSTextParagraph)
+        let localSelection = (paragraph.attributedString.string as NSString).range(of: "需要选中的后文")
+        let line = try #require(fragment.textLineFragments.first { line in
+            localSelection.location >= line.characterRange.location
+                && localSelection.upperBound <= line.characterRange.upperBound
+        })
+        let rect = try #require(fragment.textSelectionRects(at: .zero).first)
+        let start = line.locationForCharacter(at: localSelection.location).x
+        let end = line.locationForCharacter(at: localSelection.upperBound).x
+
+        #expect(abs(rect.minX - (line.typographicBounds.minX + min(start, end))) < 0.01)
+        #expect(abs(rect.width - abs(end - start)) < 0.01)
+    }
+
     @Test func invalidInlineMathKeepsEditableSourceVisible() async {
         let source = #"正文 $\notARealCommand{x}$ 结尾"#
         let storage = NSTextStorage(string: source)
@@ -318,6 +461,33 @@ import Testing
         #expect(!isHidden(formula.location, in: storage))
         #expect(storage.attribute(.kern, at: formula.location, effectiveRange: nil) == nil)
         #expect(storage.string == source)
+    }
+
+    @Test func invalidMathCacheIsBoundedAndEvictsOldestExpression() {
+        var cache = BoundedInvalidExpressionCache(capacity: 3)
+        cache.insert("a")
+        cache.insert("b")
+        cache.insert("c")
+        cache.insert("d")
+
+        #expect(cache.count == 3)
+        #expect(!cache.contains("a"))
+        #expect(cache.contains("b"))
+        #expect(cache.contains("c"))
+        #expect(cache.contains("d"))
+    }
+
+    @Test func packagePrecomputesAndDeduplicatesMathRequests() {
+        let source = "$x$ 与 $x$\n\n$$\ny\n$$"
+        let package = engine.prepare(source)
+
+        #expect(package.mathTokenIndices.count == 3)
+        #expect(package.mathTokenIndices.map { package.tokens[$0].mathExpression }
+            == ["x", "x", "y"])
+        #expect(package.mathRequests == [
+            MathRenderRequest(expression: "y", display: true),
+            MathRenderRequest(expression: "x", display: false),
+        ])
     }
 
     @Test func blockMathUsesOneTextKit2FragmentAndDrawsCachedFormula() async throws {

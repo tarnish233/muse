@@ -99,7 +99,7 @@ struct EditorView: NSViewRepresentable {
             textView.copiesWholeLineWhenSelectionIsEmpty = copyWholeLineWhenSelectionIsEmpty
             textView.setTypewriterMode(typewriterMode)
             document.renderer.setRevealsCurrentBlockSource(revealCurrentBlockMarkdown)
-            context.coordinator.updateTableSelection(in: textView)
+            context.coordinator.updateCustomSelection(in: textView)
         }
     }
 
@@ -109,7 +109,8 @@ struct EditorView: NSViewRepresentable {
 
     final class Coordinator: NSObject, NSTextViewDelegate {
         private weak var document: MuseDocument?
-        private var tableSelectionRange: NSRange?
+        private var customSelectionRange: NSRange?
+        private var customSelectionAttribute: NSAttributedString.Key?
 
         init(document: MuseDocument) {
             self.document = document
@@ -120,54 +121,75 @@ struct EditorView: NSViewRepresentable {
             guard let textView = notification.object as? NSTextView else { return }
             guard !textView.hasMarkedText() else { return } // 组合输入期间不做显隐更新
             document.renderer.refreshPresentationMode()
-            if let editor = textView as? EditorTextView {
-                updateTableSelection(in: editor)
-            }
             document.renderer.updateMarkerVisibility(
                 selection: textView.selectedRange(),
                 into: document.buffer.textStorage
             )
             if let editor = textView as? EditorTextView {
+                updateCustomSelection(in: editor)
                 editor.scheduleTypewriterCaretPosition()
             }
         }
 
-        /// TextKit 2 的系统选区会对隐藏结构字符上的 kern 再位移一次。表格内改为在
-        /// 布局 fragment 里按实际字形坐标绘制；离开表格后立即恢复系统选区。
-        func updateTableSelection(in textView: EditorTextView) {
+        /// TextKit 2 的系统选区会把表格对齐 kern、行内公式预留 kern 重复计入。
+        /// 表格继续使用专用网格几何；普通段落只要选区覆盖的段落里仍有隐藏公式，
+        /// 就由 fragment 按真实 line fragment 落点绘制整段选区。
+        func updateCustomSelection(in textView: EditorTextView) {
             guard let document else { return }
             let storage = document.buffer.textStorage
             let selection = textView.selectedRange()
-            let oldRange = tableSelectionRange
-            var isTableSelection = document.renderer.presentationMode == .rendered
-                && selection.length > 0
-            if isTableSelection {
+            var attribute: NSAttributedString.Key?
+
+            if document.renderer.presentationMode == .rendered, selection.length > 0 {
+                var isTableSelection = true
                 storage.enumerateAttribute(.museBlock, in: selection, options: []) { value, _, stop in
                     if value as? String != BlockVisual.table.rawValue {
                         isTableSelection = false
                         stop.pointee = true
                     }
                 }
+                if isTableSelection {
+                    attribute = .museTableSelection
+                } else {
+                    let paragraphs = (storage.string as NSString).paragraphRange(for: selection)
+                    var containsHiddenInlineMath = false
+                    storage.enumerateAttribute(
+                        .museInlineMathNoBreak,
+                        in: paragraphs,
+                        options: []
+                    ) { value, _, stop in
+                        if value != nil {
+                            containsHiddenInlineMath = true
+                            stop.pointee = true
+                        }
+                    }
+                    if containsHiddenInlineMath {
+                        attribute = .museTextSelection
+                    }
+                }
             }
-            let newRange = isTableSelection ? selection : nil
-            guard oldRange != newRange else {
-                textView.setUsesCustomTableSelection(isTableSelection)
+
+            let newRange = attribute == nil ? nil : selection
+            guard customSelectionRange != newRange || customSelectionAttribute != attribute else {
+                textView.setUsesCustomSelection(attribute != nil)
                 return
             }
 
             let undoManager = textView.undoManager
             undoManager?.disableUndoRegistration()
-            if let oldRange,
+            if let oldRange = customSelectionRange,
+               let oldAttribute = customSelectionAttribute,
                oldRange.location >= 0,
-               oldRange.location + oldRange.length <= storage.length {
-                storage.removeAttribute(.museTableSelection, range: oldRange)
+               oldRange.upperBound <= storage.length {
+                storage.removeAttribute(oldAttribute, range: oldRange)
             }
-            if let newRange {
-                storage.addAttribute(.museTableSelection, value: true, range: newRange)
+            if let newRange, let attribute {
+                storage.addAttribute(attribute, value: true, range: newRange)
             }
             undoManager?.enableUndoRegistration()
-            tableSelectionRange = newRange
-            textView.setUsesCustomTableSelection(isTableSelection)
+            customSelectionRange = newRange
+            customSelectionAttribute = attribute
+            textView.setUsesCustomSelection(attribute != nil)
             textView.needsDisplay = true
         }
 

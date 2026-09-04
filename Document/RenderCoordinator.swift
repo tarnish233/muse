@@ -491,22 +491,9 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
             return
         }
 
-        let requests = Set(package.tokens.compactMap { token -> MathRenderRequest? in
-            guard let expression = token.mathExpression else { return nil }
-            let display: Bool
-            switch token.kind {
-            case .blockMath:
-                display = true
-            case .inlineMath:
-                display = false
-            default:
-                return nil
-            }
-            return MathRenderer.shared.request(expression: expression, display: display)
-        }).sorted {
-            if $0.display != $1.display { return $0.display && !$1.display }
-            return $0.expression < $1.expression
-        }
+        // 去重与排序已经随 AST package 在后台完成。这里从输入热路径可达，不能在
+        // MainActor 上再扫描整篇 token。
+        let requests = package.mathRequests
         guard !requests.isEmpty else {
             mathPreparationTask = nil
             return
@@ -523,8 +510,10 @@ public final class RenderCoordinator: NSObject, ObservableObject, NSTextStorageD
                    self.appliedMathArtifactGeneration != MathRenderer.shared.artifactGeneration {
                     // 产物可用与发起它的 revision 无关。即使该任务刚在 WebKit await 期间
                     // 被新输入取消，也要保留“缓存尚未写入 storage”的事实，交给最新
-                    // package 在安全窗口消费。
+                    // package 在安全窗口消费。每个公式完成就立即刷新，不能让后面的慢
+                    // 请求（最长 10 秒）把本页已经完成的公式一起扣住。
                     self.needsMathRefresh = true
+                    self.applyMathRefreshIfPossible()
                 }
             }
             guard !Task.isCancelled,

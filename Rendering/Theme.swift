@@ -99,6 +99,8 @@ extension NSAttributedString.Key {
     /// 几何，导致蓝色选框漂到表格右侧；布局 fragment 用这个属性在真实字形位置
     /// 绘制选区。它只是一项可丢弃的呈现属性，不进入 Markdown 与撤销栈。
     public nonisolated static let museTableSelection = NSAttributedString.Key("museTableSelection")
+    /// 普通文本选区在含大 kern 的行内公式段落里由 fragment 按实际字形落点绘制。
+    public nonisolated static let museTextSelection = NSAttributedString.Key("museTextSelection")
     /// 拖拽期间的纯呈现属性；不进入 Markdown，也不进入撤销栈。
     public nonisolated static let museTableDragAxis = NSAttributedString.Key("museTableDragAxis")
     public nonisolated static let museTableDragSource = NSAttributedString.Key("museTableDragSource")
@@ -124,12 +126,22 @@ extension NSAttributedString.Key {
     /// 图片语法的目的地字符串（渲染引擎写入整个 `![标签](目的地)` 区间），
     /// 点击预览据此解析图片，不重新解析源码。
     public nonisolated static let museImageDestination = NSAttributedString.Key("museImageDestination")
+    /// 标题级别，供公式显隐时从语义属性重建段落样式。
+    public nonisolated static let museHeadingLevel = NSAttributedString.Key("museHeadingLevel")
     /// MathJax 在异步准备阶段生成的不可变 SVG 公式绘制产物。
     public nonisolated static let museMathArtifact = NSAttributedString.Key("museMathArtifact")
     /// NSNumber(Bool)：true 为块公式，false 为行内公式。
     public nonisolated static let museMathDisplay = NSAttributedString.Key("museMathDisplay")
-    /// 公式隐藏前的段落样式，回显源码时恢复，避免破坏标题/引用等外层语义。
-    public nonisolated static let museMathSourceParagraph = NSAttributedString.Key("museMathSourceParagraph")
+    /// 块公式开分隔符的唯一绘制锚点；容器前缀仍可保留自己的 `.museBlock`。
+    public nonisolated static let museBlockMathAnchor = NSAttributedString.Key("museBlockMathAnchor")
+    /// 首段落内存在块公式锚点；避免普通 fragment 为寻找锚点而枚举整段。
+    public nonisolated static let museBlockMathParagraph = NSAttributedString.Key("museBlockMathParagraph")
+    /// 段落内存在可绘制行内公式。fragment 先 O(1) 读这个标记，再决定是否枚举。
+    public nonisolated static let museInlineMathParagraph = NSAttributedString.Key("museInlineMathParagraph")
+    /// 隐藏态行内公式的禁止断行区间，由 TextKit 2 delegate 消费。
+    public nonisolated static let museInlineMathNoBreak = NSAttributedString.Key("museInlineMathNoBreak")
+    /// 隐藏态行内公式实际需要的行高；段落恢复只枚举这一项，不做嵌套属性查询。
+    public nonisolated static let museInlineMathReservedHeight = NSAttributedString.Key("museInlineMathReservedHeight")
 }
 
 /// 主题：字体与配色。亮/暗跟随系统外观（动态 NSColor）。
@@ -407,8 +419,12 @@ public nonisolated struct Theme: @unchecked Sendable {
 
     /// 块公式的独占行盒。源码多行中的后续段落另用 `collapsedMathParagraph` 折叠，
     /// 只有开分隔符所在 fragment 获得这一高度并绘制一次公式。
-    public func mathParagraph(height: CGFloat) -> NSMutableParagraphStyle {
-        let p = NSMutableParagraphStyle()
+    public func mathParagraph(
+        height: CGFloat,
+        preserving sourceParagraph: NSParagraphStyle? = nil
+    ) -> NSMutableParagraphStyle {
+        let p = sourceParagraph?.mutableCopy() as? NSMutableParagraphStyle
+            ?? NSMutableParagraphStyle()
         let font = baseFont()
         let reserved = max(
             height + Theme.mathPaddingVertical * 2,
@@ -417,8 +433,8 @@ public nonisolated struct Theme: @unchecked Sendable {
         p.minimumLineHeight = reserved
         p.maximumLineHeight = reserved
         p.lineHeightMultiple = 1
-        p.paragraphSpacing = 8
-        p.paragraphSpacingBefore = 8
+        p.paragraphSpacing = max(p.paragraphSpacing, 8)
+        p.paragraphSpacingBefore = max(p.paragraphSpacingBefore, 8)
         p.lineBreakMode = .byClipping
         return p
     }
